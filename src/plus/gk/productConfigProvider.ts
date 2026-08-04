@@ -1,18 +1,22 @@
-import type { GlCommands } from '../../constants.commands';
-import { SubscriptionState } from '../../constants.subscription';
-import type { Container } from '../../container';
-import { deviceCohortGroup } from '../../system/-webview/vscode';
-import type { Lazy } from '../../system/lazy';
-import { lazy } from '../../system/lazy';
-import { getLoggableName, Logger } from '../../system/logger';
-import { startLogScope } from '../../system/logger.scope';
-import type { Validator } from '../../system/validation';
-import { createValidator, Is } from '../../system/validation';
-import type { Promo, PromoLocation, PromoPlans } from './models/promo';
-import type { ServerConnection } from './serverConnection';
+import type { Lazy } from '@gitlens/utils/lazy.js';
+import { lazy } from '@gitlens/utils/lazy.js';
+import { getLoggableName } from '@gitlens/utils/logger.js';
+import { maybeStartScopedLogger } from '@gitlens/utils/logger.scoped.js';
+import type { Validator } from '@gitlens/utils/validation.js';
+import { createValidator, Is } from '@gitlens/utils/validation.js';
+import type { GlExtensionCommands } from '../../constants.commands.js';
+import { SubscriptionState } from '../../constants.subscription.js';
+import type { Container } from '../../container.js';
+import { deviceCohortGroup } from '../../system/-webview/vscode.js';
+import type { Promo, PromoLocation, PromoPlans } from './models/promo.js';
+import type { ServerConnection } from './serverConnection.js';
 
 type Config = {
 	promos: Promo[];
+	cli: {
+		minimumCoreVersion: string;
+		minimumProxyVersion: string;
+	};
 };
 
 type ConfigJson = {
@@ -20,6 +24,10 @@ type ConfigJson = {
 	v?: number;
 	promos?: PromoJson[];
 	promosV2?: PromoV2Json[];
+	cli?: {
+		minimumCoreVersion: string;
+		minimumProxyVersion: string;
+	};
 };
 type PromoJson = Replace<Promo, 'plan' | 'expiresOn' | 'startsOn', string | undefined> & {
 	v?: number;
@@ -29,12 +37,43 @@ type PromoV2Json = Replace<Promo, 'expiresOn' | 'startsOn', string | undefined> 
 
 const maxKnownPromoVersion = 2;
 
+const fallbackConfig: Config = {
+	promos: [
+		{
+			key: 'pro50',
+			plan: 'pro',
+			states: [
+				SubscriptionState.Community,
+				SubscriptionState.Trial,
+				SubscriptionState.TrialExpired,
+				SubscriptionState.TrialReactivationEligible,
+			],
+			locations: ['home', 'account', 'badge', 'gate'],
+			content: {
+				modal: { detail: 'Save up to 50% on GitLens Pro' },
+				quickpick: { detail: '$(star-full) Save up to 50% on GitLens Pro' },
+				webview: {
+					info: { html: '<b>Save up to 50%</b> on GitLens Pro' },
+					link: {
+						html: '<b>Save up to 50%</b> on GitLens Pro',
+						title: 'Upgrade now and Save up to 50% on GitLens Pro',
+					},
+				},
+			},
+		} satisfies Promo,
+	],
+	cli: {
+		minimumCoreVersion: '3.1.63',
+		minimumProxyVersion: '3.1.53',
+	},
+} as const;
+
 export class ProductConfigProvider {
 	private readonly _lazyConfig: Lazy<Promise<Config>>;
 
 	constructor(container: Container, connection: ServerConnection) {
 		this._lazyConfig = lazy(async () => {
-			using scope = startLogScope(`${getLoggableName(this)}.load`, false);
+			using scope = maybeStartScopedLogger(`${getLoggableName(this)}.load`);
 
 			let data;
 			const failed = {
@@ -45,9 +84,15 @@ export class ProductConfigProvider {
 
 			if (DEBUG) {
 				try {
-					// eslint-disable-next-line @typescript-eslint/ban-ts-comment -- using @ts-ignore instead of @ts-expect-error because if `product.json` is found then @ts-expect-error will complain because its not an error anymore
-					// @ts-ignore
-					const data = (await import('../../../product.json', { with: { type: 'json' } })).default;
+					const data =
+						// prettier-ignore
+						(
+							// oxlint-disable-next-line typescript/ban-ts-comment -- using @ts-ignore instead of @ts-expect-error because if `product.json` is found then @ts-expect-error will complain because its not an error anymore
+							// @ts-ignore
+							await import(/* webpackChunkName: "product-config" */ '../../../product.json', {
+								with: { type: 'json' },
+							})
+						).default;
 					if (data != null && Object.keys(data).length > 0) {
 						const config = getConfig(data);
 						if (config != null) return config;
@@ -71,7 +116,7 @@ export class ProductConfigProvider {
 				}
 			} catch (ex) {
 				failed.exception = ex;
-				Logger.error(ex, scope);
+				scope?.error(ex);
 				debugger;
 			}
 
@@ -85,38 +130,14 @@ export class ProductConfigProvider {
 			const stored = container.storage.get('product:config');
 			if (stored?.data != null) {
 				return {
+					...fallbackConfig,
 					...stored.data,
 					promos: stored.data.promos.map(p => ({ ...p, plan: p.plan ?? 'pro' }) satisfies Promo),
 				} satisfies Config;
 			}
 
 			// If all else fails, return a default set of promos
-			return {
-				promos: [
-					{
-						key: 'pro50',
-						plan: 'pro',
-						states: [
-							SubscriptionState.Community,
-							SubscriptionState.Trial,
-							SubscriptionState.TrialExpired,
-							SubscriptionState.TrialReactivationEligible,
-						],
-						locations: ['home', 'account', 'badge', 'gate'],
-						content: {
-							modal: { detail: 'Save 50% on GitLens Pro' },
-							quickpick: { detail: '$(star-full) Save 50% on GitLens Pro' },
-							webview: {
-								info: { html: '<b>Save 50%</b> on GitLens Pro' },
-								link: {
-									html: '<b>Save 50%</b> on GitLens Pro',
-									title: 'Upgrade now and Save 50% on GitLens Pro',
-								},
-							},
-						},
-					} satisfies Promo,
-				],
-			};
+			return fallbackConfig;
 		});
 	}
 
@@ -129,6 +150,14 @@ export class ProductConfigProvider {
 
 		const promos = await this.getPromos();
 		return getApplicablePromo(promos, state, plan, location);
+	}
+
+	async getCliMinimumVersions(): Promise<{ core: string; proxy: string }> {
+		const cli = (await this.getConfig()).cli;
+		return {
+			core: cli.minimumCoreVersion,
+			proxy: cli.minimumProxyVersion,
+		};
 	}
 
 	private getConfig(): Promise<Config> {
@@ -145,9 +174,9 @@ function createConfigValidator(): Validator<ConfigJson> {
 	const isState = Is.Enum<SubscriptionState>(
 		SubscriptionState.VerificationRequired,
 		SubscriptionState.Community,
-		// eslint-disable-next-line @typescript-eslint/no-deprecated -- allow deprecated states since we will just ignore them
+		// oxlint-disable-next-line typescript/no-deprecated -- allow deprecated states since we will just ignore them
 		SubscriptionState.DeprecatedPreview,
-		// eslint-disable-next-line @typescript-eslint/no-deprecated -- allow deprecated states since we will just ignore them
+		// oxlint-disable-next-line typescript/no-deprecated -- allow deprecated states since we will just ignore them
 		SubscriptionState.DeprecatedPreviewExpired,
 		SubscriptionState.Trial,
 		SubscriptionState.TrialExpired,
@@ -167,13 +196,13 @@ function createConfigValidator(): Validator<ConfigJson> {
 		html: Is.Optional(Is.String),
 	});
 
-	const isCommandPattern = (value: unknown): value is GlCommands =>
+	const isCommandPattern = (value: unknown): value is GlExtensionCommands =>
 		typeof value === 'string' && value.startsWith('gitlens.');
 
 	const isWebviewLink = createValidator({
 		html: Is.String,
 		title: Is.String,
-		command: Is.Optional((value): value is GlCommands => isCommandPattern(value)),
+		command: Is.Optional((value): value is GlExtensionCommands => isCommandPattern(value)),
 	});
 
 	const isWebview = createValidator({
@@ -219,7 +248,14 @@ function createConfigValidator(): Validator<ConfigJson> {
 		percentile: Is.Optional(Is.Number),
 	});
 
+	const cliValidator = createValidator({
+		minimumCoreVersion: Is.String,
+		minimumProxyVersion: Is.String,
+	});
+
 	return createValidator<ConfigJson>({
+		cli: Is.Optional(cliValidator),
+		// oxlint-disable-next-line typescript/no-deprecated
 		v: Is.Optional(Is.Number),
 		promos: Is.Optional(Is.Array(promoValidator)),
 		promosV2: Is.Optional(Is.Array(promoV2Validator)),
@@ -250,7 +286,9 @@ function getConfig(data: unknown): Config | undefined {
 	const validator = createConfigValidator();
 	if (!validator(data)) return undefined;
 
-	const promos = (data.promosV2 ?? data.promos ?? [])
+	const { promosV2, promos: promosV1, ...rest } = data;
+
+	const promos = (promosV2 ?? promosV1 ?? [])
 		// Filter out promos that we don't know how to handle
 		.filter(d => d.v == null || d.v <= maxKnownPromoVersion)
 		.map(
@@ -268,7 +306,11 @@ function getConfig(data: unknown): Config | undefined {
 				}) satisfies Promo,
 		);
 
-	const config: Config = { promos: promos };
+	const config: Config = {
+		...fallbackConfig,
+		...rest,
+		promos: promos,
+	};
 	return config;
 }
 

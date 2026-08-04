@@ -1,111 +1,49 @@
 import { createContext } from '@lit/context';
-import { signalObject } from 'signal-utils/object';
 import type {
 	GetActiveOverviewResponse,
 	GetInactiveOverviewResponse,
 	OverviewFilters,
-} from '../../../../home/protocol';
-import {
-	ChangeOverviewRepositoryCommand,
-	DidChangeIntegrationsConnections,
-	DidChangeOverviewFilter,
-	DidChangeOverviewRepository,
-	DidChangeRepositories,
-	DidChangeRepositoryWip,
-	GetActiveOverview,
-	GetInactiveOverview,
-	GetOverviewFilterState,
-} from '../../../../home/protocol';
-import { AsyncComputedState } from '../../../shared/components/signal-utils';
-import type { Disposable } from '../../../shared/events';
-import type { HostIpc } from '../../../shared/ipc';
+} from '../../../../home/protocol.js';
+import type { ReadableSignal } from '../../../shared/state/signals.js';
 
 export type ActiveOverview = GetActiveOverviewResponse;
 export type InactiveOverview = GetInactiveOverviewResponse;
 
-export class ActiveOverviewState extends AsyncComputedState<ActiveOverview> {
-	private readonly _disposable: Disposable | undefined;
-
-	constructor(
-		private readonly _ipc: HostIpc,
-		options?: {
-			runImmediately?: boolean;
-			initial?: ActiveOverview;
-		},
-	) {
-		super(async _abortSignal => {
-			const rsp: ActiveOverview = await this._ipc.sendRequest(GetActiveOverview, undefined);
-			return rsp;
-		}, options);
-
-		this._disposable = this._ipc.onReceiveMessage(msg => {
-			switch (true) {
-				case DidChangeIntegrationsConnections.is(msg):
-					this.run(true);
-					break;
-				case DidChangeRepositories.is(msg):
-					this.run(true);
-					break;
-				case DidChangeRepositoryWip.is(msg):
-					this.run(true);
-					break;
-				case DidChangeOverviewRepository.is(msg):
-					this.run(true);
-					break;
-			}
-		});
-	}
-
-	dispose() {
-		this._disposable?.dispose();
-	}
-
-	changeRepository(): void {
-		this._ipc.sendCommand(ChangeOverviewRepositoryCommand, undefined);
-	}
+/**
+ * Interface for the active overview state consumed by child components via Lit context.
+ * Backed by a Resource in home.ts.
+ */
+export interface ActiveOverviewState {
+	readonly value: ReadableSignal<ActiveOverview>;
+	readonly loading: ReadableSignal<boolean>;
+	readonly error: ReadableSignal<string | undefined>;
+	fetch(): void;
+	changeRepository(): void;
 }
 
-export class InactiveOverviewState extends AsyncComputedState<InactiveOverview> {
-	private readonly _disposable: Disposable | undefined;
-	filter = signalObject<Partial<OverviewFilters>>({});
-
-	constructor(
-		private readonly _ipc: HostIpc,
-		options?: {
-			runImmediately?: boolean;
-			initial?: InactiveOverview;
-		},
-	) {
-		super(async _abortSignal => {
-			const rsp: InactiveOverview = await this._ipc.sendRequest(GetInactiveOverview, undefined);
-			return rsp;
-		}, options);
-
-		this._disposable = this._ipc.onReceiveMessage(msg => {
-			switch (true) {
-				case DidChangeRepositories.is(msg):
-					this.run(true);
-					break;
-				case DidChangeOverviewFilter.is(msg):
-					this.filter.recent = msg.params.filter.recent;
-					this.filter.stale = msg.params.filter.stale;
-					this.run(true);
-					break;
-				case DidChangeOverviewRepository.is(msg):
-					this.run(true);
-					break;
-			}
-		});
-		void this._ipc.sendRequest(GetOverviewFilterState, undefined).then(rsp => {
-			this.filter.recent = rsp.recent;
-			this.filter.stale = rsp.stale;
-		});
-	}
-
-	dispose(): void {
-		this._disposable?.dispose();
-	}
+/**
+ * Interface for the inactive overview state consumed by child components via Lit context.
+ * Backed by a Resource in home.ts.
+ */
+export interface InactiveOverviewState {
+	readonly value: ReadableSignal<InactiveOverview>;
+	readonly loading: ReadableSignal<boolean>;
+	readonly error: ReadableSignal<string | undefined>;
+	filter: Partial<OverviewFilters>;
+	fetch(): void;
 }
 
-export const activeOverviewStateContext = createContext<ActiveOverview>('activeOverviewState');
-export const inactiveOverviewStateContext = createContext<InactiveOverview>('inactiveOverviewState');
+/**
+ * Interface for the agent overview state consumed by child components via Lit context.
+ * Backed by a Resource in home.ts. Shows branches with active agent sessions.
+ */
+export interface AgentOverviewState {
+	readonly value: ReadableSignal<InactiveOverview>;
+	readonly loading: ReadableSignal<boolean>;
+	readonly error: ReadableSignal<string | undefined>;
+	fetch(): void;
+}
+
+export const activeOverviewStateContext = createContext<ActiveOverviewState>('activeOverviewState');
+export const inactiveOverviewStateContext = createContext<InactiveOverviewState>('inactiveOverviewState');
+export const agentOverviewStateContext = createContext<AgentOverviewState>('agentOverviewState');

@@ -1,24 +1,27 @@
-import type { TextDocumentShowOptions } from 'vscode';
-import type { Autolink } from '../../autolinks/models/autolinks';
-import type { Config, DateStyle } from '../../config';
-import type { Sources } from '../../constants.telemetry';
-import type { GitCommitIdentityShape, GitCommitStats } from '../../git/models/commit';
-import type { GitFileChangeShape } from '../../git/models/fileChange';
-import type { IssueOrPullRequest } from '../../git/models/issueOrPullRequest';
-import type { PullRequestShape } from '../../git/models/pullRequest';
-import type { Repository } from '../../git/models/repository';
-import type { Draft, DraftVisibility } from '../../plus/drafts/models/drafts';
-import type { DateTimeFormat } from '../../system/date';
-import type { Serialized } from '../../system/serialize';
-import type { Change, DraftUserSelection } from '../plus/patchDetails/protocol';
-import type { IpcScope, WebviewState } from '../protocol';
-import { IpcCommand, IpcNotification, IpcRequest } from '../protocol';
+import type { GitCommitIdentityShape, GitCommitStats } from '@gitlens/git/models/commit.js';
+import type { GitFileChangeShape, GitFileChangeStats } from '@gitlens/git/models/fileChange.js';
+import type { GitFileStatus } from '@gitlens/git/models/fileStatus.js';
+import type { IssueOrPullRequest } from '@gitlens/git/models/issueOrPullRequest.js';
+import type { GitPausedOperationStatus } from '@gitlens/git/models/pausedOperationStatus.js';
+import type { PullRequestShape } from '@gitlens/git/models/pullRequest.js';
+import type { GitBranchReference } from '@gitlens/git/models/reference.js';
+import type { GitCommitSearchContext } from '@gitlens/git/models/search.js';
+import type { SigningFormat } from '@gitlens/git/models/signature.js';
+import type { CurrentUserNameStyle } from '@gitlens/git/utils/commit.utils.js';
+import type { DateTimeFormat } from '@gitlens/utils/date.js';
+import type { Config, DateStyle } from '../../config.js';
+import type { WebviewItemContext } from '../../system/webview.js';
+import { serializeWebviewItemContext } from '../../system/webview.js';
+import type { IpcScope } from '../ipc/models/ipc.js';
+import type { WebviewState } from '../protocol.js';
+import type { FileShowOptions, WipChange } from '../rpc/services/types.js';
+
+export type { FileShowOptions } from '../rpc/services/types.js';
+// Re-export from shared types — canonical definition is in rpc/services/types.ts
+export type { CommitSignatureShape, WipChange, WipFileChange } from '../rpc/services/types.js';
 
 export const scope: IpcScope = 'commitDetails';
-
 export const messageHeadlineSplitterToken = '\x00\n\x00';
-
-export type FileShowOptions = TextDocumentShowOptions;
 
 export interface CommitSummary {
 	sha: string;
@@ -26,37 +29,65 @@ export interface CommitSummary {
 	// summary: string;
 	message: string;
 	author: GitCommitIdentityShape & { avatar: string | undefined };
-	// committer: GitCommitIdentityShape & { avatar: string | undefined };
+	committer: GitCommitIdentityShape & { avatar: string | undefined };
 	parents: string[];
 	repoPath: string;
 	stashNumber?: string;
+	stashOnRef?: string;
 }
 
+export type CommitFileChange = GitFileChangeShape & { stats?: GitFileChangeStats; conflictMarkers?: number };
+
 export interface CommitDetails extends CommitSummary {
-	autolinks?: Autolink[];
-	files?: readonly GitFileChangeShape[];
+	files?: readonly CommitFileChange[];
 	stats?: GitCommitStats;
+	/**
+	 * `true` when the commit is reachable from a worktree other than the one this panel is scoped to,
+	 * so its files have a working copy elsewhere. Drives the file context-menu's "(Worktree)" file actions.
+	 */
+	reachableFromOtherWorktrees?: boolean;
 }
+
+export interface CompareDiff {
+	files: readonly CommitFileChange[];
+	stats?: GitCommitStats;
+	commitCount?: number;
+}
+
+/** Sort order for the working (WIP) file list, mirroring VS Code's `scm.defaultViewSortKey`. */
+export type WorkingFileSorting = 'name' | 'path' | 'status';
 
 export interface Preferences {
 	pullRequestExpanded: boolean;
 	avatars: boolean;
+	currentUserNameStyle: CurrentUserNameStyle;
 	dateFormat: DateTimeFormat | string;
 	dateStyle: DateStyle;
 	files: Config['views']['commitDetails']['files'];
 	indent: number | undefined;
 	indentGuides: 'none' | 'onHover' | 'always';
+	/** Working (WIP) file list sort, honoring VS Code's `scm.defaultViewSortKey` (list layout only). */
+	workingFilesOrderBy: WorkingFileSorting;
+	/** Whether the working (WIP) file list orders by stage (staged → mixed → unstaged) before the
+	 *  `scm.defaultViewSortKey` order, or sorts flat by the key alone. Mirrors `gitlens.sortWorkingChangesBy`. */
+	workingChangesSortBy: Config['sortWorkingChangesBy'];
 	aiEnabled: boolean;
+	enableSmartCommit: boolean;
+	showSignatureBadges: boolean;
+	/** Whether the file-tree search box is visible. Persisted per workspace; defaults to `true`. */
+	showSearchBox: boolean;
+	/** Search-box presentation: `true` filters (hides) non-matches, `false` dims them. */
+	searchBoxFilter: boolean;
 }
 export type UpdateablePreferences = Partial<Pick<Preferences, 'pullRequestExpanded' | 'files'>>;
 
-export interface WipChange {
-	branchName: string;
-	repository: { name: string; path: string; uri: string };
-	files: GitFileChangeShape[];
-}
-
-export type Mode = 'commit' | 'wip';
+/** Fallback file-list layout when the persisted `views.commitDetails.files` preference is unavailable. */
+export const defaultViewFilesConfig: Preferences['files'] = {
+	layout: 'auto',
+	compact: true,
+	threshold: 5,
+	icon: 'type',
+};
 
 export interface GitBranchShape {
 	name: string;
@@ -66,192 +97,147 @@ export interface GitBranchShape {
 		ahead: number;
 		behind: number;
 	};
+	/** Full reference, for command-link args (associate-issue, etc.) that need a GitBranchReference. */
+	reference?: GitBranchReference;
+}
+
+/**
+ * Git-authoritative working-tree counts, computed host-side from `status.diffStatus` and embedded
+ * IN the {@link Wip} so the file list and its summary counts travel as one atomic object — they
+ * can never drift. Header / row badges read these (via the graph's row-keyed `wipStateById` plane,
+ * which projects them with `toWipState`); the panel reads them directly. `context` is the serialized
+ * `GraphItemContext` string for the WIP row's right-click menu.
+ */
+export interface WipStats {
+	added: number;
+	deleted: number;
+	modified: number;
+	renamed?: number;
+	hasConflicts?: boolean;
+	conflictsCount?: number;
+	pausedOpStatus?: GitPausedOperationStatus;
+	context?: string;
+	/** Serialized `gitlens:branch` context for the WIP header's left "branch actions" kebab; undefined on detached HEAD. */
+	branchContext?: string;
+}
+
+/** Repo-level commit-signing status for the WIP commit box — see {@link Wip.signing}. */
+export interface WipSigning {
+	/** Whether commits will be signed (repo `commit.gpgsign` or the host's `git.enableCommitSigning` override). */
+	enabled: boolean;
+	format: SigningFormat;
 }
 
 export interface Wip {
 	changes: WipChange | undefined;
 	repositoryCount: number;
+	/**
+	 * Host-stamped, per-repo monotonic freshness marker, assigned when the producing `git status` read STARTS (so a
+	 * slow read of older state can't outrank a later read of newer state). Lets a consumer order payloads that can
+	 * arrive out of order — a delayed push vs. a newer push or forced refresh — and discard any that reflect an
+	 * older working tree than one already applied. Optional: only the Graph's `getWipForRepoAndStats` stamps it.
+	 */
+	revision?: number;
 	branch?: GitBranchShape;
-	pullRequest?: PullRequestShape;
-	codeSuggestions?: Serialized<Draft>[];
 	repo: {
 		uri: string;
 		name: string;
 		path: string;
+		/** True when this repo is a linked worktree (`git worktree`), false for the primary/main worktree. */
+		isWorktree: boolean;
+		provider?: {
+			supportedFeatures: { createPullRequestWithDetails?: boolean };
+		};
 	};
+	/**
+	 * Git-authoritative counts for this wip's working tree — see {@link WipStats}. Optional at the
+	 * type level because the standalone commitDetails webview constructs `Wip` without computing
+	 * diffStatus; the Graph's `getWipForRepoAndStats` ALWAYS populates it, so Graph consumers can
+	 * rely on it in practice (guard with `?.` for the shared-type contract).
+	 */
+	stats?: WipStats;
+	/**
+	 * Commit-signing status for this wip's repo — drives the "will be signed" indicator in the
+	 * Graph's commit box. Optional for the same reason as {@link Wip.stats}: only the Graph's
+	 * `getWipForRepoAndStats` populates it.
+	 */
+	signing?: WipSigning;
 }
 
-export interface DraftState {
-	inReview: boolean;
-}
-
-export interface State extends WebviewState {
-	mode: Mode;
-
+export interface State extends WebviewState<'gitlens.views.commitDetails'> {
 	pinned: boolean;
-	navigationStack: {
-		count: number;
-		position: number;
-		hint?: string;
-	};
 	preferences: Preferences;
 	orgSettings: {
 		ai: boolean;
 		drafts: boolean;
 	};
-	includeRichContent?: boolean;
 
 	commit?: CommitDetails;
 	autolinksEnabled: boolean;
 	autolinkedIssues?: IssueOrPullRequest[];
 	pullRequest?: PullRequestShape;
-	wip?: Wip;
-	inReview?: boolean;
 	hasAccount: boolean;
 	hasIntegrationsConnected: boolean;
+	searchContext?: GitCommitSearchContext;
 }
 
 export type ShowCommitDetailsViewCommandArgs = string[];
 
-export interface ShowWipArgs {
-	type: 'wip';
-	inReview?: boolean;
-	repository?: Repository;
-	source: Sources;
-}
-
 // COMMANDS
 
-export interface SuggestChangesParams {
-	title: string;
-	description?: string;
-	visibility: DraftVisibility;
-	changesets: Record<string, Change>;
-	userSelections: DraftUserSelection[] | undefined;
-}
-export const SuggestChangesCommand = new IpcCommand<SuggestChangesParams>(scope, 'commit/suggestChanges');
+// Param types for RPC methods (kept for backwards compatibility)
 
 export interface ExecuteCommitActionsParams {
 	action: 'graph' | 'more' | 'scm' | 'sha';
 	alt?: boolean;
 }
-export const ExecuteCommitActionCommand = new IpcCommand<ExecuteCommitActionsParams>(scope, 'commit/actions/execute');
 
 export interface ExecuteFileActionParams extends GitFileChangeShape {
-	showOptions?: TextDocumentShowOptions;
+	/** Commit ref (SHA) for this file action. Required for committed files. */
+	ref?: string;
+	/**
+	 * `true` when `ref` is a stash — routes the lookup through the stash sub-provider so
+	 * untracked-file entries (which live in `stash^3` and are absent from `git log`-based
+	 * fetches) resolve correctly.
+	 */
+	stash?: boolean;
+	showOptions?: FileShowOptions;
 }
-export const ExecuteFileActionCommand = new IpcCommand<ExecuteFileActionParams>(scope, 'file/actions/execute');
-export const OpenFileCommand = new IpcCommand<ExecuteFileActionParams>(scope, 'file/open');
-export const OpenFileOnRemoteCommand = new IpcCommand<ExecuteFileActionParams>(scope, 'file/openOnRemote');
-export const OpenFileCompareWorkingCommand = new IpcCommand<ExecuteFileActionParams>(scope, 'file/compareWorking');
-export const OpenFileComparePreviousCommand = new IpcCommand<ExecuteFileActionParams>(scope, 'file/comparePrevious');
 
-export const StageFileCommand = new IpcCommand<ExecuteFileActionParams>(scope, 'file/stage');
-export const UnstageFileCommand = new IpcCommand<ExecuteFileActionParams>(scope, 'file/unstage');
+// Context menu types
 
-export const PickCommitCommand = new IpcCommand(scope, 'pickCommit');
-export const SearchCommitCommand = new IpcCommand(scope, 'searchCommit');
+export type DetailsItemContext = WebviewItemContext<DetailsItemContextValue>;
+export type DetailsItemContextValue = DetailsItemTypedContextValue;
 
-export interface SwitchModeParams {
-	repoPath?: string;
-	mode: Mode;
+export type DetailsItemTypedContext<T = DetailsItemTypedContextValue> = WebviewItemContext<T>;
+export type DetailsItemTypedContextValue = DetailsFileContextValue | DetailsFolderContextValue;
+
+export interface DetailsFileContextValue {
+	type: 'file';
+	path: string;
+	repoPath: string;
+	sha?: string;
+	comparisonSha?: string;
+	stashNumber?: string;
+	staged?: boolean;
+	status?: GitFileStatus;
+	/** A rename's original path. Only needed for comparison contexts, whose file isn't looked up in a
+	 *  fileset — `getFileCommitFromContext` synthesizes its `GitFileChange` from this context alone. */
+	originalPath?: string;
 }
-export const SwitchModeCommand = new IpcCommand<SwitchModeParams>(scope, 'switchMode');
 
-export const AutolinkSettingsCommand = new IpcCommand(scope, 'autolinkSettings');
-
-export interface PinParams {
-	pin: boolean;
+export interface DetailsFolderContextValue {
+	type: 'folder';
+	path: string;
+	repoPath: string;
 }
-export const PinCommand = new IpcCommand<PinParams>(scope, 'pin');
 
-export interface NavigateParams {
-	direction: 'back' | 'forward';
+export function buildFolderContext(repoPath: string | undefined, folder: { relativePath: string }): string | undefined {
+	if (!repoPath) return undefined;
+
+	const context: DetailsItemTypedContext = {
+		webviewItem: 'gitlens:folder',
+		webviewItemValue: { type: 'folder', path: folder.relativePath, repoPath: repoPath },
+	};
+	return serializeWebviewItemContext(context);
 }
-export const NavigateCommand = new IpcCommand<NavigateParams>(scope, 'navigate');
-
-export type UpdatePreferenceParams = UpdateablePreferences;
-export const UpdatePreferencesCommand = new IpcCommand<UpdatePreferenceParams>(scope, 'preferences/update');
-
-export interface CreatePatchFromWipParams {
-	changes: WipChange;
-	checked: boolean | 'staged';
-}
-export const CreatePatchFromWipCommand = new IpcCommand<CreatePatchFromWipParams>(scope, 'wip/createPatch');
-
-export interface ChangeReviewModeParams {
-	inReview: boolean;
-}
-export const ChangeReviewModeCommand = new IpcCommand<ChangeReviewModeParams>(scope, 'wip/changeReviewMode');
-
-export interface ShowCodeSuggestionParams {
-	id: string;
-}
-export const ShowCodeSuggestionCommand = new IpcCommand<ShowCodeSuggestionParams>(scope, 'wip/showCodeSuggestion');
-
-export const FetchCommand = new IpcCommand(scope, 'fetch');
-export const PublishCommand = new IpcCommand(scope, 'publish');
-export const PushCommand = new IpcCommand(scope, 'push');
-export const PullCommand = new IpcCommand(scope, 'pull');
-export const SwitchCommand = new IpcCommand(scope, 'switch');
-
-export const OpenPullRequestChangesCommand = new IpcCommand(scope, 'openPullRequestChanges');
-export const OpenPullRequestComparisonCommand = new IpcCommand(scope, 'openPullRequestComparison');
-export const OpenPullRequestOnRemoteCommand = new IpcCommand(scope, 'openPullRequestOnRemote');
-export const OpenPullRequestDetailsCommand = new IpcCommand(scope, 'openPullRequestDetails');
-
-// REQUESTS
-
-export type DidExplainParams =
-	| {
-			result: { summary: string; body: string };
-			error?: never;
-	  }
-	| { error: { message: string } };
-export const ExplainRequest = new IpcRequest<void, DidExplainParams>(scope, 'explain');
-
-export type DidGenerateParams =
-	| {
-			title: string | undefined;
-			description: string | undefined;
-			error?: undefined;
-	  }
-	| { error: { message: string } };
-export const GenerateRequest = new IpcRequest<void, DidGenerateParams>(scope, 'generate');
-
-// NOTIFICATIONS
-
-export interface DidChangeParams {
-	state: Serialized<State>;
-}
-export const DidChangeNotification = new IpcNotification<DidChangeParams>(scope, 'didChange', true);
-
-export type DidChangeWipStateParams = Pick<Serialized<State>, 'wip' | 'inReview'>;
-export const DidChangeWipStateNotification = new IpcNotification<DidChangeWipStateParams>(scope, 'didChange/wip');
-
-export type DidChangeOrgSettings = Pick<Serialized<State>, 'orgSettings'>;
-export const DidChangeOrgSettingsNotification = new IpcNotification<DidChangeOrgSettings>(
-	scope,
-	'org/settings/didChange',
-);
-
-export interface DidChangeHasAccountParams {
-	hasAccount: boolean;
-}
-export const DidChangeHasAccountNotification = new IpcNotification<DidChangeHasAccountParams>(
-	scope,
-	'didChange/account',
-);
-
-export interface DidChangeDraftStateParams {
-	inReview: boolean;
-}
-export const DidChangeDraftStateNotification = new IpcNotification<DidChangeDraftStateParams>(scope, 'didChange/patch');
-
-export interface DidChangeIntegrationsParams {
-	hasIntegrationsConnected: boolean;
-}
-export const DidChangeIntegrationsNotification = new IpcNotification<DidChangeIntegrationsParams>(
-	scope,
-	'didChange/integrations',
-);

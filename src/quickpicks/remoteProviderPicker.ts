@@ -1,27 +1,32 @@
 import type { Disposable, QuickInputButton, QuickPickItem } from 'vscode';
 import { env, ThemeIcon, Uri, window } from 'vscode';
-import type { OpenOnRemoteCommandArgs } from '../commands/openOnRemote';
-import { SetRemoteAsDefaultQuickInputButton } from '../commands/quickCommand.buttons';
-import type { Keys } from '../constants';
-import { GlyphChars } from '../constants';
-import type { IntegrationIds } from '../constants.integrations';
-import type { Sources } from '../constants.telemetry';
-import { Container } from '../container';
-import { RequiresIntegrationError } from '../errors';
-import type { GitRemote } from '../git/models/remote';
-import type { RemoteResource } from '../git/models/remoteResource';
-import { RemoteResourceType } from '../git/models/remoteResource';
-import type { RemoteProvider } from '../git/remotes/remoteProvider';
-import { getDefaultBranchName } from '../git/utils/-webview/branch.utils';
-import { getBranchNameWithoutRemote, getRemoteNameFromBranchName } from '../git/utils/branch.utils';
-import { getHighlanderProviders } from '../git/utils/remote.utils';
-import { getNameFromRemoteResource } from '../git/utils/remoteResource.utils';
-import { providersMetadata } from '../plus/integrations/providers/models';
-import { convertRemoteProviderIdToIntegrationId } from '../plus/integrations/utils/-webview/integration.utils';
-import { getQuickPickIgnoreFocusOut } from '../system/-webview/vscode';
-import { getSettledValue } from '../system/promise';
-import { CommandQuickPickItem, createQuickPickItemOfT } from './items/common';
-import { createDirectiveQuickPickItem, Directive } from './items/directive';
+import type { GitRemote } from '@gitlens/git/models/remote.js';
+import type { RemoteProvider } from '@gitlens/git/models/remoteProvider.js';
+import type { RemoteResource } from '@gitlens/git/models/remoteResource.js';
+import { RemoteResourceType } from '@gitlens/git/models/remoteResource.js';
+import { getBranchNameWithoutRemote, getRemoteNameFromBranchName } from '@gitlens/git/utils/branch.utils.js';
+import { getHighlanderProviders, getNameFromRemoteResource } from '@gitlens/git/utils/remote.utils.js';
+import type { IntegrationIds } from '@gitlens/integrations/constants.js';
+import { providersMetadata } from '@gitlens/integrations/providers/models.js';
+import { convertRemoteProviderIdToIntegrationId } from '@gitlens/integrations/utils/integration.utils.js';
+import { getSettledValue } from '@gitlens/utils/promise.js';
+import type { OpenOnRemoteCommandArgs } from '../commands/openOnRemote.js';
+import { SetRemoteAsDefaultQuickInputButton } from '../commands/quick-wizard/quickButtons.js';
+import type { Keys } from '../constants.js';
+import { GlyphChars } from '../constants.js';
+import type { Sources } from '../constants.telemetry.js';
+import { Container } from '../container.js';
+import { RequiresIntegrationError } from '../errors.js';
+import { getDefaultBranchName } from '../git/utils/-webview/branch.utils.js';
+import {
+	copyRemoteProviderUrl,
+	isRemoteProviderReadyForCrossForkPullRequestUrls,
+	openRemoteProviderUrl,
+	setRemoteAsDefault,
+} from '../git/utils/-webview/remote.utils.js';
+import { getQuickPickIgnoreFocusOut } from '../system/-webview/vscode.js';
+import { CommandQuickPickItem, createQuickPickItemOfT } from './items/common.js';
+import { createDirectiveQuickPickItem, Directive } from './items/directive.js';
 
 export class ConfigureCustomRemoteProviderCommandQuickPickItem extends CommandQuickPickItem {
 	constructor() {
@@ -62,7 +67,9 @@ export class CopyOrOpenRemoteCommandQuickPickItem extends CommandQuickPickItem {
 					}
 				} else if (resource.type === RemoteResourceType.CreatePullRequest) {
 					let branch = resource.base.branch;
-					if (branch == null) {
+					const sameBranchMergeAttempt =
+						branch === resource.head.branch && this.remote.url === resource.head.remote.url;
+					if (branch == null || sameBranchMergeAttempt) {
 						branch = await getDefaultBranchName(Container.instance, this.remote.repoPath, this.remote.name);
 						if (branch) {
 							branch = getBranchNameWithoutRemote(branch);
@@ -79,7 +86,7 @@ export class CopyOrOpenRemoteCommandQuickPickItem extends CommandQuickPickItem {
 
 					if (
 						resource.base.remote.url !== resource.head.remote.url &&
-						!(await this.remote.provider.isReadyForForCrossForkPullRequestUrls())
+						!(await isRemoteProviderReadyForCrossForkPullRequestUrls(this.remote.provider.id))
 					) {
 						const integrationId = convertRemoteProviderIdToIntegrationId(this.remote.provider.id);
 						const connected =
@@ -100,7 +107,7 @@ export class CopyOrOpenRemoteCommandQuickPickItem extends CommandQuickPickItem {
 					const svc = Container.instance.git.getRepositoryService(this.remote.repoPath);
 					const [branches, tags] = await Promise.allSettled([
 						svc.branches.getBranches({
-							filter: b => b.name === branchOrTag || b.getNameWithoutRemote() === branchOrTag,
+							filter: b => b.name === branchOrTag || b.nameWithoutRemote === branchOrTag,
 						}),
 						svc.tags.getTags({ filter: t => t.name === branchOrTag }),
 					]);
@@ -127,7 +134,9 @@ export class CopyOrOpenRemoteCommandQuickPickItem extends CommandQuickPickItem {
 			})
 			.filter((r): r is RemoteResource => r !== undefined);
 
-		void (await (this.clipboard ? this.remote.provider.copy(resources) : this.remote.provider.open(resources)));
+		void (await (this.clipboard
+			? copyRemoteProviderUrl(this.remote.provider, resources)
+			: openRemoteProviderUrl(this.remote.provider, resources)));
 	}
 
 	async showIntegrationConnectionPicker(integrationId: IntegrationIds, source: Sources): Promise<boolean> {
@@ -178,7 +187,7 @@ export class CopyOrOpenRemoteCommandQuickPickItem extends CommandQuickPickItem {
 	}
 
 	setAsDefault(): Promise<void> {
-		return this.remote.setAsDefault(true);
+		return setRemoteAsDefault(this.remote, true);
 	}
 }
 

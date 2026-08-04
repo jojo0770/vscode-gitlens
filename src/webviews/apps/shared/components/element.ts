@@ -1,6 +1,19 @@
 import type { PropertyValues } from 'lit';
 import { LitElement } from 'lit';
 
+/**
+ * Re-dispatches a bubbling, composed copy of an incoming event from the host element.
+ * Use as an inline handler to forward a Shadow-DOM child's custom event up to ancestors
+ * without hand-writing a dedicated redispatcher per event type.
+ */
+export function redispatch(this: HTMLElement, e: Event): void {
+	if (e instanceof CustomEvent) {
+		this.dispatchEvent(new CustomEvent(e.type, { detail: e.detail, bubbles: true, composed: true }));
+	} else {
+		this.dispatchEvent(new Event(e.type, { bubbles: true, composed: true }));
+	}
+}
+
 export type CustomEventType<T extends keyof GlobalEventHandlersEventMap> =
 	GlobalEventHandlersEventMap[T] extends CustomEvent<infer D>
 		? [D] extends [never]
@@ -23,7 +36,7 @@ type Observer = {
 	afterFirstUpdate?: boolean;
 };
 
-// eslint-disable-next-line @typescript-eslint/no-unsafe-function-type
+// oxlint-disable-next-line typescript/no-unsafe-function-type
 const observersForClass = new WeakMap<Function, Observer[]>();
 export function observe<T extends GlElement>(keys: keyof T | (keyof T)[], options?: { afterFirstUpdate?: boolean }) {
 	return function (target: T, _propertyKey: string, descriptor: PropertyDescriptor): void {

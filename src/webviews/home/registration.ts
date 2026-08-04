@@ -1,5 +1,6 @@
-import type { WebviewsController, WebviewViewProxy } from '../webviewsController';
-import type { State } from './protocol';
+import { loadChunk } from '../../system/-webview/loadChunk.js';
+import type { WebviewsController, WebviewViewProxy } from '../webviewsController.js';
+import type { State } from './protocol.js';
 
 export type HomeWebviewShowingArgs = [{ focusAccount: boolean }];
 
@@ -20,7 +21,9 @@ export function registerHomeWebviewView(
 			},
 		},
 		async (container, host) => {
-			const { HomeWebviewProvider } = await import(/* webpackChunkName: "webview-home" */ './homeWebview');
+			const { HomeWebviewProvider } = await loadChunk(
+				() => import(/* webpackChunkName: "webview-home" */ './homeWebview.js'),
+			);
 			return new HomeWebviewProvider(container, host);
 		},
 	);

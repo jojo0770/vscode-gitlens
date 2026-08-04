@@ -1,14 +1,14 @@
 import type { CancellationToken, ConfigurationChangeEvent, Position, TextDocument, TextEditor, Uri } from 'vscode';
 import { Disposable, Hover, languages, Range, window } from 'vscode';
-import type { Container } from '../container';
-import { configuration } from '../system/-webview/configuration';
-import { isTrackableTextEditor } from '../system/-webview/vscode/editors';
-import { debug } from '../system/decorators/log';
-import { once } from '../system/event';
-import { Logger } from '../system/logger';
-import { areUrisEqual } from '../system/uri';
-import type { LinesChangeEvent } from '../trackers/lineTracker';
-import { changesMessage, detailsMessage } from './hovers';
+import { trace } from '@gitlens/utils/decorators/log.js';
+import { once } from '@gitlens/utils/event.js';
+import { Logger } from '@gitlens/utils/logger.js';
+import { areUrisEqual } from '@gitlens/utils/uri.js';
+import type { Container } from '../container.js';
+import { configuration } from '../system/-webview/configuration.js';
+import { isTrackableTextEditor } from '../system/-webview/vscode/editors.js';
+import type { LinesChangeEvent } from '../trackers/lineTracker.js';
+import { changesMessage, detailsMessage } from './hovers.js';
 
 const maxSmallIntegerV8 = 2 ** 30 - 1; // Max number that can be stored in V8's smis (small integers)
 
@@ -54,13 +54,12 @@ export class LineHoverController implements Disposable {
 		}
 	}
 
-	@debug<LineHoverController['onActiveLinesChanged']>({
-		args: {
-			0: e =>
-				`editor=${e.editor?.document.uri.toString(true)}, selections=${e.selections
-					?.map(s => `[${s.anchor}-${s.active}]`)
-					.join(',')}, pending=${Boolean(e.pending)}, reason=${e.reason}`,
-		},
+	@trace({
+		args: e => ({
+			e: `editor=${e.editor?.document.uri.toString(true)}, selections=${e.selections
+				?.map(s => `[${s.anchor}-${s.active}]`)
+				.join(',')}, pending=${Boolean(e.pending)}, reason=${e.reason}`,
+		}),
 	})
 	private onActiveLinesChanged(e: LinesChangeEvent) {
 		if (e.pending) return;
@@ -76,14 +75,13 @@ export class LineHoverController implements Disposable {
 		this.register(e.editor);
 	}
 
-	@debug<LineHoverController['provideDetailsHover']>({
-		args: {
-			0: document => Logger.toLoggable(document.uri),
-			1: position => `${position.line}:${position.character}`,
-			2: false,
-		},
+	@trace({
+		args: (document, position) => ({
+			document: Logger.toLoggable(document.uri),
+			position: `${position.line}:${position.character}`,
+		}),
 		exit: r => (r != null ? 'provided' : 'skipped'),
-		singleLine: true,
+		onlyExit: true,
 	})
 	async provideDetailsHover(
 		document: TextDocument,
@@ -119,9 +117,15 @@ export class LineHoverController implements Disposable {
 		if (!wholeLine && range.start.character !== position.character) return undefined;
 
 		let editorLine = position.line;
-		const line = editorLine + 1;
-		const commitLine = commit.lines.find(l => l.line === line) ?? commit.lines[0];
-		editorLine = commitLine.originalLine - 1;
+		// Use the pre-resolved blame line from the line tracker (correctly remapped for dirty blame)
+		// instead of commit.lines.find() which has stale line numbers after edits shift positions
+		const commitLine = lineState?.commitLine;
+		if (commitLine != null) {
+			editorLine = commitLine.originalLine - 1;
+		} else {
+			const line = editorLine + 1;
+			editorLine = (commit.lines.find(l => l.line === line) ?? commit.lines[0]).originalLine - 1;
+		}
 
 		const trackedDocument = await this.container.documentTracker.get(document);
 		if (trackedDocument == null || token.isCancellationRequested) return undefined;
@@ -134,18 +138,18 @@ export class LineHoverController implements Disposable {
 				format: cfg.detailsMarkdownFormat,
 				pullRequests: cfg.pullRequests.enabled,
 				timeout: 250,
+				sourceName: 'editor:hover',
 			})) ?? 'Cancelled';
 		return new Hover(message, range);
 	}
 
-	@debug<LineHoverController['provideChangesHover']>({
-		args: {
-			0: document => Logger.toLoggable(document.uri),
-			1: position => `${position.line}:${position.character}`,
-			2: false,
-		},
+	@trace({
+		args: (document, position) => ({
+			document: Logger.toLoggable(document.uri),
+			position: `${position.line}:${position.character}`,
+		}),
 		exit: r => (r != null ? 'provided' : 'skipped'),
-		singleLine: true,
+		onlyExit: true,
 	})
 	async provideChangesHover(
 		document: TextDocument,
@@ -189,6 +193,8 @@ export class LineHoverController implements Disposable {
 			trackedDocument.uri,
 			position.line,
 			trackedDocument.document,
+			'editor:hover',
+			lineState?.commitLine,
 		);
 		if (message == null) return undefined;
 

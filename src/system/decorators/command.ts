@@ -1,6 +1,9 @@
+import type { GlCommands, GlWebviewCommands } from '../../constants.commands.js';
+import type { WebviewTypes } from '../../constants.views.js';
+
 interface Command<
-	THandler extends (...args: any[]) => any,
-	TCommand extends string = string,
+	TCommand extends string | GlCommands = GlCommands,
+	THandler extends (...args: any[]) => any = (...args: any[]) => any,
 	TOptions extends object | void = void,
 > {
 	command: TCommand;
@@ -9,8 +12,8 @@ interface Command<
 }
 
 export function createCommandDecorator<
+	TCommand extends string | GlCommands = GlCommands,
 	THandler extends (...args: any[]) => any = (...args: any[]) => any,
-	TCommand extends string = string,
 	TOptions extends object | void = void,
 >(): {
 	command: (
@@ -21,9 +24,9 @@ export function createCommandDecorator<
 		contextOrKey?: string | ClassMethodDecoratorContext,
 		descriptor?: PropertyDescriptor,
 	) => PropertyDescriptor | undefined;
-	getCommands: () => Iterable<Command<THandler, TCommand, TOptions>>;
+	getCommands: () => Iterable<Command<TCommand, THandler, TOptions>>;
 } {
-	const commands = new Map<string, Command<THandler, TCommand, TOptions>>();
+	const commands = new Map<string, Command<TCommand, THandler, TOptions>>();
 
 	function command(command: TCommand, options?: TOptions) {
 		return function (
@@ -39,7 +42,7 @@ export function createCommandDecorator<
 			// ES Decorator
 			if (contextOrKey && typeof contextOrKey === 'object' && 'kind' in contextOrKey) {
 				if (contextOrKey.kind !== 'method') {
-					// eslint-disable-next-line @typescript-eslint/restrict-template-expressions
+					// oxlint-disable-next-line typescript/restrict-template-expressions
 					throw new Error(`@command can only be used on methods, not on ${contextOrKey.kind}`);
 				}
 
@@ -65,4 +68,18 @@ export function createCommandDecorator<
 		command: command,
 		getCommands: () => commands.values(),
 	};
+}
+
+/**
+ * Suffix used to disambiguate webview-scoped command IDs.
+ *
+ * Normally one of {@link WebviewTypes}, but we also allow `'graphDetails'` as a legacy label for
+ * the integrated graph details panel's file context-menu commands. The `gitlens.views.graphDetails`
+ * webview was removed when the integrated panel took over, but the `:graphDetails` command suffix
+ * is still used by package.json menus filtered on `webview == gitlens.graph || webview == gitlens.views.graph`.
+ */
+export type WebviewCommandSuffix = WebviewTypes | 'graphDetails';
+
+export function getWebviewCommand(command: string, type: WebviewCommandSuffix): GlWebviewCommands {
+	return (command.endsWith(':') ? `${command}${type}` : command) as GlWebviewCommands;
 }

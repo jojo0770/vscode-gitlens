@@ -1,11 +1,11 @@
 import type { CancellationToken, Event, FileDecoration, FileDecorationProvider } from 'vscode';
 import { Disposable, EventEmitter, ThemeColor, Uri, window } from 'vscode';
-import { getQueryDataFromScmGitUri } from '../@types/vscode.git.uri';
-import { GlyphChars, Schemes } from '../constants';
-import type { Colors } from '../constants.colors';
-import type { GitBranchStatus } from '../git/models/branch';
-import type { GitFileStatus } from '../git/models/fileStatus';
-import type { GitPausedOperation } from '../git/models/pausedOperationStatus';
+import type { BranchDisposition, GitBranchStatus } from '@gitlens/git/models/branch.js';
+import type { GitFileStatus } from '@gitlens/git/models/fileStatus.js';
+import type { GitPausedOperation } from '@gitlens/git/models/pausedOperationStatus.js';
+import { getQueryDataFromScmGitUri } from '../@types/vscode.git.uri.js';
+import type { Colors } from '../constants.colors.js';
+import { GlyphChars, Schemes } from '../constants.js';
 
 export class ViewFileDecorationProvider implements FileDecorationProvider, Disposable {
 	private readonly _onDidChange = new EventEmitter<undefined | Uri | Uri[]>();
@@ -62,7 +62,7 @@ function provideViewNodeDecoration(uri: Uri, token: CancellationToken): FileDeco
 interface BranchViewDecoration {
 	status: GitBranchStatus | 'unpublished';
 	current?: boolean;
-	starred?: boolean;
+	disposition?: BranchDisposition;
 	worktree?: { opened: boolean };
 	showStatusOnly?: boolean;
 }
@@ -138,7 +138,7 @@ function getBranchDecoration(uri: Uri, _token: CancellationToken): FileDecoratio
 		};
 	}
 
-	if (state?.starred) {
+	if (state?.disposition === 'starred') {
 		return {
 			...decoration,
 			badge: '★',
@@ -327,7 +327,7 @@ function getWorkspaceDecoration(uri: Uri, _token: CancellationToken): FileDecora
 interface WorktreeViewDecoration {
 	hasChanges?: boolean;
 	missing?: boolean;
-	starred?: boolean;
+	disposition?: BranchDisposition;
 }
 
 function getWorktreeDecoration(uri: Uri, _token: CancellationToken): FileDecoration | undefined {
@@ -344,12 +344,12 @@ function getWorktreeDecoration(uri: Uri, _token: CancellationToken): FileDecorat
 	if (state?.hasChanges) {
 		return {
 			badge: '●',
-			color: new ThemeColor('gitlens.decorations.worktreeHasUncommittedChangesForegroundColor' as Colors),
+			color: new ThemeColor('gitlens.decorations.worktreeHasUncommittedChangesForegroundColor' satisfies Colors),
 			tooltip: 'Has Uncommitted Changes',
 		};
 	}
 
-	if (state?.starred) {
+	if (state?.disposition === 'starred') {
 		return {
 			badge: '★',
 			tooltip: 'Favorited',

@@ -1,10 +1,10 @@
 import type { TextEditor, TextEditorEdit } from 'vscode';
 import { commands, Disposable } from 'vscode';
-import type { GlCommands, GlCommandsDeprecated } from '../constants.commands';
-import { registerCommand } from '../system/-webview/command';
-import type { CommandContext } from './commandContext';
-import type { CommandContextParsingOptions } from './commandContext.utils';
-import { parseCommandContext } from './commandContext.utils';
+import type { GlCommands, GlCommandsDeprecated } from '../constants.commands.js';
+import { registerCommand } from '../system/-webview/command.js';
+import type { CommandContext } from './commandContext.js';
+import type { CommandContextParsingOptions } from './commandContext.utils.js';
+import { parseCommandContext } from './commandContext.utils.js';
 
 export abstract class GlCommandBase implements Disposable {
 	protected readonly contextParsingOptions: CommandContextParsingOptions = { expectsEditor: false };
@@ -25,7 +25,7 @@ export abstract class GlCommandBase implements Disposable {
 	}
 
 	protected preExecute(_context: CommandContext, ...args: any[]): Promise<unknown> {
-		// eslint-disable-next-line @typescript-eslint/no-unsafe-return
+		// oxlint-disable-next-line typescript/no-unsafe-return
 		return this.execute(...args);
 	}
 
@@ -41,7 +41,7 @@ export abstract class ActiveEditorCommand extends GlCommandBase {
 	protected override readonly contextParsingOptions: CommandContextParsingOptions = { expectsEditor: true };
 
 	protected override preExecute(context: CommandContext, ...args: any[]): Promise<any> {
-		// eslint-disable-next-line @typescript-eslint/no-unsafe-return
+		// oxlint-disable-next-line typescript/no-unsafe-return
 		return this.execute(context.editor, context.uri, ...args);
 	}
 
@@ -83,7 +83,7 @@ export abstract class EditorCommand implements Disposable {
 				commands.registerTextEditorCommand(
 					cmd,
 					(editor: TextEditor, edit: TextEditorEdit, ...args: any[]) =>
-						// eslint-disable-next-line @typescript-eslint/no-unsafe-return
+						// oxlint-disable-next-line typescript/no-unsafe-return
 						this.executeCore(cmd, editor, edit, ...args),
 					this,
 				),

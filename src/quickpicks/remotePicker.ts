@@ -1,10 +1,11 @@
 import type { Disposable } from 'vscode';
 import { window } from 'vscode';
-import { SetRemoteAsDefaultQuickInputButton } from '../commands/quickCommand.buttons';
-import type { GitRemote } from '../git/models/remote';
-import { getQuickPickIgnoreFocusOut } from '../system/-webview/vscode';
-import type { RemoteQuickPickItem } from './items/gitWizard';
-import { createRemoteQuickPickItem } from './items/gitWizard';
+import type { GitRemote } from '@gitlens/git/models/remote.js';
+import { SetRemoteAsDefaultQuickInputButton } from '../commands/quick-wizard/quickButtons.js';
+import { setRemoteAsDefault } from '../git/utils/-webview/remote.utils.js';
+import { getQuickPickIgnoreFocusOut } from '../system/-webview/vscode.js';
+import type { RemoteQuickPickItem } from './items/gitWizard.js';
+import { createRemoteQuickPickItem } from './items/gitWizard.js';
 
 export async function showRemotePicker(
 	title: string | undefined,
@@ -38,7 +39,7 @@ export async function showRemotePicker(
 		for (const r of remotes) {
 			items.push(createRemoteQuickPickItem(r, undefined, pickOpts));
 			if (r.name === options?.picked) {
-				picked = items[items.length - 1];
+				picked = items.at(-1);
 			}
 		}
 	}
@@ -61,7 +62,7 @@ export async function showRemotePicker(
 				}),
 				quickpick.onDidTriggerItemButton(async e => {
 					if (e.button === SetRemoteAsDefaultQuickInputButton) {
-						await e.item.item.setAsDefault();
+						await setRemoteAsDefault(e.item.item);
 						resolve(e.item);
 					}
 				}),

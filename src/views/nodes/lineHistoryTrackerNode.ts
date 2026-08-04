@@ -1,26 +1,26 @@
 import type { Disposable, Selection } from 'vscode';
 import { TreeItem, TreeItemCollapsibleState, window } from 'vscode';
-import type { GitCommitish } from '../../git/gitUri';
-import { GitUri, unknownGitUri } from '../../git/gitUri';
-import { deletedOrMissing } from '../../git/models/revision';
-import { isBranchReference } from '../../git/utils/reference.utils';
-import { isSha } from '../../git/utils/revision.utils';
-import { showReferencePicker } from '../../quickpicks/referencePicker';
-import { setContext } from '../../system/-webview/context';
-import { gate } from '../../system/decorators/-webview/gate';
-import { debug, log } from '../../system/decorators/log';
-import { weakEvent } from '../../system/event';
-import { debounce } from '../../system/function/debounce';
-import { Logger } from '../../system/logger';
-import { getLogScope, setLogScopeExit } from '../../system/logger.scope';
-import { areUrisEqual } from '../../system/uri';
-import type { LinesChangeEvent } from '../../trackers/lineTracker';
-import type { FileHistoryView } from '../fileHistoryView';
-import type { LineHistoryView } from '../lineHistoryView';
-import { SubscribeableViewNode } from './abstract/subscribeableViewNode';
-import type { ViewNode } from './abstract/viewNode';
-import { ContextValues } from './abstract/viewNode';
-import { LineHistoryNode } from './lineHistoryNode';
+import { deletedOrMissing } from '@gitlens/git/models/revision.js';
+import { isBranchReference } from '@gitlens/git/utils/reference.utils.js';
+import { isSha } from '@gitlens/git/utils/revision.utils.js';
+import { debounce } from '@gitlens/utils/debounce.js';
+import { debug, trace } from '@gitlens/utils/decorators/log.js';
+import { weakEvent } from '@gitlens/utils/event.js';
+import { Logger } from '@gitlens/utils/logger.js';
+import { getScopedLogger } from '@gitlens/utils/logger.scoped.js';
+import { areUrisEqual } from '@gitlens/utils/uri.js';
+import type { GitCommitish } from '../../git/gitUri.js';
+import { GitUri, unknownGitUri } from '../../git/gitUri.js';
+import { showReferencePicker } from '../../quickpicks/referencePicker.js';
+import { setContext } from '../../system/-webview/context.js';
+import { gate } from '../../system/decorators/gate.js';
+import type { LinesChangeEvent } from '../../trackers/lineTracker.js';
+import type { FileHistoryView } from '../fileHistoryView.js';
+import type { LineHistoryView } from '../lineHistoryView.js';
+import { SubscribeableViewNode } from './abstract/subscribeableViewNode.js';
+import type { ViewNode } from './abstract/viewNode.js';
+import { ContextValues } from './abstract/viewNode.js';
+import { LineHistoryNode } from './lineHistoryNode.js';
 
 export class LineHistoryTrackerNode extends SubscribeableViewNode<
 	'line-history-tracker',
@@ -121,26 +121,26 @@ export class LineHistoryTrackerNode extends SubscribeableViewNode<
 	}
 
 	@gate()
-	@debug({ exit: true })
+	@trace({ exit: true })
 	override async refresh(reset: boolean = false): Promise<{ cancel: boolean }> {
-		const scope = getLogScope();
+		const scope = getScopedLogger();
 
 		if (!this.canSubscribe) return { cancel: false };
 
 		if (reset) {
 			if (this._uri != null && this._uri !== unknownGitUri) {
-				await this.view.container.documentTracker.resetCache(this._uri, 'log');
+				this.view.container.git.resetCachesForUri(this._uri, 'fileLog');
 			}
 
 			this.reset();
 		}
 
 		const updated = await this.updateUri();
-		setLogScopeExit(scope, `, uri=${Logger.toLoggable(this._uri)}`);
+		scope?.addExitInfo(`uri=${Logger.toLoggable(this._uri)}`);
 		return { cancel: !updated };
 	}
 
-	@debug()
+	@trace()
 	protected async subscribe(): Promise<Disposable | undefined> {
 		await this.updateUri();
 		if (this.view.container.lineTracker.subscribed(this)) return undefined;
@@ -161,27 +161,26 @@ export class LineHistoryTrackerNode extends SubscribeableViewNode<
 		);
 	}
 
-	@debug<LineHistoryTrackerNode['onActiveLinesChanged']>({
-		args: {
-			0: e =>
-				`editor=${e.editor?.document.uri.toString(true)}, selections=${e.selections
-					?.map(s => `[${s.anchor}-${s.active}]`)
-					.join(',')}, pending=${Boolean(e.pending)}, reason=${e.reason}`,
-		},
+	@trace({
+		args: e => ({
+			e: `editor=${e.editor?.document.uri.toString(true)}, selections=${e.selections
+				?.map(s => `[${s.anchor}-${s.active}]`)
+				.join(',')}, pending=${Boolean(e.pending)}, reason=${e.reason}`,
+		}),
 	})
 	private onActiveLinesChanged(_e: LinesChangeEvent) {
 		void this.triggerChange();
 	}
 
 	@gate()
-	@log()
+	@debug()
 	async changeBase(): Promise<void> {
 		const pick = await showReferencePicker(
 			this.uri.repoPath!,
 			'Change Line History Base',
 			'Choose a reference to set as the new base',
 			{
-				allowRevisions: true,
+				allowedAdditionalInput: { rev: true },
 				picked: this._base,
 				sort: { branches: { current: true }, tags: {} },
 			},
@@ -200,12 +199,12 @@ export class LineHistoryTrackerNode extends SubscribeableViewNode<
 		await this.triggerChange();
 	}
 
-	@log()
+	@debug()
 	setEditorFollowing(enabled: boolean): void {
 		this.canSubscribe = enabled;
 	}
 
-	@debug()
+	@trace()
 	setUri(uri?: GitUri): void {
 		this._uri = uri ?? unknownGitUri;
 		void setContext('gitlens:views:fileHistory:canPin', this.hasUri);

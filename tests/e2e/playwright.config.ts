@@ -1,26 +1,55 @@
+import * as process from 'node:process';
 import { defineConfig } from '@playwright/test';
+import { editors } from './editors.js';
 
-// eslint-disable-next-line import-x/no-default-export
-export default defineConfig({
+interface CustomOptions {
+	editorId: string;
+	editorExecutablePath: string;
+}
+
+// oxlint-disable-next-line import/no-default-export
+export default defineConfig<CustomOptions>({
 	use: {
+		// Bound individual actions. Playwright's default is 0 — wait for actionability forever — so a click
+		// on an element that never becomes actionable (a notification toast over the button, a webview that
+		// never settles) consumes the whole test budget and reports a bare `Test timeout` naming nothing.
+		// With a bound, the failure names the locator instead, and the test gives its remaining time back.
+		actionTimeout: 30000,
 		headless: true, // Ensure headless mode is enabled
 		viewport: { width: 1920, height: 1080 },
+		trace: 'on-first-retry',
+		video: 'on-first-retry',
+		screenshot: 'only-on-failure',
 	},
 	reporter: 'list', // process.env.CI ? 'html' : 'list',
 	timeout: 60000, // 1 minute
-	workers: 1,
+	retries: process.env.CI ? 2 : 0,
+	fullyParallel: true,
+	workers: process.env.CI ? 4 : 8,
 	expect: {
 		timeout: 60000, // 1 minute
 	},
 	globalSetup: './setup',
+	testDir: './specs',
 	outputDir: '../../out/test-results',
-	projects: [
-		{
-			name: 'VSCode stable',
+	// One project per editor (see editors.ts). VS Code is always registered; a fork is registered only
+	// when its binary path env var is set, so a plain `pnpm test:e2e` (no --project) runs just VS Code
+	// instead of trying to launch forks that aren't provisioned locally.
+	projects: editors
+		.filter(e => e.id === 'vscode' || process.env[e.envVar])
+		.map(e => ({
+			name: e.id,
 			use: {
-				vscodeVersion: 'stable',
+				editorId: e.id,
+				editorExecutablePath: e.envVar ? (process.env[e.envVar] ?? '') : '',
 			},
-		},
-	],
-	testMatch: 'specs/*.test.ts',
+			// Forks opt out of editor-incompatible specs via the `@no-fork` tag (see docs/testing.md).
+			grepInvert: e.id === 'vscode' ? undefined : /@no-fork/,
+			// All CI projects inherit the top-level retry budget. Login-walled forks (Cursor and Kiro),
+			// whose deterministic sign-in-wall failures shouldn't be retried, are excluded from the CI
+			// matrix entirely via editors.ts `runInCI: false`, so no per-project retry override is needed
+			// here — and the experimental fork that DOES run (Positron) needs the retries to recover from
+			// the transient render/launch contention flakes that a multi-worker CI runner induces.
+		})),
+	testMatch: '*.test.ts',
 });

@@ -1,12 +1,12 @@
-import { Container } from '../../container';
-import type { ViewNode } from '../../views/nodes/abstract/viewNode';
-import type { RevealOptions } from '../../views/viewBase';
-import { executeGitCommand } from '../actions';
-import type { GitContributor } from '../models/contributor';
-import type { Repository } from '../models/repository';
+import type { GitContributor } from '@gitlens/git/models/contributor.js';
+import { Container } from '../../container.js';
+import type { ViewNode } from '../../views/nodes/abstract/viewNode.js';
+import type { RevealOptions } from '../../views/viewBase.js';
+import { executeGitCommand } from '../actions.js';
+import type { GlRepository } from '../models/repository.js';
 
 export function addAuthors(
-	repo?: string | Repository,
+	repo?: string | GlRepository,
 	contributors?: GitContributor | GitContributor[],
 ): Promise<void> {
 	return executeGitCommand({

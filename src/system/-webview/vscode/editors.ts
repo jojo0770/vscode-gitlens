@@ -1,13 +1,13 @@
 import type { TextDocument, TextDocumentShowOptions, TextEditor } from 'vscode';
-import { Selection, Uri, ViewColumn, window } from 'vscode';
-import { imageMimetypes, Schemes } from '../../../constants';
-import type { DiffRange } from '../../../git/gitProvider';
-import { isGitUri } from '../../../git/gitUri';
-import { Logger } from '../../logger';
-import { extname } from '../../path';
-import { executeCoreCommand } from '../command';
-import { isTextDocument } from './documents';
-import { isTrackableUri } from './uris';
+import { Uri, ViewColumn, window } from 'vscode';
+import { Logger } from '@gitlens/utils/logger.js';
+import { extname } from '@gitlens/utils/path.js';
+import type { CoreCommands } from '../../../constants.commands.js';
+import { imageMimetypes, Schemes } from '../../../constants.js';
+import { isGitUri } from '../../../git/gitUri.js';
+import { executeCoreCommand } from '../command.js';
+import { isTextDocument } from './documents.js';
+import { isTrackableUri } from './uris.js';
 
 export function getOpenTextEditor(uri: Uri): TextEditor | undefined {
 	const active = window.activeTextEditor;
@@ -25,7 +25,7 @@ export function getOpenTextEditor(uri: Uri): TextEditor | undefined {
 
 export function getOpenTextEditorIfActive(document: TextDocument): TextEditor | undefined {
 	const editor = window.activeTextEditor;
-	return editor != null && editor.document === document ? editor : undefined;
+	return editor?.document === document ? editor : undefined;
 }
 
 export function getOpenTextEditorIfVisible(uri: Uri): TextEditor | undefined;
@@ -92,7 +92,7 @@ export async function openChangesEditor(
 ): Promise<void> {
 	try {
 		if (options?.viewColumn === ViewColumn.Beside) {
-			let column = (options?.sourceViewColumn ?? window.tabGroups.activeTabGroup?.viewColumn ?? 0) + 1;
+			let column = (options.sourceViewColumn ?? window.tabGroups.activeTabGroup?.viewColumn ?? 0) + 1;
 			if (column > ViewColumn.Nine) {
 				column = ViewColumn.One;
 			}
@@ -103,16 +103,50 @@ export async function openChangesEditor(
 				await executeCoreCommand('workbench.action.newGroupRight');
 			}
 		}
+
 		await executeCoreCommand(
 			'vscode.changes',
 			title,
 			resources.map(r => [r.uri, r.lhs, r.rhs]),
 		);
+
+		if (options?.preserveFocus && options.sourceViewColumn != null) {
+			const focusCommand = focusGroupByColumnCommand(options.sourceViewColumn);
+			if (focusCommand != null) {
+				await executeCoreCommand(focusCommand);
+			}
+		}
 	} catch (ex) {
 		Logger.error(ex, 'openChangesEditor');
 		debugger;
 	}
 }
+
+function focusGroupByColumnCommand(column: ViewColumn): CoreCommands | undefined {
+	switch (column) {
+		case ViewColumn.One:
+			return 'workbench.action.focusFirstEditorGroup';
+		case ViewColumn.Two:
+			return 'workbench.action.focusSecondEditorGroup';
+		case ViewColumn.Three:
+			return 'workbench.action.focusThirdEditorGroup';
+		case ViewColumn.Four:
+			return 'workbench.action.focusFourthEditorGroup';
+		case ViewColumn.Five:
+			return 'workbench.action.focusFifthEditorGroup';
+		case ViewColumn.Six:
+			return 'workbench.action.focusSixthEditorGroup';
+		case ViewColumn.Seven:
+			return 'workbench.action.focusSeventhEditorGroup';
+		case ViewColumn.Eight:
+			return 'workbench.action.focusEighthEditorGroup';
+		case ViewColumn.Nine:
+			return 'workbench.action.focusLastEditorGroup';
+		default:
+			return undefined;
+	}
+}
+
 export async function openDiffEditor(
 	lhs: Uri,
 	rhs: Uri,
@@ -195,7 +229,7 @@ export async function openTextEditor(
 
 	try {
 		if (isGitUri(uri)) {
-			uri = uri.documentUri();
+			uri = uri.documentUri;
 		}
 
 		if (background || title || (uri.scheme === Schemes.GitLens && imageMimetypes[extname(uri.fsPath)])) {
@@ -239,33 +273,4 @@ export function openTextEditors(uris: Uri[], options?: TextDocumentShowOptions &
 	for (const uri of normalizedUris.values()) {
 		void executeCoreCommand('vscode.open', uri, options);
 	}
-}
-
-export function diffRangeToEditorLine(range: DiffRange | undefined): number {
-	if (range == null) return 0;
-
-	return (range.active === 'end' ? range.endLine : range.startLine) - 1;
-}
-
-export function diffRangeToSelection(range: DiffRange): Selection {
-	if (range.active === 'end') {
-		return new Selection(range.startLine - 1, 0, range.endLine - 1, 0);
-	}
-	return new Selection(range.endLine - 1, 0, range.startLine - 1, 0);
-}
-
-export function editorLineToDiffRange(editorLine: number | undefined): DiffRange {
-	if (editorLine == null || editorLine < 0) return { startLine: 1, endLine: 1, active: 'start' };
-
-	return { startLine: editorLine + 1, endLine: editorLine + 1, active: 'start' };
-}
-
-export function selectionToDiffRange(selection: Selection | undefined): DiffRange {
-	if (selection == null) return { startLine: 1, endLine: 1, active: 'start' };
-
-	const { anchor, active } = selection;
-	if (anchor.line >= active.line) {
-		return { startLine: active.line + 1, endLine: anchor.line + 1, active: 'start' };
-	}
-	return { startLine: anchor.line + 1, endLine: active.line + 1, active: 'end' };
 }

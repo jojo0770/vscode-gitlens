@@ -1,23 +1,32 @@
 import type { Event, FileChangeEvent, FileStat, FileSystemProvider, Uri } from 'vscode';
 import { Disposable, EventEmitter, FileSystemError, FileType, workspace } from 'vscode';
-import { isLinux } from '@env/platform';
-import { Schemes } from '../constants';
-import type { Container } from '../container';
-import { relative } from '../system/-webview/path';
-import { debug } from '../system/decorators/log';
-import { map } from '../system/iterable';
-import { normalizePath } from '../system/path';
-import { TernarySearchTree } from '../system/searchTree';
-import { GitUri, isGitUri } from './gitUri';
-import { deletedOrMissing } from './models/revision';
-import type { GitTreeEntry } from './models/tree';
+import { isLinux } from '@env/platform.js';
+import { ShowError } from '@gitlens/git/errors.js';
+import { deletedOrMissing } from '@gitlens/git/models/revision.js';
+import type { GitTreeEntry, GitTreeType } from '@gitlens/git/models/tree.js';
+import { trace } from '@gitlens/utils/decorators/log.js';
+import { map } from '@gitlens/utils/iterable.js';
+import { Logger } from '@gitlens/utils/logger.js';
+import { getScopedLogger } from '@gitlens/utils/logger.scoped.js';
+import { normalizePath } from '@gitlens/utils/path.js';
+import { PromiseCache } from '@gitlens/utils/promiseCache.js';
+import { TernarySearchTree } from '@gitlens/utils/searchTree.js';
+import { Schemes } from '../constants.js';
+import type { Container } from '../container.js';
+import { relative } from '../system/-webview/path.js';
+import { GitUri, isGitUri } from './gitUri.js';
 
 const emptyArray = Object.freeze(new Uint8Array(0));
 const emptyDisposable: Disposable = Object.freeze({ dispose: () => {} });
 
-export function fromGitLensFSUri(uri: Uri): { path: string; ref: string; repoPath: string } {
-	const gitUri = isGitUri(uri) ? uri : GitUri.fromRevisionUri(uri);
-	return { path: gitUri.relativePath, ref: gitUri.sha!, repoPath: gitUri.repoPath! };
+export function fromGitLensFSUri(uri: Uri): { path: string; ref: string; repoPath: string; submoduleSha?: string } {
+	const gitUri = isGitUri(uri) ? uri : new GitUri(uri);
+	return {
+		path: gitUri.relativePath,
+		ref: gitUri.sha!,
+		repoPath: gitUri.repoPath!,
+		submoduleSha: gitUri.submoduleSha,
+	};
 }
 
 export class GitFileSystemProvider implements FileSystemProvider, Disposable {
@@ -27,7 +36,10 @@ export class GitFileSystemProvider implements FileSystemProvider, Disposable {
 	}
 
 	private readonly _disposable: Disposable;
-	private readonly _searchTreeMap = new Map<string, Promise<TernarySearchTree<string, GitTreeEntry>>>();
+	private readonly _searchTreeMap = new PromiseCache<string, TernarySearchTree<string, GitTreeEntry>>({
+		capacity: 50,
+		accessTTL: 1000 * 60 * 10, // 10 minutes idle
+	});
 
 	constructor(private readonly container: Container) {
 		this._disposable = Disposable.from(
@@ -53,7 +65,7 @@ export class GitFileSystemProvider implements FileSystemProvider, Disposable {
 		throw FileSystemError.NoPermissions(uri);
 	}
 
-	@debug()
+	@trace()
 	async readDirectory(uri: Uri): Promise<[string, FileType][]> {
 		const { path, ref, repoPath } = fromGitLensFSUri(uri);
 
@@ -69,25 +81,58 @@ export class GitFileSystemProvider implements FileSystemProvider, Disposable {
 		return items;
 	}
 
-	@debug()
+	@trace()
 	async readFile(uri: Uri): Promise<Uint8Array> {
-		const { path, ref, repoPath } = fromGitLensFSUri(uri);
+		const scope = getScopedLogger();
+		const { path, ref, repoPath, submoduleSha } = fromGitLensFSUri(uri);
 
 		if (ref === deletedOrMissing) return emptyArray;
 
-		const data = await this.container.git.getRepositoryService(repoPath).revision.getRevisionContent(ref, path);
-		return data != null ? data : emptyArray;
+		// If this is a submodule, return the submodule commit format directly
+		if (submoduleSha) {
+			return new TextEncoder().encode(`Subproject commit ${submoduleSha}\n`);
+		}
+
+		const svc = this.container.git.getRepositoryService(repoPath);
+
+		let data: Uint8Array | undefined;
+		try {
+			data = await svc.revision.getRevisionContent(path, ref);
+		} catch (ex) {
+			if (ShowError.is(ex, 'invalidObject') || ShowError.is(ex, 'invalidRevision')) {
+				// Check the tree entry to determine if this is a regular file or submodule
+				// For submodules (type 'commit' in git tree), return the standard git submodule diff format
+				// This matches the format Git uses in diff output (see diff.c:show_submodule_diff_summary)
+				const treeEntry = await svc.revision.getTreeEntryForRevision(path, ref);
+				if (treeEntry?.type === 'commit') {
+					return new TextEncoder().encode(`Subproject commit ${treeEntry.oid}\n`);
+				}
+			}
+
+			if (ShowError.is(ex) && ex.details.reason !== 'other') {
+				return emptyArray;
+			}
+
+			Logger.error(ex, scope, `Failed to read file for ${uri.toString(true)}`);
+		}
+
+		return data ?? emptyArray;
 	}
 
 	rename(oldUri: Uri, _newUri: Uri, _options: { readonly overwrite: boolean }): void | Thenable<void> {
 		throw FileSystemError.NoPermissions(oldUri);
 	}
 
-	@debug()
+	@trace()
 	async stat(uri: Uri): Promise<FileStat> {
-		const { path, ref, repoPath } = fromGitLensFSUri(uri);
+		const { path, ref, repoPath, submoduleSha } = fromGitLensFSUri(uri);
 
 		if (ref === deletedOrMissing) {
+			return { type: FileType.File, size: 0, ctime: 0, mtime: 0 };
+		}
+
+		// Submodules appear as files in diff views
+		if (submoduleSha) {
 			return { type: FileType.File, size: 0, ctime: 0, mtime: 0 };
 		}
 
@@ -107,10 +152,12 @@ export class GitFileSystemProvider implements FileSystemProvider, Disposable {
 
 			treeItem = await this.container.git
 				.getRepositoryService(repoPath)
-				.revision.getTreeEntryForRevision(ref, path);
+				.revision.getTreeEntryForRevision(path, ref);
 		}
 
-		if (treeItem == null) throw FileSystemError.FileNotFound(uri);
+		if (treeItem == null) {
+			throw FileSystemError.FileNotFound(uri);
+		}
 
 		return { type: typeToFileType(treeItem.type), size: treeItem.size, ctime: 0, mtime: 0 };
 	}
@@ -137,13 +184,7 @@ export class GitFileSystemProvider implements FileSystemProvider, Disposable {
 	}
 
 	private getOrCreateSearchTree(ref: string, repoPath: string) {
-		let searchTree = this._searchTreeMap.get(ref);
-		if (searchTree == null) {
-			searchTree = this.createSearchTree(ref, repoPath);
-			this._searchTreeMap.set(ref, searchTree);
-		}
-
-		return searchTree;
+		return this._searchTreeMap.getOrCreate(ref, () => this.createSearchTree(ref, repoPath));
 	}
 
 	private async getTree(path: string, ref: string, repoPath: string) {
@@ -153,12 +194,15 @@ export class GitFileSystemProvider implements FileSystemProvider, Disposable {
 	}
 }
 
-function typeToFileType(type: 'blob' | 'tree' | undefined | null) {
+function typeToFileType(type: GitTreeType | undefined | null) {
 	switch (type) {
 		case 'blob':
 			return FileType.File;
 		case 'tree':
 			return FileType.Directory;
+		case 'commit':
+			// Submodules (gitlinks) appear as files in the diff view
+			return FileType.File;
 		default:
 			return FileType.Unknown;
 	}

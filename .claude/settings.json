@@ -1,0 +1,54 @@
+{
+	"enabledPlugins": {
+		"claude-code-setup@claude-plugins-official": true
+	},
+	"hooks": {
+		"WorktreeCreate": [
+			{
+				"hooks": [
+					{
+						"type": "command",
+						"command": "node .claude/hooks/worktree.mts create",
+						"timeout": 60
+					}
+				]
+			}
+		],
+		"WorktreeRemove": [
+			{
+				"hooks": [
+					{
+						"type": "command",
+						"command": "node .claude/hooks/worktree.mts remove",
+						"timeout": 30
+					}
+				]
+			}
+		],
+		"PostToolUse": [
+			{
+				"matcher": "Edit|Write",
+				"hooks": [
+					{
+						"type": "command",
+						"command": "pnpm exec oxfmt \"$CLAUDE_FILE_PATH\" 2>/dev/null; exit 0",
+						"timeout": 30,
+						"statusMessage": "Formatting code..."
+					}
+				]
+			}
+		],
+		"PreToolUse": [
+			{
+				"matcher": "Edit|Write",
+				"hooks": [
+					{
+						"type": "command",
+						"command": "input=$(cat); if [[ \"$CLAUDE_FILE_PATH\" == */package.json ]]; then if echo \"$input\" | jq -r '(.tool_input.old_string // .tool_input.content) // empty' | grep -qE '\"(commands|menus|submenus|keybindings|views)\"'; then echo 'These contributes sections are auto-generated from contributions.json. Edit contributions.json instead, then run: pnpm run generate:contributions' >&2; exit 2; fi; fi",
+						"timeout": 5
+					}
+				]
+			}
+		]
+	}
+}

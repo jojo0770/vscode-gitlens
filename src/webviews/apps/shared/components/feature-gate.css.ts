@@ -1,0 +1,278 @@
+import { css, unsafeCSS } from 'lit';
+
+/* The single threshold (both axes) below which the gate switches to its compact look. Shared as a
+   constant because the width- and height-compact rules span this file and
+   feature-gate-plus-state.ts, and @container conditions can't read custom properties. */
+export const featureGateCompactThreshold = unsafeCSS('45rem');
+
+export const featureGateBaseStyles = css`
+	:host {
+		--gate-background: var(--vscode-editorWidget-background);
+		--gate-foreground: var(--vscode-editorWidget-foreground);
+		--gate-border: var(--vscode-editorWidget-border);
+		--gate-border-size: 0.2rem;
+
+		position: absolute;
+		inset: 0;
+		box-sizing: border-box;
+
+		/* Size container for the gate's narrow-width and short-height adaptations. Safe because the
+		   host is an inset-0 overlay, so its size never depends on its contents. The top-layer
+		   dialog still resolves against this container via its flat-tree ancestry. */
+		container-type: size;
+	}
+
+	::slotted(p) {
+		margin: revert !important;
+	}
+
+	::slotted(p:first-child) {
+		margin-top: 0 !important;
+	}
+
+	/* The gate renders as a native modal <dialog> promoted to the top layer (via showModal),
+			   so it covers the entire webview viewport. These rules reset the UA dialog styles. */
+	dialog {
+		--section-foreground: var(--gate-foreground);
+		--section-background: var(--gate-background);
+		--section-border-color: var(--gate-border);
+
+		--link-foreground: var(--vscode-textLink-foreground);
+		--link-foreground-active: var(--vscode-textLink-activeForeground);
+
+		position: fixed;
+		inset: 0;
+		box-sizing: border-box;
+		display: flex;
+		flex-direction: column;
+		width: 100%;
+		max-width: none;
+		height: 100%;
+		max-height: none;
+		padding: var(--gl-space-24) 0;
+		margin: 0;
+		overflow: hidden;
+		color: var(--section-foreground);
+		background:
+			linear-gradient(var(--section-background), var(--section-background)) padding-box,
+			var(--gl-gradient-brand) border-box;
+
+		/* Gradient border that follows border-radius (border-image ignores radius): a transparent
+		   real border, a solid fill clipped to padding-box, and the brand gradient clipped to
+		   border-box so it only shows through the border ring. */
+		border: var(--gate-border-size) solid transparent;
+		border-radius: var(--gl-radius-xl);
+		box-shadow: 0 0 0 1px var(--section-border-color);
+	}
+
+	/* Background-painted borders are dropped in forced-colors mode — restore a solid border. */
+	@media (forced-colors: active) {
+		dialog {
+			border-color: var(--section-border-color);
+		}
+	}
+
+	dialog::backdrop {
+		background: transparent;
+		backdrop-filter: blur(3px) saturate(0.8);
+	}
+
+	.content {
+		display: flex;
+		flex: 1 1 auto;
+		flex-direction: column;
+		min-height: 0;
+		padding-inline: var(--gl-space-24);
+		overflow: auto;
+	}
+
+	@container (max-width: ${featureGateCompactThreshold}) {
+		.content {
+			padding-inline: var(--gl-space-12);
+		}
+	}
+
+	:host-context(body[data-placement='editor']) dialog,
+	:host([appearance='alert']) dialog {
+		--link-decoration-default: underline;
+		--link-foreground: color-mix(in srgb, var(--section-foreground) 50%, var(--vscode-textLink-foreground));
+		--link-foreground-active: color-mix(
+			in srgb,
+			var(--section-foreground) 50%,
+			var(--vscode-textLink-activeForeground)
+		);
+
+		inset: 0;
+		width: max-content;
+		max-width: 60rem;
+		height: max-content;
+		max-height: calc(100% - 0.4rem);
+		margin: auto;
+	}
+
+	:host-context(body[data-placement='editor']) .content ::slotted(gl-button),
+	:host([appearance='alert']) .content ::slotted(gl-button) {
+		display: block;
+		margin-inline: auto;
+	}
+
+	.switch-actions {
+		position: absolute;
+		top: 0.6rem;
+		right: 0.6rem;
+		z-index: 1;
+
+		gl-button:not(:hover, :focus-within) {
+			opacity: 0.6;
+		}
+	}
+`;
+
+export const featureGateContentStyles = css`
+	.icon-cube {
+		--icon-color: var(--vscode-textLink-foreground);
+		--icon-background: color-mix(in srgb, var(--icon-color) 10%, transparent);
+		--icon-size: 1.4em;
+
+		display: inline-flex;
+		flex: none;
+		align-items: center;
+		justify-content: center;
+		width: calc(var(--icon-size) * 1.6);
+		aspect-ratio: 1;
+		background: var(--icon-background);
+		border-radius: var(--gl-radius-md);
+
+		code-icon {
+			font-size: var(--icon-size);
+			color: var(--icon-color);
+		}
+	}
+
+	.feature {
+		display: flex;
+		flex-direction: column;
+		gap: var(--gl-space-10);
+		margin-block-end: var(--gl-space-12);
+		line-height: 1.5;
+		color: var(--color-foreground--65);
+	}
+
+	.feature__header {
+		display: flex;
+		flex-direction: row;
+		gap: var(--gl-space-12);
+		align-items: flex-start;
+	}
+
+	/* Vertically constrained placements (e.g. the bottom panel): title and lede share one line
+	   (wrapping when also narrow) to shorten the header. The normal-height dialog is untouched. */
+	@container (max-height: ${featureGateCompactThreshold}) {
+		.feature__header hgroup {
+			display: flex;
+			flex-wrap: wrap;
+			column-gap: var(--gl-space-8);
+			align-items: baseline;
+		}
+	}
+
+	.feature__feature-icon {
+		/* Fixed light glyph: the brand gradient is dark in every theme, so a theme-driven foreground
+		   (near-black on light themes) would fail contrast against it. */
+		--icon-color: #fff;
+		--icon-background: var(--gl-gradient-brand);
+	}
+
+	.feature__title {
+		display: flex;
+		flex-wrap: wrap;
+		gap: var(--gl-space-6);
+		align-items: baseline;
+		margin: 0;
+		font-size: 1.6rem;
+		font-weight: 600;
+		line-height: 1.2;
+		color: var(--color-foreground);
+	}
+
+	@container (max-width: ${featureGateCompactThreshold}) {
+		.feature__title {
+			font-size: var(--gl-font-lg);
+		}
+	}
+
+	.feature__title gl-feature-badge {
+		margin: 0;
+		transform: translateY(-0.4rem);
+	}
+
+	.feature__lede {
+		margin: 0;
+	}
+
+	.feature__sub {
+		margin: 0;
+		font-size: var(--gl-font-md);
+	}
+
+	.list {
+		display: grid;
+		/* Intrinsic column collapse: two columns when the content area is wide enough for two
+		   32rem tracks, a single column in narrow placements (side bar, panel splits). */
+		grid-template-columns: repeat(auto-fit, minmax(min(32rem, 100%), 1fr));
+		gap: var(--gl-space-16);
+		padding-inline-start: 0;
+		margin-block: var(--gl-space-6);
+		margin-inline: 0;
+		list-style: none;
+	}
+
+	.list__item {
+		display: flex;
+		gap: var(--gl-space-12);
+		align-items: flex-start;
+	}
+
+	.list__copy {
+		display: flex;
+		flex-direction: column;
+		gap: var(--gl-space-2);
+		font-size: var(--gl-font-sm);
+		text-wrap: pretty;
+
+		strong {
+			font-size: var(--gl-font-md);
+			color: var(--color-foreground);
+		}
+	}
+
+	/* Vertically constrained placements: tighten the feature list. Halve the between-column gap,
+	   and float each item's icon so its copy flows around and under it instead of sitting in a
+	   rigid second column — reclaiming the indent for text. Placed after the base .list/.list__item
+	   rules so the height-scoped overrides win the cascade (the base .list gap shorthand would
+	   otherwise reset column-gap, and the base .list__item/.list__copy flex would defeat the float). */
+	@container (max-height: ${featureGateCompactThreshold}) {
+		.list {
+			column-gap: var(--gl-space-8);
+		}
+
+		.list__item {
+			display: block;
+		}
+
+		.list__item .icon-cube {
+			float: inline-start;
+			margin-inline-end: var(--gl-space-6);
+		}
+
+		.list__copy {
+			display: block;
+		}
+
+		/* The title runs in on the same line as the body, so match its size to the body — the
+		   larger heading size reads as inconsistent mid-sentence. Weight/color keep it distinct. */
+		.list__copy strong {
+			font-size: var(--gl-font-sm);
+		}
+	}
+`;

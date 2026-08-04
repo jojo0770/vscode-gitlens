@@ -1,14 +1,13 @@
 import { Disposable } from 'vscode';
-import type { Container } from '../../../container';
-import type { GitFileChangeShape } from '../../../git/models/fileChange';
-import type { PatchRevisionRange } from '../../../git/models/patch';
-import type { Repository } from '../../../git/models/repository';
-import { RepositoryChange, RepositoryChangeComparisonMode } from '../../../git/models/repository';
-import type { Change, ChangeType, RevisionChange } from './protocol';
+import type { GitFileChangeShape } from '@gitlens/git/models/fileChange.js';
+import type { PatchRevisionRange } from '@gitlens/git/models/patch.js';
+import type { Container } from '../../../container.js';
+import type { GlRepository } from '../../../git/models/repository.js';
+import type { Change, ChangeType, RevisionChange } from './protocol.js';
 
 export interface RepositoryChangeset extends Disposable {
 	type: ChangeType;
-	repository: Repository;
+	repository: GlRepository;
 	revision: PatchRevisionRange;
 	getChange(): Promise<Change>;
 
@@ -24,7 +23,7 @@ export class RepositoryRefChangeset implements RepositoryChangeset {
 
 	constructor(
 		private readonly container: Container,
-		public readonly repository: Repository,
+		public readonly repository: GlRepository,
 		public readonly revision: PatchRevisionRange,
 		private readonly files: RevisionChange['files'],
 		checked: Change['checked'],
@@ -59,7 +58,7 @@ export class RepositoryRefChangeset implements RepositoryChangeset {
 	}
 
 	// private _files: Promise<{ files: Change['files'] }> | undefined;
-	// eslint-disable-next-line @typescript-eslint/require-await
+	// oxlint-disable-next-line typescript/require-await
 	async getChange(): Promise<Change> {
 		// let filesResult;
 		// if (this.expanded) {
@@ -112,7 +111,7 @@ export class RepositoryWipChangeset implements RepositoryChangeset {
 
 	constructor(
 		private readonly container: Container,
-		public readonly repository: Repository,
+		public readonly repository: GlRepository,
 		public readonly revision: PatchRevisionRange,
 		private readonly onDidChangeRepositoryWip: (e: RepositoryWipChangeset) => void,
 		checked: Change['checked'],
@@ -168,9 +167,7 @@ export class RepositoryWipChangeset implements RepositoryChangeset {
 	async getChange(): Promise<Change> {
 		let filesResult;
 		if (this.expanded) {
-			if (this._files == null) {
-				this._files = this.getFiles();
-			}
+			this._files ??= this.getFiles();
 
 			filesResult = await this._files;
 		}
@@ -193,10 +190,10 @@ export class RepositoryWipChangeset implements RepositoryChangeset {
 		if (this._disposable != null) return;
 
 		this._disposable = Disposable.from(
-			this.repository.watchFileSystem(1000),
-			this.repository.onDidChangeFileSystem(() => this.onDidChangeWip(), this),
+			this.repository.watchWorkingTree(1000),
+			this.repository.onDidChangeWorkingTree(() => this.onDidChangeWip(), this),
 			this.repository.onDidChange(e => {
-				if (e.changed(RepositoryChange.Index, RepositoryChangeComparisonMode.Any)) {
+				if (e.changed('index')) {
 					this.onDidChangeWip();
 				}
 			}),

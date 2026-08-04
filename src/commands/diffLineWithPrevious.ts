@@ -1,18 +1,19 @@
 import type { TextDocumentShowOptions, TextEditor, Uri } from 'vscode';
-import type { Container } from '../container';
-import type { DiffRange } from '../git/gitProvider';
-import { GitUri } from '../git/gitUri';
-import type { GitCommit } from '../git/models/commit';
-import { showCommitHasNoPreviousCommitWarningMessage, showGenericErrorMessage } from '../messages';
-import { command, executeCommand } from '../system/-webview/command';
-import { selectionToDiffRange } from '../system/-webview/vscode/editors';
-import { getTabUris, getVisibleTabs } from '../system/-webview/vscode/tabs';
-import { Logger } from '../system/logger';
-import { areUrisEqual } from '../system/uri';
-import { ActiveEditorCommand } from './commandBase';
-import { getCommandUri } from './commandBase.utils';
-import type { CommandContext } from './commandContext';
-import type { DiffWithCommandArgs } from './diffWith';
+import type { GitCommit } from '@gitlens/git/models/commit.js';
+import type { DiffRange } from '@gitlens/git/providers/types.js';
+import { Logger } from '@gitlens/utils/logger.js';
+import { areUrisEqual } from '@gitlens/utils/uri.js';
+import type { Container } from '../container.js';
+import { GitUri } from '../git/gitUri.js';
+import { getCommitGitUri } from '../git/utils/-webview/commit.utils.js';
+import { showCommitHasNoPreviousCommitWarningMessage, showGenericErrorMessage } from '../messages.js';
+import { command, executeCommand } from '../system/-webview/command.js';
+import { selectionToDiffRange } from '../system/-webview/vscode/range.js';
+import { getTabUris, getVisibleTabs } from '../system/-webview/vscode/tabs.js';
+import { ActiveEditorCommand } from './commandBase.js';
+import { getCommandUri } from './commandBase.utils.js';
+import type { CommandContext } from './commandContext.js';
+import type { DiffWithCommandArgs } from './diffWith.js';
 
 export interface DiffLineWithPreviousCommandArgs {
 	commit?: GitCommit;
@@ -29,7 +30,10 @@ export class DiffLineWithPreviousCommand extends ActiveEditorCommand {
 
 	protected override preExecute(context: CommandContext, args?: DiffLineWithPreviousCommandArgs): Promise<any> {
 		if (context.type === 'editorLine') {
-			args = { ...args, range: { startLine: context.line, endLine: context.line } };
+			args = {
+				...args,
+				range: { startLine: context.line, startCharacter: 1, endLine: context.line, endCharacter: 1 },
+			};
 		}
 
 		return this.execute(context.editor, context.uri, args);
@@ -42,7 +46,7 @@ export class DiffLineWithPreviousCommand extends ActiveEditorCommand {
 		args = { ...args };
 		args.range ??= selectionToDiffRange(editor?.selection);
 
-		const gitUri = args.commit?.getGitUri() ?? (await GitUri.fromUri(uri));
+		const gitUri = (args.commit != null ? getCommitGitUri(args.commit) : undefined) ?? (await GitUri.fromUri(uri));
 
 		let skipFirstRev = false;
 
@@ -73,11 +77,11 @@ export class DiffLineWithPreviousCommand extends ActiveEditorCommand {
 				repoPath: diffUris.current.repoPath,
 				lhs: {
 					sha: diffUris.previous.sha ?? '',
-					uri: diffUris.previous.documentUri(),
+					uri: diffUris.previous.uri,
 				},
 				rhs: {
 					sha: diffUris.current.sha ?? '',
-					uri: diffUris.current.documentUri(),
+					uri: diffUris.current.uri,
 				},
 				range: diffUris.range,
 				showOptions: args.showOptions,

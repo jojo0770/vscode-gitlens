@@ -11,7 +11,12 @@
 			@font-face {
 				font-family: 'glicons';
 				font-display: block;
-				src: url('#{root}/dist/glicons.woff2?3614d4fae1d1a9c07c67436aad657680') format('woff2');
+				src: url('#{root}/dist/glicons.woff2?9fde082794a749486da177c225f92a40') format('woff2');
+			}
+			@font-face {
+				font-family: 'seti';
+				font-display: block;
+				src: url('#{webroot}/media/seti.woff') format('woff');
 			}
 		</style>
 		<script type="application/javascript" nonce="#{cspNonce}">
@@ -25,6 +30,5 @@
 		data-vscode-context='{ "preventDefaultContextMenuItems": true, "webview": "#{webviewId}", "webviewInstance": "#{webviewInstanceId}" }'
 	>
 		<gl-graph-apphost name="GraphView" placement="#{placement}" bootstrap="#{state}"></gl-graph-apphost>
-		#{endOfBody}
 	</body>
 </html>

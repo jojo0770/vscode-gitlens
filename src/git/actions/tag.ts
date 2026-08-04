@@ -1,30 +1,21 @@
-import { Container } from '../../container';
-import type { ViewNode } from '../../views/nodes/abstract/viewNode';
-import type { RevealOptions } from '../../views/viewBase';
-import { executeGitCommand } from '../actions';
-import type { GitReference, GitTagReference } from '../models/reference';
-import type { Repository } from '../models/repository';
+import type { GitReference, GitTagReference } from '@gitlens/git/models/reference.js';
+import { Container } from '../../container.js';
+import type { ViewNode } from '../../views/nodes/abstract/viewNode.js';
+import type { RevealOptions } from '../../views/viewBase.js';
+import { executeGitCommand } from '../actions.js';
+import type { GlRepository } from '../models/repository.js';
 
-export function create(repo?: string | Repository, ref?: GitReference, name?: string): Promise<void> {
+export function create(repo?: string | GlRepository, ref?: GitReference, name?: string): Promise<void> {
 	return executeGitCommand({
 		command: 'tag',
-		state: {
-			subcommand: 'create',
-			repo: repo,
-			reference: ref,
-			name: name,
-		},
+		state: { subcommand: 'create', repo: repo, reference: ref, name: name },
 	});
 }
 
-export function remove(repo?: string | Repository, refs?: GitTagReference | GitTagReference[]): Promise<void> {
+export function remove(repo?: string | GlRepository, refs?: GitTagReference | GitTagReference[]): Promise<void> {
 	return executeGitCommand({
 		command: 'tag',
-		state: {
-			subcommand: 'delete',
-			repo: repo,
-			references: refs,
-		},
+		state: { subcommand: 'delete', repo: repo, references: refs },
 	});
 }
 

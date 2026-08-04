@@ -1,36 +1,43 @@
 import type { ConfigurationChangeEvent } from 'vscode';
 import { Disposable } from 'vscode';
-import { GlyphChars } from '../constants';
-import type { IntegrationIds } from '../constants.integrations';
-import { IssuesCloudHostIntegrationId } from '../constants.integrations';
-import type { Container } from '../container';
-import type { GitRemote } from '../git/models/remote';
-import type { RemoteProviderId } from '../git/remotes/remoteProvider';
-import { getIssueOrPullRequestHtmlIcon, getIssueOrPullRequestMarkdownIcon } from '../git/utils/-webview/icons';
-import type { ConfiguredIntegrationsChangeEvent } from '../plus/integrations/authentication/configuredIntegrationService';
-import type { GitHostIntegration } from '../plus/integrations/models/gitHostIntegration';
-import type { Integration } from '../plus/integrations/models/integration';
-import { IntegrationBase } from '../plus/integrations/models/integration';
-import type { IssuesIntegration } from '../plus/integrations/models/issuesIntegration';
-import { convertRemoteProviderIdToIntegrationId } from '../plus/integrations/utils/-webview/integration.utils';
-import { configuration } from '../system/-webview/configuration';
-import { fromNow } from '../system/date';
-import { debug } from '../system/decorators/log';
-import { encodeUrl } from '../system/encoding';
-import { join, map } from '../system/iterable';
-import { Logger } from '../system/logger';
-import { escapeMarkdown } from '../system/markdown';
-import { getSettledValue, isPromise } from '../system/promise';
-import { PromiseCache } from '../system/promiseCache';
-import { capitalize, encodeHtmlWeak, getSuperscript } from '../system/string';
+import type { DynamicAutolinkReference } from '@gitlens/git/models/autolink.js';
+import type { GitRemote } from '@gitlens/git/models/remote.js';
+import type { RemoteProvider, RemoteProviderId } from '@gitlens/git/models/remoteProvider.js';
+import type { ConfiguredIntegrationsChangeEvent } from '@gitlens/integrations/authentication/configuredIntegrationService.js';
+import type { IntegrationIds } from '@gitlens/integrations/constants.js';
+import type { GitHostIntegration } from '@gitlens/integrations/models/gitHostIntegration.js';
+import type { Integration } from '@gitlens/integrations/models/integration.js';
+import { IntegrationBase } from '@gitlens/integrations/models/integration.js';
+import type { IssuesIntegration } from '@gitlens/integrations/models/issuesIntegration.js';
+import {
+	convertRemoteProviderIdToIntegrationId,
+	getIntegrationIdForRemote,
+} from '@gitlens/integrations/utils/integration.utils.js';
+import { fromNow } from '@gitlens/utils/date.js';
+import { trace } from '@gitlens/utils/decorators/log.js';
+import { encodeUrl } from '@gitlens/utils/encoding.js';
+import { join, map } from '@gitlens/utils/iterable.js';
+import { Logger } from '@gitlens/utils/logger.js';
+import { escapeMarkdown, unescapeMarkdown } from '@gitlens/utils/markdown.js';
+import { getSettledValue, isPromise } from '@gitlens/utils/promise.js';
+import { PromiseCache, PromiseMap } from '@gitlens/utils/promiseCache.js';
+import { capitalize, encodeHtmlWeak, getSuperscript } from '@gitlens/utils/string.js';
+import type { OpenIssueActionContext } from '../api/gitlens.d.js';
+import { OpenIssueOnRemoteCommand } from '../commands/openIssueOnRemote.js';
+import { GlyphChars } from '../constants.js';
+import type { Source } from '../constants.telemetry.js';
+import type { Container } from '../container.js';
+import { getIssueOrPullRequestHtmlIcon, getIssueOrPullRequestMarkdownIcon } from '../git/utils/-webview/icons.js';
+import { getRemoteIntegration, isRemoteMaybeIntegrationConnected } from '../git/utils/-webview/remote.utils.js';
+import { configuration } from '../system/-webview/configuration.js';
 import type {
 	Autolink,
-	CacheableAutolinkReference,
-	DynamicAutolinkReference,
 	EnrichedAutolink,
+	GlCacheableAutolinkReference,
+	GlDynamicAutolinkReference,
 	MaybeEnrichedAutolink,
 	RefSet,
-} from './models/autolinks';
+} from './models/autolinks.js';
 import {
 	ensureCachedRegex,
 	getAutolinks,
@@ -38,14 +45,17 @@ import {
 	isDynamic,
 	numRegex,
 	supportedAutolinkIntegrations,
-} from './utils/-webview/autolinks.utils';
+} from './utils/-webview/autolinks.utils.js';
 
 const emptyAutolinkMap = Object.freeze(new Map<string, Autolink>());
+const tokenRegex = /(\x00\d+\x00)/g; // oxlint-disable-line no-control-regex
+const quoteRegex = /"/g;
 
 export class AutolinksProvider implements Disposable {
 	private _disposable: Disposable | undefined;
-	private _references: CacheableAutolinkReference[] = [];
+	private _references: GlCacheableAutolinkReference[] = [];
 	private _refsetCache = new PromiseCache<string | undefined, RefSet[]>({ accessTTL: 1000 * 60 * 60 });
+	private _inflightEnrichmentCache = new PromiseMap<string, Map<string, EnrichedAutolink> | undefined>();
 
 	constructor(private readonly container: Container) {
 		this._disposable = Disposable.from(
@@ -58,17 +68,20 @@ export class AutolinksProvider implements Disposable {
 
 	dispose(): void {
 		this._disposable?.dispose();
+		this._inflightEnrichmentCache.clear();
 	}
 
 	private onConfigurationChanged(e?: ConfigurationChangeEvent) {
 		if (configuration.changed(e, 'autolinks')) {
 			this.setAutolinksFromConfig();
 			this._refsetCache.clear();
+			this._inflightEnrichmentCache.clear();
 		}
 	}
 
 	private onIntegrationsChanged(_e: ConfiguredIntegrationsChangeEvent) {
 		this._refsetCache.clear();
+		this._inflightEnrichmentCache.clear();
 	}
 
 	private setAutolinksFromConfig() {
@@ -91,7 +104,7 @@ export class AutolinksProvider implements Disposable {
 		const integrationPromises: Promise<GitHostIntegration | IssuesIntegration | undefined>[] =
 			supportedAutolinkIntegrations.map(async id => this.container.integrations.get(id));
 		if (remote?.provider != null) {
-			integrationPromises.push(remote.getIntegration());
+			integrationPromises.push(getRemoteIntegration(remote));
 		}
 
 		const integrations = new Set<GitHostIntegration | IssuesIntegration>();
@@ -118,7 +131,7 @@ export class AutolinksProvider implements Disposable {
 			}
 		}
 
-		if (promises.length === 0) return;
+		if (!promises.length) return;
 
 		await Promise.allSettled(promises);
 	}
@@ -142,7 +155,7 @@ export class AutolinksProvider implements Disposable {
 	}
 
 	private async getRefSets(remote?: GitRemote, forBranch?: boolean) {
-		return this._refsetCache.get(remote?.remoteKey, async () => {
+		return this._refsetCache.getOrCreate(`${remote?.remoteKey}${forBranch ? ':branch' : ''}`, async () => {
 			const refsets: RefSet[] = [];
 
 			await this.collectIntegrationAutolinks(forBranch ? undefined : remote, refsets);
@@ -156,58 +169,68 @@ export class AutolinksProvider implements Disposable {
 	/** @returns A sorted list of autolinks. the first match is the most relevant */
 	async getBranchAutolinks(branchName: string, remote?: GitRemote): Promise<Map<string, Autolink>> {
 		const refsets = await this.getRefSets(remote, true);
-		if (refsets.length === 0) return emptyAutolinkMap;
+		if (!refsets.length) return emptyAutolinkMap;
 
 		return getBranchAutolinks(branchName, refsets);
 	}
 
-	@debug<AutolinksProvider['getAutolinks']>({
-		args: {
-			0: '<message>',
-			1: false,
-		},
-	})
+	@trace({ args: () => ({ message: '<message>' }) })
 	async getAutolinks(message: string, remote?: GitRemote): Promise<Map<string, Autolink>> {
 		const refsets = await this.getRefSets(remote);
-		if (refsets.length === 0) return emptyAutolinkMap;
+		if (!refsets.length) return emptyAutolinkMap;
 
 		return getAutolinks(message, refsets);
 	}
 
-	getAutolinkEnrichableId(autolink: Autolink): string {
-		switch (autolink.provider?.id) {
-			case IssuesCloudHostIntegrationId.Jira:
-				return `${autolink.prefix}${autolink.id}`;
-			default:
-				return autolink.id;
-		}
+	getAutolinkEnrichableId(autolink: Autolink): { id: string; key: string } {
+		return { id: autolink.id, key: `${autolink.prefix}${autolink.id}` };
 	}
 
-	async getEnrichedAutolinks(
+	getEnrichedAutolinks(
 		message: string,
 		remote: GitRemote | undefined,
+		options?: { cached?: boolean },
 	): Promise<Map<string, EnrichedAutolink> | undefined>;
-	async getEnrichedAutolinks(
+	getEnrichedAutolinks(
 		autolinks: Map<string, Autolink>,
 		remote: GitRemote | undefined,
+		options?: { cached?: boolean },
 	): Promise<Map<string, EnrichedAutolink> | undefined>;
-	@debug<AutolinksProvider['getEnrichedAutolinks']>({
-		args: {
-			0: messageOrAutolinks =>
+	@trace({
+		args: (messageOrAutolinks, remote) => ({
+			messageOrAutolinks:
 				typeof messageOrAutolinks === 'string' ? '<message>' : `autolinks=${messageOrAutolinks.size}`,
-			1: remote => remote?.remoteKey,
-		},
+			remote: remote?.remoteKey,
+		}),
 	})
-	async getEnrichedAutolinks(
+	getEnrichedAutolinks(
+		messageOrAutolinks: string | Map<string, Autolink>,
+		remote: GitRemote | undefined,
+		options?: { cached?: boolean },
+	): Promise<Map<string, EnrichedAutolink> | undefined> {
+		const remoteKey = remote?.remoteKey ?? '';
+		const key =
+			typeof messageOrAutolinks === 'string'
+				? `m:${remoteKey}:${messageOrAutolinks}`
+				: `a:${remoteKey}:${[...messageOrAutolinks.keys()].sort().join('|')}`;
+		if (options?.cached) {
+			return this._inflightEnrichmentCache.get(key) ?? Promise.resolve(undefined);
+		}
+		return this._inflightEnrichmentCache.getOrCreate(key, () =>
+			this.enrichAutolinksCore(messageOrAutolinks, remote),
+		);
+	}
+
+	private async enrichAutolinksCore(
 		messageOrAutolinks: string | Map<string, Autolink>,
 		remote: GitRemote | undefined,
 	): Promise<Map<string, EnrichedAutolink> | undefined> {
 		if (typeof messageOrAutolinks === 'string') {
 			messageOrAutolinks = await this.getAutolinks(messageOrAutolinks, remote);
 		}
-		if (messageOrAutolinks.size === 0) return undefined;
+		if (!messageOrAutolinks.size) return undefined;
 
-		let integration = await remote?.getIntegration();
+		let integration = remote != null ? await getRemoteIntegration(remote) : undefined;
 		if (integration != null) {
 			const connected = integration.maybeConnected ?? (await integration.isConnected());
 			if (!connected || !(await integration.access())) {
@@ -227,12 +250,11 @@ export class AutolinksProvider implements Disposable {
 						: // TODO: Tighten the typing on ProviderReference to be specific to a remote provider, and then have a separate "integration" property (on autolinks and elsewhere)
 							// that is of a new type IntegrationReference specific to integrations. Otherwise, make remote provider ids line up directly with integration ids.
 							// Either way, this converting/casting hackery needs to go away.
-							convertRemoteProviderIdToIntegrationId(link.provider.id as RemoteProviderId);
-				if (integrationId == null) {
-					// Fall back to the old logic assuming that integration id might be saved as provider id.
-					// TODO: it should be removed when we put providers and integrations in order. Conversation: https://github.com/gitkraken/vscode-gitlens/pull/3996#discussion_r1936422826
-					integrationId = link.provider.id as IntegrationIds;
-				}
+							(getIntegrationIdForRemote(link.provider as RemoteProvider) ??
+							convertRemoteProviderIdToIntegrationId(link.provider.id as RemoteProviderId));
+				// Fall back to the old logic assuming that integration id might be saved as provider id.
+				// TODO: it should be removed when we put providers and integrations in order. Conversation: https://github.com/gitkraken/vscode-gitlens/pull/3996#discussion_r1936422826
+				integrationId ??= link.provider.id as IntegrationIds;
 				try {
 					linkIntegration = await this.container.integrations.get(integrationId);
 				} catch (e) {
@@ -251,15 +273,19 @@ export class AutolinksProvider implements Disposable {
 				integration != null &&
 				integrationId === integration.id &&
 				link.provider?.domain === integration.domain
-					? integration.getIssueOrPullRequest(
+					? integration.getLinkedIssueOrPullRequest(
 							link.descriptor ?? remote.provider.repoDesc,
 							this.getAutolinkEnrichableId(link),
 							{ type: link.type },
 						)
 					: link.descriptor != null
-						? linkIntegration?.getIssueOrPullRequest(link.descriptor, this.getAutolinkEnrichableId(link), {
-								type: link.type,
-							})
+						? linkIntegration?.getLinkedIssueOrPullRequest(
+								link.descriptor,
+								this.getAutolinkEnrichableId(link),
+								{
+									type: link.type,
+								},
+							)
 						: undefined;
 			enrichedAutolinks.set(id, [issueOrPullRequestPromise, link]);
 		}
@@ -267,13 +293,14 @@ export class AutolinksProvider implements Disposable {
 		return enrichedAutolinks;
 	}
 
-	@debug<AutolinksProvider['linkify']>({
-		args: {
-			0: '<text>',
-			2: remotes => remotes?.length,
-			3: issuesAndPullRequests => issuesAndPullRequests?.size,
-			4: footnotes => footnotes?.size,
-		},
+	@trace({
+		args: (_text, outputFormat, remotes, enrichedAutolinks, prs) => ({
+			text: '<text>',
+			outputFormat: outputFormat,
+			remotes: remotes?.length,
+			enrichedAutolinks: enrichedAutolinks?.size,
+			prs: prs?.size,
+		}),
 	})
 	linkify(
 		text: string,
@@ -282,6 +309,7 @@ export class AutolinksProvider implements Disposable {
 		enrichedAutolinks?: Map<string, MaybeEnrichedAutolink>,
 		prs?: Set<string>,
 		footnotes?: Map<number, string>,
+		source?: Source,
 	): string {
 		const includeFootnotesInText = outputFormat === 'plaintext' && footnotes == null;
 		if (includeFootnotesInText) {
@@ -292,51 +320,74 @@ export class AutolinksProvider implements Disposable {
 
 		if (enrichedAutolinks?.size) {
 			for (const [, [, link]] of enrichedAutolinks) {
-				if (this.ensureAutolinkCached(link)) {
-					if (link.tokenize != null) {
-						text = link.tokenize(text, outputFormat, tokenMapping, enrichedAutolinks, prs, footnotes);
-					}
+				if (this.ensureAutolinkRegexCached(link)) {
+					text = renderCacheableAutolink(
+						link,
+						text,
+						outputFormat,
+						tokenMapping,
+						enrichedAutolinks,
+						prs,
+						footnotes,
+						source,
+					);
 				}
 			}
 		} else {
 			for (const ref of this._references) {
-				if (this.ensureAutolinkCached(ref)) {
-					if (ref.tokenize != null) {
-						text = ref.tokenize(text, outputFormat, tokenMapping, enrichedAutolinks, prs, footnotes);
-					}
+				if (this.ensureAutolinkRegexCached(ref)) {
+					text = renderCacheableAutolink(
+						ref,
+						text,
+						outputFormat,
+						tokenMapping,
+						enrichedAutolinks,
+						prs,
+						footnotes,
+						source,
+					);
 				}
 			}
 
 			if (remotes?.length) {
-				remotes = [...remotes].sort((a, b) => {
-					const aConnected = a.maybeIntegrationConnected;
-					const bConnected = b.maybeIntegrationConnected;
+				remotes = remotes.toSorted((a, b) => {
+					const aConnected = isRemoteMaybeIntegrationConnected(a);
+					const bConnected = isRemoteMaybeIntegrationConnected(b);
 					return aConnected !== bConnected ? (aConnected ? -1 : bConnected ? 1 : 0) : 0;
 				});
 				for (const r of remotes) {
 					if (r.provider == null) continue;
 
 					for (const ref of r.provider.autolinks) {
-						if (this.ensureAutolinkCached(ref)) {
-							if (ref.tokenize != null) {
-								text = ref.tokenize(
-									text,
-									outputFormat,
-									tokenMapping,
-									enrichedAutolinks,
-									prs,
-									footnotes,
-								);
-							}
+						if (isDynamic(ref)) {
+							text = renderDynamicAutolink(
+								ref,
+								text,
+								outputFormat,
+								tokenMapping,
+								enrichedAutolinks,
+								prs,
+								footnotes,
+							);
+						} else if (this.ensureAutolinkRegexCached(ref)) {
+							text = renderCacheableAutolink(
+								ref,
+								text,
+								outputFormat,
+								tokenMapping,
+								enrichedAutolinks,
+								prs,
+								footnotes,
+								source,
+							);
 						}
 					}
 				}
 			}
 		}
 
-		if (tokenMapping.size !== 0) {
-			// eslint-disable-next-line no-control-regex
-			text = text.replace(/(\x00\d+\x00)/g, (_, t: string) => tokenMapping.get(t) ?? t);
+		if (tokenMapping.size) {
+			text = text.replace(tokenRegex, (_, t: string) => tokenMapping.get(t) ?? t);
 		}
 
 		if (includeFootnotesInText && footnotes?.size) {
@@ -349,208 +400,292 @@ export class AutolinksProvider implements Disposable {
 		return text;
 	}
 
-	private ensureAutolinkCached(
-		ref: CacheableAutolinkReference | DynamicAutolinkReference | Autolink,
-	): ref is CacheableAutolinkReference | DynamicAutolinkReference | Autolink {
-		if (isDynamic(ref)) return true;
+	private ensureAutolinkRegexCached(
+		ref: GlCacheableAutolinkReference | GlDynamicAutolinkReference | Autolink,
+	): ref is GlCacheableAutolinkReference | Autolink {
+		if (isDynamic(ref)) return false;
 		if (!ref.prefix || !ref.url) return false;
-		if (ref.tokenize !== undefined || ref.tokenize === null) return true;
 
 		try {
-			ref.tokenize = (
-				text: string,
-				outputFormat: 'html' | 'markdown' | 'plaintext',
-				tokenMapping: Map<string, string>,
-				enrichedAutolinks?: Map<string, MaybeEnrichedAutolink>,
-				prs?: Set<string>,
-				footnotes?: Map<number, string>,
-			) => {
-				let footnoteIndex: number;
+			ensureCachedRegex(ref, 'markdown');
+			ensureCachedRegex(ref, 'html');
+			ensureCachedRegex(ref, 'plaintext');
+		} catch (ex) {
+			Logger.error(
+				ex,
+				`Failed to cache autolink regex: prefix=${ref.prefix}, url=${ref.url}, title=${ref.title}`,
+			);
+			return false;
+		}
 
-				switch (outputFormat) {
-					case 'markdown':
-						ensureCachedRegex(ref, outputFormat);
-						return text.replace(
-							ref.messageMarkdownRegex,
-							(_: string, prefix: string, linkText: string, num: string) => {
-								const url = encodeUrl(ref.url.replace(numRegex, num));
+		return true;
+	}
+}
 
-								let title = '';
-								if (ref.title) {
-									title = ` "${ref.title.replace(numRegex, num)}`;
+function renderCacheableAutolink(
+	ref: GlCacheableAutolinkReference | Autolink,
+	text: string,
+	outputFormat: 'html' | 'markdown' | 'plaintext',
+	tokenMapping: Map<string, string>,
+	enrichedAutolinks?: Map<string, MaybeEnrichedAutolink>,
+	prs?: Set<string>,
+	footnotes?: Map<number, string>,
+	source?: Source,
+): string {
+	let footnoteIndex: number;
 
-									const issueResult = enrichedAutolinks?.get(num)?.[0];
-									if (issueResult?.value != null) {
-										if (issueResult.paused) {
-											if (footnotes != null && !prs?.has(num)) {
-												let name = ref.description?.replace(numRegex, num);
-												if (name == null) {
-													name = `Custom Autolink ${ref.prefix}${num}`;
-												}
-												footnoteIndex = footnotes.size + 1;
-												footnotes.set(
-													footnoteIndex,
-													`[${getIssueOrPullRequestMarkdownIcon()} ${name} $(loading~spin)](${url}${title}")`,
-												);
-											}
+	switch (outputFormat) {
+		case 'markdown':
+			ensureCachedRegex(ref, outputFormat);
+			return text.replace(
+				ref.messageMarkdownRegex,
+				(_: string, prefix: string, linkText: string, num: string) => {
+					const rawUrl = encodeUrl(ref.url.replace(numRegex, num));
+					const footnoteSource = source && { ...source, detail: 'footnote' };
+					const urlCommandContext: {
+						provider: undefined | OpenIssueActionContext['provider'];
+						issue: { url: string };
+					} = {
+						provider: undefined,
+						issue: { url: rawUrl },
+					};
 
-											title += `\n${GlyphChars.Dash.repeat(2)}\nLoading...`;
-										} else {
-											const issue = issueResult.value;
-											const issueTitle = escapeMarkdown(issue.title.trim());
-											const issueTitleQuoteEscaped = issueTitle.replace(/"/g, '\\"');
+					let title = '';
+					if (ref.title) {
+						title = ` "${ref.title.replace(numRegex, num)}`;
 
-											if (footnotes != null && !prs?.has(num)) {
-												footnoteIndex = footnotes.size + 1;
-												footnotes.set(
-													footnoteIndex,
-													`[${getIssueOrPullRequestMarkdownIcon(
-														issue,
-													)} **${issueTitle}**](${url}${title}")\\\n${GlyphChars.Space.repeat(
-														5,
-													)}${linkText} ${issue.state} ${fromNow(
-														issue.closedDate ?? issue.createdDate,
-													)}`,
-												);
-											}
-
-											title += `\n${GlyphChars.Dash.repeat(
-												2,
-											)}\n${issueTitleQuoteEscaped}\n${capitalize(issue.state)}, ${fromNow(
-												issue.closedDate ?? issue.createdDate,
-											)}`;
-										}
-									} else if (footnotes != null && !prs?.has(num)) {
-										let name = ref.description?.replace(numRegex, num);
-										if (name == null) {
-											name = `Custom Autolink ${ref.prefix}${num}`;
-										}
-										footnoteIndex = footnotes.size + 1;
-										footnotes.set(
-											footnoteIndex,
-											`[${getIssueOrPullRequestMarkdownIcon()} ${name}](${url}${title}")`,
-										);
-									}
-									title += '"';
+						const issueResult = enrichedAutolinks?.get(num)?.[0];
+						if (issueResult?.value != null) {
+							if (issueResult.paused) {
+								if (footnotes != null && !prs?.has(num)) {
+									const url = OpenIssueOnRemoteCommand.createMarkdownCommandLink({
+										...urlCommandContext,
+										source: footnoteSource,
+									});
+									const name =
+										ref.description?.replace(numRegex, num) ??
+										`Custom Autolink ${ref.prefix}${num}`;
+									footnoteIndex = footnotes.size + 1;
+									footnotes.set(
+										footnoteIndex,
+										`[${getIssueOrPullRequestMarkdownIcon()} ${name} $(loading~spin)](${url}${title}")`,
+									);
 								}
 
-								const token = `\x00${tokenMapping.size}\x00`;
-								tokenMapping.set(token, `[${linkText}](${url}${title})`);
-								return `${prefix}${token}`;
-							},
-						);
+								title += `\n${GlyphChars.Dash.repeat(2)}\nLoading...`;
+							} else {
+								const issue = issueResult.value;
+								const issueTitle = escapeMarkdown(issue.title.trim());
+								const issueTitleQuoteEscaped = issueTitle.replace(quoteRegex, '\\"');
 
-					case 'html':
-						ensureCachedRegex(ref, outputFormat);
-						return text.replace(
-							ref.messageHtmlRegex,
-							(_: string, prefix: string, linkText: string, num: string) => {
-								const url = encodeUrl(ref.url.replace(numRegex, num));
-
-								let title = '';
-								if (ref.title) {
-									title = `"${encodeHtmlWeak(ref.title.replace(numRegex, num))}`;
-
-									const issueResult = enrichedAutolinks?.get(num)?.[0];
-									if (issueResult?.value != null) {
-										if (issueResult.paused) {
-											if (footnotes != null && !prs?.has(num)) {
-												let name = ref.description?.replace(numRegex, num);
-												if (name == null) {
-													name = `Custom Autolink ${ref.prefix}${num}`;
-												}
-												footnoteIndex = footnotes.size + 1;
-												footnotes.set(
-													footnoteIndex,
-													`<a href="${url}" title=${title}>${getIssueOrPullRequestHtmlIcon()} ${name}</a>`,
-												);
-											}
-
-											title += `\n${GlyphChars.Dash.repeat(2)}\nLoading...`;
-										} else {
-											const issue = issueResult.value;
-											const issueTitle = encodeHtmlWeak(issue.title.trim());
-											const issueTitleQuoteEscaped = issueTitle.replace(/"/g, '&quot;');
-
-											if (footnotes != null && !prs?.has(num)) {
-												footnoteIndex = footnotes.size + 1;
-												footnotes.set(
-													footnoteIndex,
-													`<a href="${url}" title=${title}>${getIssueOrPullRequestHtmlIcon(
-														issue,
-													)} <b>${issueTitle}</b></a><br /><span>${GlyphChars.Space.repeat(
-														5,
-													)}${linkText} ${issue.state} ${fromNow(
-														issue.closedDate ?? issue.createdDate,
-													)}</span>`,
-												);
-											}
-
-											title += `\n${GlyphChars.Dash.repeat(
-												2,
-											)}\n${issueTitleQuoteEscaped}\n${capitalize(issue.state)}, ${fromNow(
-												issue.closedDate ?? issue.createdDate,
-											)}`;
-										}
-									} else if (footnotes != null && !prs?.has(num)) {
-										let name = ref.description?.replace(numRegex, num);
-										if (name == null) {
-											name = `Custom Autolink ${ref.prefix}${num}`;
-										}
-										footnoteIndex = footnotes.size + 1;
-										footnotes.set(
-											footnoteIndex,
-											`<a href="${url}" title=${title}>${getIssueOrPullRequestHtmlIcon()} ${name}</a>`,
-										);
-									}
-									title += '"';
-								}
-
-								const token = `\x00${tokenMapping.size}\x00`;
-								tokenMapping.set(token, `<a href="${url}" title=${title}>${linkText}</a>`);
-								return `${prefix}${token}`;
-							},
-						);
-
-					default:
-						ensureCachedRegex(ref, outputFormat);
-						return text.replace(
-							ref.messageRegex,
-							(_: string, prefix: string, linkText: string, num: string) => {
-								const issueResult = enrichedAutolinks?.get(num)?.[0];
-								if (issueResult?.value == null) return linkText;
+								urlCommandContext.provider = issue.provider && {
+									id: issue.provider.id,
+									name: issue.provider.name,
+									domain: issue.provider.domain,
+								};
+								const url = OpenIssueOnRemoteCommand.createMarkdownCommandLink({
+									...urlCommandContext,
+									source: footnoteSource,
+								});
 
 								if (footnotes != null && !prs?.has(num)) {
 									footnoteIndex = footnotes.size + 1;
 									footnotes.set(
 										footnoteIndex,
-										`${linkText}: ${
-											issueResult.paused
-												? 'Loading...'
-												: `${issueResult.value.title}  ${GlyphChars.Dot}  ${capitalize(
-														issueResult.value.state,
-													)}, ${fromNow(
-														issueResult.value.closedDate ?? issueResult.value.createdDate,
-													)}`
-										}`,
+										`[${getIssueOrPullRequestMarkdownIcon(
+											issue,
+										)} **${issueTitle}**](${url}${title}")\\\n${GlyphChars.Space.repeat(
+											5,
+										)}${linkText} ${issue.state} ${fromNow(issue.closedDate ?? issue.createdDate)}`,
 									);
 								}
 
-								const token = `\x00${tokenMapping.size}\x00`;
-								tokenMapping.set(token, `${linkText}${getSuperscript(footnoteIndex)}`);
-								return `${prefix}${token}`;
-							},
-						);
-				}
-			};
-		} catch (ex) {
-			Logger.error(
-				ex,
-				`Failed to create autolink generator: prefix=${ref.prefix}, url=${ref.url}, title=${ref.title}`,
-			);
-			ref.tokenize = null;
-		}
+								title += `\n${GlyphChars.Dash.repeat(
+									2,
+								)}\n${issueTitleQuoteEscaped}\n${capitalize(issue.state)}, ${fromNow(
+									issue.closedDate ?? issue.createdDate,
+								)}`;
+							}
+						} else if (footnotes != null && !prs?.has(num)) {
+							const url = OpenIssueOnRemoteCommand.createMarkdownCommandLink({
+								...urlCommandContext,
+								source: footnoteSource,
+							});
+							const name =
+								ref.description?.replace(numRegex, num) ?? `Custom Autolink ${ref.prefix}${num}`;
+							footnoteIndex = footnotes.size + 1;
+							footnotes.set(
+								footnoteIndex,
+								`[${getIssueOrPullRequestMarkdownIcon()} ${name}](${url}${title}")`,
+							);
+						}
+						title += '"';
+					}
 
-		return true;
+					const url = OpenIssueOnRemoteCommand.createMarkdownCommandLink({
+						...urlCommandContext,
+						source: source,
+					});
+					const token = `\x00${tokenMapping.size}\x00`;
+					tokenMapping.set(token, `[${linkText}](${url}${title})`);
+					return `${prefix}${token}`;
+				},
+			);
+
+		case 'html':
+			ensureCachedRegex(ref, outputFormat);
+			return text.replace(ref.messageHtmlRegex, (_: string, prefix: string, linkText: string, num: string) => {
+				const url = encodeUrl(ref.url.replace(numRegex, num));
+
+				let title = '';
+				if (ref.title) {
+					title = `"${encodeHtmlWeak(ref.title.replace(numRegex, num))}`;
+
+					const issueResult = enrichedAutolinks?.get(num)?.[0];
+					if (issueResult?.value != null) {
+						if (issueResult.paused) {
+							if (footnotes != null && !prs?.has(num)) {
+								const name =
+									ref.description?.replace(numRegex, num) ?? `Custom Autolink ${ref.prefix}${num}`;
+								footnoteIndex = footnotes.size + 1;
+								footnotes.set(
+									footnoteIndex,
+									`<a href="${url}" title=${title}>${getIssueOrPullRequestHtmlIcon()} ${name}</a>`,
+								);
+							}
+
+							title += `\n${GlyphChars.Dash.repeat(2)}\nLoading...`;
+						} else {
+							const issue = issueResult.value;
+							const issueTitle = encodeHtmlWeak(issue.title.trim());
+							const issueTitleQuoteEscaped = issueTitle.replace(quoteRegex, '&quot;');
+
+							if (footnotes != null && !prs?.has(num)) {
+								footnoteIndex = footnotes.size + 1;
+								footnotes.set(
+									footnoteIndex,
+									`<a href="${url}" title=${title}>${getIssueOrPullRequestHtmlIcon(
+										issue,
+									)} <b>${issueTitle}</b></a><br /><span>${GlyphChars.Space.repeat(
+										5,
+									)}${linkText} ${issue.state} ${fromNow(
+										issue.closedDate ?? issue.createdDate,
+									)}</span>`,
+								);
+							}
+
+							title += `\n${GlyphChars.Dash.repeat(
+								2,
+							)}\n${issueTitleQuoteEscaped}\n${capitalize(issue.state)}, ${fromNow(
+								issue.closedDate ?? issue.createdDate,
+							)}`;
+						}
+					} else if (footnotes != null && !prs?.has(num)) {
+						const name = ref.description?.replace(numRegex, num) ?? `Custom Autolink ${ref.prefix}${num}`;
+						footnoteIndex = footnotes.size + 1;
+						footnotes.set(
+							footnoteIndex,
+							`<a href="${url}" title=${title}>${getIssueOrPullRequestHtmlIcon()} ${name}</a>`,
+						);
+					}
+					title += '"';
+				}
+
+				const token = `\x00${tokenMapping.size}\x00`;
+				tokenMapping.set(token, `<a href="${url}" title=${title}>${linkText}</a>`);
+				return `${prefix}${token}`;
+			});
+
+		default:
+			ensureCachedRegex(ref, outputFormat);
+			return text.replace(ref.messageRegex, (_: string, prefix: string, linkText: string, num: string) => {
+				const issueResult = enrichedAutolinks?.get(num)?.[0];
+				if (issueResult?.value == null) return linkText;
+
+				if (footnotes != null && !prs?.has(num)) {
+					footnoteIndex = footnotes.size + 1;
+					footnotes.set(
+						footnoteIndex,
+						`${linkText}: ${
+							issueResult.paused
+								? 'Loading...'
+								: `${issueResult.value.title}  ${GlyphChars.Dot}  ${capitalize(
+										issueResult.value.state,
+									)}, ${fromNow(issueResult.value.closedDate ?? issueResult.value.createdDate)}`
+						}`,
+					);
+				}
+
+				const token = `\x00${tokenMapping.size}\x00`;
+				tokenMapping.set(token, `${linkText}${getSuperscript(footnoteIndex)}`);
+				return `${prefix}${token}`;
+			});
+	}
+}
+
+function renderDynamicAutolink(
+	ref: DynamicAutolinkReference,
+	text: string,
+	outputFormat: 'html' | 'markdown' | 'plaintext',
+	tokenMapping: Map<string, string>,
+	enrichedAutolinks?: Map<string, MaybeEnrichedAutolink>,
+	prs?: Set<string>,
+	footnotes?: Map<number, string>,
+): string {
+	if (outputFormat === 'plaintext' || !ref.descriptors?.length) return text;
+
+	for (const desc of ref.descriptors) {
+		desc.regex.lastIndex = 0;
+		text = text.replace(desc.regex, (linkText: string, repo: string, num: string) => {
+			const url = encodeUrl(desc.url(unescapeMarkdown(repo), num));
+			const title = ` "${desc.title(repo, num)}"`;
+
+			const token = `\x00${tokenMapping.size}\x00`;
+			if (outputFormat === 'markdown') {
+				tokenMapping.set(token, `[${linkText}](${url}${title})`);
+			} else {
+				tokenMapping.set(token, `<a href="${url}" title=${title}>${linkText}</a>`);
+			}
+
+			appendFootnote(desc.label(repo, num), num, url, title, linkText, enrichedAutolinks, prs, footnotes);
+			return token;
+		});
+	}
+
+	return text;
+}
+
+function appendFootnote(
+	label: string,
+	num: string,
+	url: string,
+	title: string,
+	linkText: string,
+	enrichedAutolinks?: Map<string, MaybeEnrichedAutolink>,
+	prs?: Set<string>,
+	footnotes?: Map<number, string>,
+): void {
+	if (footnotes == null || prs?.has(num)) return;
+
+	const issueResult = enrichedAutolinks?.get(num)?.[0];
+	if (issueResult?.value != null) {
+		if (issueResult.paused) {
+			const footnoteIndex = footnotes.size + 1;
+			footnotes.set(
+				footnoteIndex,
+				`[${getIssueOrPullRequestMarkdownIcon()} ${label} $(loading~spin)](${url}${title}")`,
+			);
+		} else {
+			const issue = issueResult.value;
+			const issueTitle = escapeMarkdown(issue.title.trim());
+			const footnoteIndex = footnotes.size + 1;
+			footnotes.set(
+				footnoteIndex,
+				`[${getIssueOrPullRequestMarkdownIcon(issue)} **${issueTitle}**](${url}${title})\\\n${GlyphChars.Space.repeat(5)}${linkText} ${issue.state} ${fromNow(issue.closedDate ?? issue.createdDate)}`,
+			);
+		}
+	} else {
+		const footnoteIndex = footnotes.size + 1;
+		footnotes.set(footnoteIndex, `[${getIssueOrPullRequestMarkdownIcon()} ${label}](${url}${title})`);
 	}
 }

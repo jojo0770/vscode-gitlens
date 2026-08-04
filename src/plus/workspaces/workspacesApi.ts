@@ -1,10 +1,9 @@
-import type { RequestInit } from '@env/fetch';
-import type { Container } from '../../container';
-import { log } from '../../system/decorators/log';
-import { Logger } from '../../system/logger';
-import type { GraphQLRequest, ServerConnection } from '../gk/serverConnection';
-import type { CloudWorkspaceData } from './models/cloudWorkspace';
-import { CloudWorkspaceProviderInputType } from './models/cloudWorkspace';
+import { debug } from '@gitlens/utils/decorators/log.js';
+import { Logger } from '@gitlens/utils/logger.js';
+import type { Container } from '../../container.js';
+import type { GraphQLRequest, ServerConnection } from '../gk/serverConnection.js';
+import type { CloudWorkspaceData } from './models/cloudWorkspace.js';
+import { CloudWorkspaceProviderInputType } from './models/cloudWorkspace.js';
 import type {
 	AddRepositoriesToWorkspaceResponse,
 	AddWorkspaceRepoDescriptor,
@@ -16,8 +15,8 @@ import type {
 	WorkspaceRepositoriesResponse,
 	WorkspaceResponse,
 	WorkspacesResponse,
-} from './models/workspaces';
-import { defaultWorkspaceCount, defaultWorkspaceRepoCount } from './models/workspaces';
+} from './models/workspaces.js';
+import { defaultWorkspaceCount, defaultWorkspaceRepoCount } from './models/workspaces.js';
 
 export class WorkspacesApi {
 	constructor(
@@ -25,7 +24,7 @@ export class WorkspacesApi {
 		private readonly connection: ServerConnection,
 	) {}
 
-	@log()
+	@debug()
 	async getWorkspace(
 		id: string,
 		options?: {
@@ -96,7 +95,7 @@ export class WorkspacesApi {
 		return json;
 	}
 
-	@log()
+	@debug()
 	async getWorkspaces(options?: {
 		count?: number;
 		cursor?: string;
@@ -179,12 +178,15 @@ export class WorkspacesApi {
 		}
 
 		const addedWorkspaceIds = new Set<string>();
-		const json: { data: Record<string, CloudWorkspaceConnection<CloudWorkspaceData> | null> } | undefined =
-			await rsp.json();
+		const json = (await rsp.json()) as
+			| { data: Record<string, CloudWorkspaceConnection<CloudWorkspaceData> | null> }
+			| undefined;
 		if (json?.data == null) return undefined;
+
 		let outputData: WorkspacesResponse | undefined;
 		for (const workspaceData of Object.values(json.data)) {
 			if (workspaceData == null) continue;
+
 			if (outputData == null) {
 				outputData = { data: { projects: workspaceData } };
 				for (const node of workspaceData.nodes) {
@@ -193,6 +195,7 @@ export class WorkspacesApi {
 			} else {
 				for (const node of workspaceData.nodes) {
 					if (addedWorkspaceIds.has(node.id)) continue;
+
 					addedWorkspaceIds.add(node.id);
 					outputData.data.projects.nodes.push(node);
 				}
@@ -206,7 +209,7 @@ export class WorkspacesApi {
 		return outputData;
 	}
 
-	@log()
+	@debug()
 	async getWorkspaceRepositories(
 		workspaceId: string,
 		options?: {
@@ -263,7 +266,7 @@ export class WorkspacesApi {
 		return json;
 	}
 
-	@log()
+	@debug()
 	async createWorkspace(options: {
 		name: string;
 		description: string;
@@ -331,7 +334,7 @@ export class WorkspacesApi {
 		return json;
 	}
 
-	@log()
+	@debug()
 	async deleteWorkspace(workspaceId: string): Promise<DeleteWorkspaceResponse | undefined> {
 		const rsp = await this.fetch({
 			query: `
@@ -362,7 +365,7 @@ export class WorkspacesApi {
 		return json;
 	}
 
-	@log()
+	@debug()
 	async addReposToWorkspace(
 		workspaceId: string,
 		repos: AddWorkspaceRepoDescriptor[],
@@ -376,7 +379,7 @@ export class WorkspacesApi {
 		let count = 1;
 		const reposReturnQuery = repos
 			.map(
-				r => `Repository${count++}: repository(provider_organization_id: "${r.owner}", name: "${r.repoName}") {
+				r => `GlRepository${count++}: repository(provider_organization_id: "${r.owner}", name: "${r.repoName}") {
 			id
 			name
 			repository_id
@@ -426,7 +429,7 @@ export class WorkspacesApi {
 		return json;
 	}
 
-	@log()
+	@debug()
 	async removeReposFromWorkspace(
 		workspaceId: string,
 		repos: RemoveWorkspaceRepoDescriptor[],

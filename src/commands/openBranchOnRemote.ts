@@ -1,19 +1,19 @@
 import type { TextEditor, Uri } from 'vscode';
-import type { Container } from '../container';
-import { GitUri } from '../git/gitUri';
-import { RemoteResourceType } from '../git/models/remoteResource';
-import { getBranchNameWithoutRemote, getRemoteNameFromBranchName } from '../git/utils/branch.utils';
-import { showGenericErrorMessage } from '../messages';
-import { CommandQuickPickItem } from '../quickpicks/items/common';
-import { ReferencesQuickPickIncludes, showReferencePicker } from '../quickpicks/referencePicker';
-import { getBestRepositoryOrShowPicker } from '../quickpicks/repositoryPicker';
-import { command, executeCommand } from '../system/-webview/command';
-import { Logger } from '../system/logger';
-import { ActiveEditorCommand } from './commandBase';
-import { getCommandUri } from './commandBase.utils';
-import type { CommandContext } from './commandContext';
-import { isCommandContextViewNodeHasBranch } from './commandContext.utils';
-import type { OpenOnRemoteCommandArgs } from './openOnRemote';
+import { RemoteResourceType } from '@gitlens/git/models/remoteResource.js';
+import { getBranchNameWithoutRemote, getRemoteNameFromBranchName } from '@gitlens/git/utils/branch.utils.js';
+import { Logger } from '@gitlens/utils/logger.js';
+import type { Container } from '../container.js';
+import { GitUri } from '../git/gitUri.js';
+import { showGenericErrorMessage } from '../messages.js';
+import { CommandQuickPickItem } from '../quickpicks/items/common.js';
+import { showReferencePicker2 } from '../quickpicks/referencePicker.js';
+import { getBestRepositoryOrShowPicker } from '../quickpicks/repositoryPicker.js';
+import { command, executeCommand } from '../system/-webview/command.js';
+import { ActiveEditorCommand } from './commandBase.js';
+import { getCommandUri } from './commandBase.utils.js';
+import type { CommandContext } from './commandContext.js';
+import { isCommandContextViewNodeHasBranch } from './commandContext.utils.js';
+import type { OpenOnRemoteCommandArgs } from './openOnRemote.js';
 
 export interface OpenBranchOnRemoteCommandArgs {
 	branch?: string;
@@ -32,7 +32,7 @@ export class OpenBranchOnRemoteCommand extends ActiveEditorCommand {
 			args = {
 				...args,
 				branch: context.node.branch.name,
-				remote: context.node.branch.getRemoteName(),
+				remote: context.node.branch.remoteName,
 			};
 		}
 
@@ -50,6 +50,7 @@ export class OpenBranchOnRemoteCommand extends ActiveEditorCommand {
 
 		const repoPath = (
 			await getBestRepositoryOrShowPicker(
+				this.container,
 				gitUri,
 				editor,
 				args?.clipboard ? 'Copy Remote Branch URL' : 'Open Branch On Remote',
@@ -61,7 +62,7 @@ export class OpenBranchOnRemoteCommand extends ActiveEditorCommand {
 
 		try {
 			if (args.branch == null) {
-				const pick = await showReferencePicker(
+				const result = await showReferencePicker2(
 					repoPath,
 					args.clipboard ? 'Copy Remote Branch URL' : 'Open Branch On Remote',
 					args.clipboard ? 'Choose a branch to copy the URL from' : 'Choose a branch to open',
@@ -69,11 +70,13 @@ export class OpenBranchOnRemoteCommand extends ActiveEditorCommand {
 						autoPick: true,
 						// checkmarks: false,
 						filter: { branches: b => b.upstream != null },
-						include: ReferencesQuickPickIncludes.Branches,
+						include: ['branches'],
 						sort: { branches: { current: true }, tags: {} },
 					},
 				);
-				if (pick == null || pick instanceof CommandQuickPickItem) return;
+				if (result.value == null || result.value instanceof CommandQuickPickItem) return;
+
+				const pick = result.value;
 
 				if (pick.refType === 'branch') {
 					if (pick.remote || (pick.upstream != null && !pick.upstream.missing)) {

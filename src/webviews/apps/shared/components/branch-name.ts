@@ -1,34 +1,82 @@
 import type { TemplateResult } from 'lit';
-import { css, html, LitElement } from 'lit';
+import { css, html, LitElement, nothing } from 'lit';
 import { customElement, property } from 'lit/decorators.js';
-import './code-icon';
+import './code-icon.js';
 
 @customElement('gl-branch-name')
 export class GlBranchName extends LitElement {
 	static override styles = css`
 		:host {
-			display: inline-block;
+			display: inline-flex;
+			align-items: baseline;
+			min-width: 0;
 			max-width: 100%;
-			align-content: center;
-			white-space: nowrap;
+			margin-inline: var(--gl-space-2);
 			overflow: hidden;
 			text-overflow: ellipsis;
-			vertical-align: middle;
-			margin-top: -3px;
+			white-space: nowrap;
+		}
+
+		:host([appearance='pill']) {
+			padding: 0.1rem 0.6rem;
+			color: var(--gl-branch-color, var(--vscode-gitlens-graphScrollMarkerLocalBranchesColor, #4ec9b0));
+			background-color: color-mix(
+				in srgb,
+				var(--gl-branch-color, var(--vscode-gitlens-graphScrollMarkerLocalBranchesColor, #4ec9b0)) 15%,
+				transparent
+			);
+			border-radius: var(--gl-radius-sm);
+		}
+
+		:host([appearance='button']) {
+			padding: var(--gl-space-2) var(--gl-space-4);
+			font-size: var(--gl-font-base);
+			color: var(--gl-branch-color, var(--vscode-gitlens-graphScrollMarkerLocalBranchesColor, inherit));
+			cursor: pointer;
+			border-radius: var(--gl-radius-sm);
+		}
+
+		:host([appearance='button']:hover) {
+			background: var(--vscode-toolbar-hoverBackground);
+		}
+
+		:host([appearance='button']:focus-visible) {
+			outline: var(--gl-border-width) solid var(--vscode-focusBorder);
+			outline-offset: 2px;
+		}
+
+		:host(:focus:not([appearance='button'])) {
+			outline: var(--gl-border-width) solid var(--vscode-focusBorder);
+			outline-offset: 2px;
 		}
 
 		.icon {
-			margin: 0 0.3rem 0.1rem 0.2rem;
-		}
-
-		.worktree .icon {
-			margin-right: 0.4rem;
+			align-self: center;
+			margin-right: 0.3rem;
 		}
 
 		.label {
-			font-weight: bold;
+			/* Block-level box (default span is inline → text-overflow is ignored). flex 1 1 auto
+		   lets the label both grow into available space and shrink when the parent narrows;
+		   min-width: 0 unlocks shrinking past intrinsic content size. */
+			display: block;
+			flex: 1 1 auto;
+			min-width: 0;
+			overflow: hidden;
+			text-overflow: ellipsis;
+			font-weight: 600;
+			white-space: nowrap;
+		}
+
+		.chevron {
+			flex-shrink: 0;
+			align-self: center;
+			margin-left: var(--gl-space-2);
 		}
 	`;
+
+	@property({ reflect: true })
+	appearance?: 'pill' | 'button';
 
 	@property({ type: String })
 	name?: string;
@@ -39,15 +87,55 @@ export class GlBranchName extends LitElement {
 	@property({ type: Boolean })
 	worktree = false;
 
+	@property({ type: Boolean })
+	chevron = false;
+
+	@property()
+	icon?: string;
+
+	override connectedCallback(): void {
+		super.connectedCallback?.();
+		this.addEventListener('keydown', this.onKeydown);
+	}
+
+	override disconnectedCallback(): void {
+		this.removeEventListener('keydown', this.onKeydown);
+		super.disconnectedCallback?.();
+	}
+
+	override updated(changedProperties: Map<string, unknown>): void {
+		if (changedProperties.has('appearance')) {
+			if (this.appearance === 'button') {
+				this.setAttribute('role', 'button');
+				if (!this.hasAttribute('tabindex')) {
+					this.setAttribute('tabindex', '0');
+				}
+			} else {
+				if (this.getAttribute('role') === 'button') {
+					this.removeAttribute('role');
+				}
+				if (this.getAttribute('tabindex') === '0') {
+					this.removeAttribute('tabindex');
+				}
+			}
+		}
+	}
+
+	private readonly onKeydown = (e: KeyboardEvent): void => {
+		if (this.appearance !== 'button') return;
+
+		if (e.key === 'Enter' || e.key === ' ') {
+			e.preventDefault();
+			this.click();
+		}
+	};
+
 	override render(): unknown {
-		return html`<span class="${this.worktree ? 'worktree' : 'branch'}"
-			><code-icon
-				class="icon"
-				icon="${this.worktree ? 'gl-worktrees-view' : 'git-branch'}"
-				size="${this.size}"
-			></code-icon
-			><span class="label">${this.name ?? '<missing>'}</span></span
-		>`;
+		const icon = this.icon ?? (this.worktree ? 'gl-worktree' : 'git-branch');
+		return html`<code-icon class="icon" icon="${icon}" size="${this.size}"></code-icon
+			><span class="label">${this.name ?? '<missing>'}</span>${
+				this.chevron ? html`<code-icon class="chevron" icon="chevron-down" size="12"></code-icon>` : nothing
+			}`;
 	}
 }
 

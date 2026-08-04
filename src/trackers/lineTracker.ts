@@ -1,19 +1,19 @@
 import type { Event, Selection, TextEditor, TextEditorSelectionChangeEvent } from 'vscode';
-import { Disposable, EventEmitter, window } from 'vscode';
-import type { Container } from '../container';
-import type { GitCommit } from '../git/models/commit';
-import { isTrackableTextEditor } from '../system/-webview/vscode/editors';
-import { debug } from '../system/decorators/log';
-import type { Deferrable } from '../system/function/debounce';
-import { debounce } from '../system/function/debounce';
-import { getLogScope, setLogScopeExit } from '../system/logger.scope';
+import { Disposable, EventEmitter, window, workspace } from 'vscode';
+import type { GitCommit, GitCommitLine } from '@gitlens/git/models/commit.js';
+import { uncommitted } from '@gitlens/git/models/revision.js';
+import { debounce } from '@gitlens/utils/debounce.js';
+import { trace } from '@gitlens/utils/decorators/log.js';
+import { getScopedLogger } from '@gitlens/utils/logger.scoped.js';
+import type { Container } from '../container.js';
+import { isTrackableTextEditor } from '../system/-webview/vscode/editors.js';
 import type {
 	DocumentBlameStateChangeEvent,
 	DocumentContentChangeEvent,
 	DocumentDirtyIdleTriggerEvent,
 	DocumentDirtyStateChangeEvent,
 	GitDocumentTracker,
-} from './documentTracker';
+} from './documentTracker.js';
 
 export interface LinesChangeEvent {
 	readonly editor: TextEditor | undefined;
@@ -22,6 +22,8 @@ export interface LinesChangeEvent {
 	readonly reason: 'editor' | 'selection';
 	readonly pending?: boolean;
 	readonly suspended?: boolean;
+	/** True when the current line is being actively edited — consumers should clear decorations */
+	readonly editing?: boolean;
 }
 
 export interface LineSelection {
@@ -31,6 +33,8 @@ export interface LineSelection {
 
 export interface LineState {
 	commit: GitCommit;
+	/** The blame line for this editor line — use this for originalLine/previousSha instead of commit.lines.find() */
+	commitLine?: GitCommitLine;
 }
 
 export class LineTracker {
@@ -41,6 +45,8 @@ export class LineTracker {
 
 	protected _disposable: Disposable | undefined;
 	private _editor: TextEditor | undefined;
+	private _isEditing = false;
+	private _selectionsVersion = 0;
 	private readonly _state = new Map<number, LineState | undefined>();
 	private _subscriptions = new Map<unknown, Disposable[]>();
 	private _subscriptionOnlyWhenTracking: Disposable | undefined;
@@ -63,6 +69,10 @@ export class LineTracker {
 
 		this._editor = editor;
 		this._selections = toLineSelections(editor?.selections);
+		this._selectionsVersion++;
+
+		// Clear cached blame state from the previous editor — it's no longer relevant
+		this._state.clear();
 
 		if (this._suspended) {
 			this.resume({ force: true });
@@ -71,19 +81,19 @@ export class LineTracker {
 		}
 	}
 
-	@debug<LineTracker['onBlameStateChanged']>({
-		args: {
-			0: e => `editor/doc=${e.editor?.document.uri.toString(true)}, blameable=${e.blameable}`,
-		},
+	@trace({
+		args: e => ({
+			e: `editor/doc=${e.editor?.document.uri.toString(true)}, blameable=${e.blameable}`,
+		}),
 	})
 	private onBlameStateChanged(_e: DocumentBlameStateChangeEvent) {
 		this.notifyLinesChanged('editor');
 	}
 
-	@debug<LineTracker['onContentChanged']>({
-		args: {
-			0: e => `editor/doc=${e.editor.document.uri.toString(true)}`,
-		},
+	@trace({
+		args: e => ({
+			e: `editor/doc=${e.editor.document.uri.toString(true)}`,
+		}),
 	})
 	private onContentChanged(e: DocumentContentChangeEvent) {
 		if (
@@ -96,26 +106,41 @@ export class LineTracker {
 				),
 			)
 		) {
-			this.notifyLinesChanged('editor');
+			// Mark as actively editing — the annotation controller checks this
+			// flag and suppresses inline decorations while set.
+			this._isEditing = true;
 		}
+
+		// Still trigger the blame update so the cache stays warm (Tier 3 is
+		// cheap). The annotation controller checks isEditing and suppresses
+		// decorations while that flag is set. A vertical cursor move clears the
+		// flag and the next update will show the annotation.
+		this.notifyLinesChanged('editor');
 	}
 
-	@debug<LineTracker['onDirtyIdleTriggered']>({
-		args: {
-			0: e => `editor/doc=${e.editor.document.uri.toString(true)}`,
-		},
+	@trace({
+		args: e => ({
+			e: `editor/doc=${e.editor.document.uri.toString(true)}`,
+		}),
 	})
 	private onDirtyIdleTriggered(_e: DocumentDirtyIdleTriggerEvent) {
 		this.resume();
 	}
 
-	@debug<LineTracker['onDirtyStateChanged']>({
-		args: {
-			0: e => `editor/doc=${e.editor.document.uri.toString(true)}, dirty=${e.dirty}`,
-		},
+	@trace({
+		args: e => ({
+			e: `editor/doc=${e.editor.document.uri.toString(true)}, dirty=${e.dirty}`,
+		}),
 	})
 	private onDirtyStateChanged(e: DocumentDirtyStateChangeEvent) {
 		if (e.dirty) {
+			// Don't suspend if we have in-memory dirty blame — no git process needed,
+			// so we can keep updating blame on every content change instantly.
+			if (e.document.blameSnapshot != null) {
+				this.notifyLinesChanged('editor');
+				return;
+			}
+
 			this.suspend();
 		} else {
 			this.resume({ force: true });
@@ -129,15 +154,30 @@ export class LineTracker {
 		const selections = toLineSelections(e.selections);
 		if (this._editor === e.textEditor && this.includes(selections)) return;
 
+		// Clear editing state when the cursor moves to a different line
+		if (this._isEditing) {
+			this._isEditing = false;
+		}
+
 		this._editor = e.textEditor;
 		this._selections = selections;
+		this._selectionsVersion++;
 
-		this.notifyLinesChanged(this._editor === e.textEditor ? 'selection' : 'editor');
+		this.notifyLinesChanged('selection');
 	}
 
 	private _selections: LineSelection[] | undefined;
 	get selections(): LineSelection[] | undefined {
 		return this._selections;
+	}
+
+	get selectionsVersion(): number {
+		return this._selectionsVersion;
+	}
+
+	/** True when the user is actively editing the current line (suppress inline annotations) */
+	get isEditing(): boolean {
+		return this._isEditing;
 	}
 
 	private _suspended = false;
@@ -191,7 +231,7 @@ export class LineTracker {
 		this.notifyLinesChanged('editor');
 	}
 
-	@debug()
+	@trace()
 	resume(options?: { force?: boolean; silent?: boolean }): void {
 		if (!options?.force && !this._suspended) return;
 
@@ -203,7 +243,7 @@ export class LineTracker {
 		}
 	}
 
-	@debug()
+	@trace()
 	suspend(options?: { force?: boolean; silent?: boolean }): void {
 		if (!options?.force && this._suspended) return;
 
@@ -220,9 +260,9 @@ export class LineTracker {
 		return this._subscriptions.has(subscriber);
 	}
 
-	@debug({ args: false, singleLine: true })
+	@trace({ args: false, onlyExit: true })
 	subscribe(subscriber: unknown, subscription: Disposable): Disposable {
-		const scope = getLogScope();
+		const scope = getScopedLogger();
 
 		const disposable = {
 			dispose: () => this.unsubscribe(subscriber),
@@ -239,7 +279,7 @@ export class LineTracker {
 		}
 
 		if (first) {
-			setLogScopeExit(scope, ' \u2022 starting line tracker...');
+			scope?.addExitInfo('starting line tracker...');
 
 			this.resume({ force: true, silent: true });
 
@@ -247,6 +287,28 @@ export class LineTracker {
 				{ dispose: () => this.suspend({ force: true, silent: true }) },
 				window.onDidChangeActiveTextEditor(debounce(this.onActiveTextEditorChanged, 0), this),
 				window.onDidChangeTextEditorSelection(this.onTextEditorSelectionChanged, this),
+				// Direct (non-debounced) listener for immediate editing detection.
+				// The documentTracker debounces content changes at 50ms, which means
+				// _isEditing is never set while typing continuously. This listener
+				// fires synchronously on every keystroke to clear annotations instantly.
+				workspace.onDidChangeTextDocument(e => {
+					if (e.document !== this._editor?.document) return;
+					if (e.contentChanges.length === 0) return;
+
+					if (
+						this.selections?.some(s =>
+							e.contentChanges.some(c => s.active >= c.range.start.line && s.active <= c.range.end.line),
+						)
+					) {
+						this._isEditing = true;
+						this._onDidChangeActiveLines.fire({
+							editor: this._editor,
+							selections: this.selections,
+							reason: 'editor',
+							editing: true,
+						});
+					}
+				}),
 				this.documentTracker.onDidChangeBlameState(this.onBlameStateChanged, this),
 				this.documentTracker.onDidChangeDirtyState(this.onDirtyStateChanged, this),
 				this.documentTracker.onDidTriggerDirtyIdle(this.onDirtyIdleTriggered, this),
@@ -254,13 +316,13 @@ export class LineTracker {
 
 			queueMicrotask(() => this.onActiveTextEditorChanged(window.activeTextEditor));
 		} else {
-			setLogScopeExit(scope, ' \u2022 already started...');
+			scope?.addExitInfo('already started...');
 		}
 
 		return disposable;
 	}
 
-	@debug({ args: false, singleLine: true })
+	@trace({ args: false, onlyExit: true })
 	unsubscribe(subscriber: unknown): void {
 		const subs = this._subscriptions.get(subscriber);
 		if (subs == null) return;
@@ -272,69 +334,116 @@ export class LineTracker {
 
 		if (this._subscriptions.size !== 0) return;
 
-		this._fireLinesChangedDebounced?.cancel();
+		this._throttledUpdateQueued = undefined;
+		this._throttledUpdateQueuedReason = undefined;
+		this._throttledUpdateVersion = undefined;
+		this._throttledUpdatePendingFired = undefined;
 		this._disposable?.dispose();
 		this._disposable = undefined;
 	}
 
-	private async fireLinesChanged(e: LinesChangeEvent) {
+	private async fireLinesChanged(e: LinesChangeEvent, version: number) {
 		let updated = false;
-		if (!this.suspended && !e.pending && e.selections != null && e.editor != null) {
-			updated = await this.updateState(e.selections, e.editor);
+		if (!this.suspended && e.selections != null && e.editor != null) {
+			try {
+				updated = await this.updateState(e.selections, e.editor, version);
+			} catch {
+				updated = false;
+			}
+		}
+
+		// If the version changed while we were working, this result is stale.
+		// Don't fire — a follow-up event for the new version is already queued.
+		if (!updated && version !== this._selectionsVersion) return;
+
+		// Re-read _isEditing live — it may have changed during the async updateState
+		// (e.g., user started typing while a cursor-move update was in flight)
+		if (this._isEditing && !e.editing) {
+			e = { ...e, editing: true };
 		}
 
 		this._onDidChangeActiveLines.fire(updated ? e : { ...e, selections: undefined, suspended: this.suspended });
 	}
 
-	private _fireLinesChangedDebounced: Deferrable<(e: LinesChangeEvent) => void> | undefined;
-	private notifyLinesChanged(reason: 'editor' | 'selection') {
-		if (reason === 'editor') {
-			this.resetState();
-		}
+	// Throttle state: at most 1 running + 1 queued (like VS Code's @throttle).
+	// First call starts immediately (no timer delay). Queued call reads live
+	// state at execution time so it always uses the latest selections/version.
+	private _throttledUpdate: Promise<void> | undefined;
+	private _throttledUpdateQueued: boolean | undefined;
+	private _throttledUpdateQueuedReason: 'editor' | 'selection' | undefined;
+	private _throttledUpdateVersion: number | undefined;
+	private _throttledUpdatePendingFired: boolean | undefined;
 
+	private notifyLinesChanged(reason: 'editor' | 'selection') {
 		const e: LinesChangeEvent = { editor: this._editor, selections: this.selections, reason: reason };
 		if (e.selections == null) {
 			queueMicrotask(() => {
 				if (e.editor !== window.activeTextEditor) return;
 
-				this._fireLinesChangedDebounced?.cancel();
+				// Cancel any queued throttled update — null selections take priority
+				this._throttledUpdateQueued = undefined;
 
-				void this.fireLinesChanged(e);
+				void this.fireLinesChanged(e, this._selectionsVersion);
 			});
 
 			return;
 		}
 
-		if (this._fireLinesChangedDebounced == null) {
-			this._fireLinesChangedDebounced = debounce((e: LinesChangeEvent) => {
-				if (e.editor !== window.activeTextEditor) return;
-
-				// Make sure we are still on the same lines
-				if (!isIncluded(e.selections, toLineSelections(e.editor?.selections))) {
-					return;
-				}
-
-				void this.fireLinesChanged(e);
-			}, 250);
+		// Throttle: if an update is already running, queue this one (coalescing).
+		// The queued update will read live state when it executes.
+		if (this._throttledUpdate != null) {
+			// Fire pending only when the cursor actually moved (version changed) so
+			// consumers can clear stale line-specific visuals. Skip for same-cursor
+			// refreshes (e.g. blame/dirty state changes on save) to avoid an
+			// unnecessary decoration-clearing flash. Fire at most once per cycle.
+			if (!this._throttledUpdatePendingFired && this._selectionsVersion !== this._throttledUpdateVersion) {
+				this._onDidChangeActiveLines.fire({ ...e, pending: true });
+				this._throttledUpdatePendingFired = true;
+			}
+			this._throttledUpdateQueued = true;
+			this._throttledUpdateQueuedReason =
+				this._throttledUpdateQueuedReason === 'editor' || reason === 'editor' ? 'editor' : 'selection';
+			return;
 		}
 
-		// If we have no pending moves, then fire an immediate pending event, and defer the real event
-		if (!this._fireLinesChangedDebounced.pending()) {
-			void this.fireLinesChanged({ ...e, pending: true });
-		}
-
-		this._fireLinesChangedDebounced(e);
+		this.startThrottledUpdate(reason);
 	}
 
-	@debug<LineTracker['updateState']>({
-		args: { 0: selections => selections?.map(s => s.active).join(','), 1: e => e.document.uri.toString(true) },
+	private startThrottledUpdate(reason: 'editor' | 'selection'): void {
+		// Read live state at execution time (VS Code pattern) — ensures the
+		// queued follow-up always uses the latest selections/version, not stale
+		// values captured when the event first arrived.
+		const version = this._selectionsVersion;
+		this._throttledUpdateVersion = version;
+		this._throttledUpdatePendingFired = false;
+		const e: LinesChangeEvent = {
+			editor: this._editor,
+			selections: this.selections,
+			reason: reason,
+			editing: this._isEditing,
+		};
+
+		this._throttledUpdate = this.fireLinesChanged(e, version).finally(() => {
+			this._throttledUpdate = undefined;
+
+			if (this._throttledUpdateQueued) {
+				this._throttledUpdateQueued = undefined;
+				const queuedReason = this._throttledUpdateQueuedReason ?? 'selection';
+				this._throttledUpdateQueuedReason = undefined;
+				this.startThrottledUpdate(queuedReason);
+			}
+		});
+	}
+
+	@trace({
+		args: (selections, editor) => ({ selections: selections?.map(s => s.active).join(','), editor: editor }),
 		exit: true,
 	})
-	private async updateState(selections: LineSelection[], editor: TextEditor): Promise<boolean> {
-		const scope = getLogScope();
+	private async updateState(selections: LineSelection[], editor: TextEditor, version: number): Promise<boolean> {
+		const scope = getScopedLogger();
 
-		if (!this.includes(selections)) {
-			setLogScopeExit(scope, ` \u2022 lines no longer match`);
+		if (version !== this._selectionsVersion) {
+			scope?.addExitInfo(`lines no longer match`);
 
 			return false;
 		}
@@ -342,7 +451,7 @@ export class LineTracker {
 		const document = await this.documentTracker.getOrAdd(editor.document);
 		let status = await document.getStatus();
 		if (!status.blameable) {
-			setLogScopeExit(scope, ` \u2022 document is not blameable`);
+			scope?.addExitInfo(`document is not blameable`);
 
 			return false;
 		}
@@ -354,57 +463,69 @@ export class LineTracker {
 				editor?.document,
 			);
 			if (blameLine == null) {
-				setLogScopeExit(scope, ` \u2022 blame failed`);
+				scope?.addExitInfo(`blame failed`);
 
 				return false;
 			}
 
-			if (blameLine.commit != null && blameLine.commit.file == null) {
-				debugger;
-			}
-
-			this.setState(blameLine.line.line - 1, { commit: blameLine.commit });
+			this.setState(blameLine.line.line - 1, { commit: blameLine.commit, commitLine: blameLine.line });
 		} else {
 			const blame = await this.container.git.getBlame(document.uri, editor.document);
 			if (blame == null) {
-				setLogScopeExit(scope, ` \u2022 blame failed`);
+				scope?.addExitInfo(`blame failed`);
 
 				return false;
 			}
 
+			// Resolve uncommitted commit once for the whole cycle
+			let uncommittedCommit: GitCommit | undefined;
+			let uncommittedResolved = false;
+
 			for (const selection of selections) {
 				const commitLine = blame.lines[selection.active];
-				const commit = blame.commits.get(commitLine.sha);
-				if (commit != null && commit.file == null) {
-					debugger;
+				if (commitLine == null) {
+					this.resetState(selection.active);
+					continue;
+				}
+
+				let commit = blame.commits.get(commitLine.sha);
+				if (commit == null && commitLine.sha === uncommitted) {
+					if (!uncommittedResolved) {
+						const blameLine = await this.container.git.getBlameForLine(
+							document.uri,
+							selection.active,
+							editor.document,
+						);
+						uncommittedCommit = blameLine?.commit;
+						uncommittedResolved = true;
+					}
+					commit = uncommittedCommit;
 				}
 
 				if (commit == null) {
-					debugger;
 					this.resetState(selection.active);
-				} else {
-					this.setState(selection.active, { commit: commit });
+					continue;
 				}
+
+				this.setState(selection.active, { commit: commit, commitLine: commitLine });
 			}
 		}
 
 		// Check again because of the awaits above
 
-		if (!this.includes(selections)) {
-			setLogScopeExit(scope, ` \u2022 lines no longer match`);
-
+		if (version !== this._selectionsVersion) {
+			scope?.addExitInfo('stale selections (version changed)');
 			return false;
 		}
 
 		status = await document.getStatus();
 
 		if (!status.blameable) {
-			setLogScopeExit(scope, ` \u2022 document is not blameable`);
-
+			scope?.addExitInfo(`document is not blameable`);
 			return false;
 		}
 
-		if (editor.document.isDirty) {
+		if (editor.document.isDirty && document.blameSnapshot == null) {
 			document.setForceDirtyStateChangeOnNextDocumentChange();
 		}
 
@@ -414,7 +535,7 @@ export class LineTracker {
 
 function isIncluded(selections: LineSelection[] | undefined, within: LineSelection[] | undefined): boolean {
 	if (selections == null && within == null) return true;
-	if (selections == null || within == null || selections.length !== within.length) return false;
+	if (selections == null || selections.length !== within?.length) return false;
 
 	return selections.every((s, i) => {
 		const match = within[i];

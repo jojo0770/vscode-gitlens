@@ -1,24 +1,26 @@
 import type { Uri } from 'vscode';
 import { MarkdownString, TreeItem, TreeItemCollapsibleState, window } from 'vscode';
-import { getPresenceDataUri } from '../../avatars';
-import { GlyphChars } from '../../constants';
-import type { GitUri } from '../../git/gitUri';
-import type { GitContributor } from '../../git/models/contributor';
-import type { GitLog } from '../../git/models/log';
-import { configuration } from '../../system/-webview/configuration';
-import { formatNumeric } from '../../system/date';
-import { gate } from '../../system/decorators/-webview/gate';
-import { debug } from '../../system/decorators/log';
-import { map } from '../../system/iterable';
-import { pluralize } from '../../system/string';
-import type { ContactPresence } from '../../vsls/vsls';
-import type { ViewsWithContributors } from '../viewBase';
-import type { ClipboardType, PageableViewNode } from './abstract/viewNode';
-import { ContextValues, getViewNodeId, ViewNode } from './abstract/viewNode';
-import { CommitNode } from './commitNode';
-import { LoadMoreNode, MessageNode } from './common';
-import { FileRevisionAsCommitNode } from './fileRevisionAsCommitNode';
-import { insertDateMarkers } from './utils/-webview/node.utils';
+import { GitContributor } from '@gitlens/git/models/contributor.js';
+import type { GitLog } from '@gitlens/git/models/log.js';
+import { formatNumeric } from '@gitlens/utils/date.js';
+import { trace } from '@gitlens/utils/decorators/log.js';
+import { map } from '@gitlens/utils/iterable.js';
+import { pluralize } from '@gitlens/utils/string.js';
+import { getPresenceDataUri } from '../../avatars.js';
+import { GlyphChars } from '../../constants.js';
+import type { GitUri } from '../../git/gitUri.js';
+import { formatCurrentUserDisplayName } from '../../git/utils/-webview/commit.utils.js';
+import { getContributorAvatarUri } from '../../git/utils/-webview/contributor.utils.js';
+import { configuration } from '../../system/-webview/configuration.js';
+import { gate } from '../../system/decorators/gate.js';
+import type { ContactPresence } from '../../vsls/vsls.js';
+import type { ViewsWithContributors } from '../viewBase.js';
+import type { ClipboardType, PageableViewNode } from './abstract/viewNode.js';
+import { ContextValues, getViewNodeId, ViewNode } from './abstract/viewNode.js';
+import { CommitNode } from './commitNode.js';
+import { LoadMoreNode, MessageNode } from './common.js';
+import { FileRevisionAsCommitNode } from './fileRevisionAsCommitNode.js';
+import { insertDateMarkers } from './utils/-webview/node.utils.js';
 
 export class ContributorNode extends ViewNode<'contributor', ViewsWithContributors> implements PageableViewNode {
 	limit: number | undefined;
@@ -91,7 +93,7 @@ export class ContributorNode extends ViewNode<'contributor', ViewsWithContributo
 		];
 
 		if (log.hasMore) {
-			children.push(new LoadMoreNode(this.view, this, children[children.length - 1]));
+			children.push(new LoadMoreNode(this.view, this, children.at(-1)!));
 		}
 		return children;
 	}
@@ -110,10 +112,11 @@ export class ContributorNode extends ViewNode<'contributor', ViewsWithContributo
 					)})`
 				: '';
 
-		const item = new TreeItem(
-			this.contributor.current ? `${this.contributor.label} (you)` : this.contributor.label,
-			TreeItemCollapsibleState.Collapsed,
-		);
+		const displayName = this.contributor.current
+			? formatCurrentUserDisplayName(this.contributor.label)
+			: this.contributor.label;
+
+		const item = new TreeItem(displayName, TreeItemCollapsibleState.Collapsed);
 		item.id = this.id;
 		item.contextValue = this.contributor.current
 			? `${ContextValues.Contributor}+current`
@@ -122,7 +125,7 @@ export class ContributorNode extends ViewNode<'contributor', ViewsWithContributo
 			presence != null && presence.status !== 'offline'
 				? `${presence.statusText} ${GlyphChars.Space}${GlyphChars.Dot}${GlyphChars.Space} `
 				: ''
-		}${this.contributor.latestCommitDate != null ? `${this.contributor.formatDateFromNow()}, ` : ''}${pluralize(
+		}${this.contributor.latestCommitDate != null ? `${GitContributor.formatDateFromNow(this.contributor)}, ` : ''}${pluralize(
 			'commit',
 			this.contributor.contributionCount,
 		)}${shortStats}`;
@@ -131,13 +134,20 @@ export class ContributorNode extends ViewNode<'contributor', ViewsWithContributo
 		let avatarMarkdown;
 		if (this.view.config.avatars) {
 			const size = configuration.get('hovers.avatarSize');
-			avatarUri = await this.contributor.getAvatarUri({
+			avatarUri = await getContributorAvatarUri(this.contributor, {
 				defaultStyle: configuration.get('defaultGravatarsStyle'),
 				size: size,
 			});
 
 			if (presence != null) {
-				const title = `${this.contributor.contributionCount ? 'You are' : `${this.contributor.label} is`} ${
+				let subjectAndVerb: string;
+				if (this.contributor.current) {
+					const style = configuration.get('defaultCurrentUserNameStyle');
+					subjectAndVerb = `${formatCurrentUserDisplayName(this.contributor.label, style)} ${style === 'you' ? 'are' : 'is'}`;
+				} else {
+					subjectAndVerb = `${this.contributor.label} is`;
+				}
+				const title = `${subjectAndVerb} ${
 					presence.status === 'dnd' ? 'in ' : ''
 				}${presence.statusText.toLocaleLowerCase()}`;
 
@@ -167,14 +177,14 @@ export class ContributorNode extends ViewNode<'contributor', ViewsWithContributo
 
 		const lastCommitted =
 			this.contributor.latestCommitDate != null
-				? `Last commit ${this.contributor.formatDateFromNow()} (${this.contributor.formatDate()})\\\n`
+				? `Last commit ${GitContributor.formatDateFromNow(this.contributor)} (${GitContributor.formatDate(this.contributor)})\\\n`
 				: '';
 
 		const pathContext = this.options?.pathspec?.uri
 			? ` to \`${this.view.container.git.getRelativePath(this.options?.pathspec?.uri, this.uri.repoPath!)}\``
 			: '';
 		const markdown = new MarkdownString(
-			`${avatarMarkdown != null ? avatarMarkdown : ''} &nbsp;${link} \n\n${lastCommitted}${pluralize(
+			`${avatarMarkdown ?? ''} &nbsp;${link} \n\n${lastCommitted}${pluralize(
 				'commit',
 				this.contributor.contributionCount,
 			)}${pathContext}${stats}`,
@@ -188,7 +198,7 @@ export class ContributorNode extends ViewNode<'contributor', ViewsWithContributo
 		return item;
 	}
 
-	@debug()
+	@trace()
 	override refresh(reset?: boolean): void {
 		if (reset) {
 			this._log = undefined;

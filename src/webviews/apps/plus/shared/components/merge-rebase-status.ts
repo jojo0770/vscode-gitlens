@@ -1,44 +1,69 @@
+import { consume } from '@lit/context';
 import { css, html, LitElement, nothing } from 'lit';
 import { customElement, property } from 'lit/decorators.js';
 import { when } from 'lit/directives/when.js';
-import type { GlCommands } from '../../../../../constants.commands';
-import type { GitPausedOperationStatus } from '../../../../../git/models/pausedOperationStatus';
-import { pausedOperationStatusStringsByType } from '../../../../../git/utils/pausedOperationStatus.utils';
-import { createCommandLink } from '../../../../../system/commands';
-import { getReferenceLabel } from '../../../shared/git-utils';
-import '../../../shared/components/actions/action-item';
-import '../../../shared/components/actions/action-nav';
-import '../../../shared/components/overlays/tooltip';
+import type { GitPausedOperation, GitPausedOperationStatus } from '@gitlens/git/models/pausedOperationStatus.js';
+import type { GitReference } from '@gitlens/git/models/reference.js';
+import { pausedOperationStatusStringsByType } from '@gitlens/git/utils/pausedOperationStatus.utils.js';
+import type { ContinueRebaseWithAiCommandArgs } from '../../../../../commands/autoRebase.js';
+import { createCommandLink } from '../../../../../system/commands.js';
+import type { ShowInCommitGraphCommandArgs } from '../../../../plus/graph/registration.js';
+import type { WebviewContext } from '../../../shared/contexts/webview.js';
+import { webviewContext } from '../../../shared/contexts/webview.js';
+import '../../../shared/components/actions/action-item.js';
+import '../../../shared/components/actions/action-nav.js';
+import '../../../shared/components/branch-name.js';
+import '../../../shared/components/code-icon.js';
+import '../../../shared/components/commit-sha.js';
+import '../../../shared/components/overlays/tooltip.js';
+
+/** Names the operation in the "Continue" action so it reads distinctly from the AI "Continue
+ *  Automatic Rebase" action sitting next to it on a paused rebase. */
+const continueLabelsByType: Record<GitPausedOperation, string> = {
+	'cherry-pick': 'Continue Cherry Pick',
+	merge: 'Continue Merge',
+	rebase: 'Continue Rebase',
+	revert: 'Continue Revert',
+};
 
 @customElement('gl-merge-rebase-status')
 export class GlMergeConflictWarning extends LitElement {
 	static override styles = [
 		css`
 			.status {
+				--action-item-foreground: #000;
+				/* Blend the action hover/active states into the banner instead of the generic
+				   grey toolbar hover. currentColor tracks --action-item-foreground, so the
+				   conflicts variant (white foreground) tints correctly without redeclaring. */
+				--action-item-hover-background: color-mix(in srgb, currentColor 12%, transparent);
+				--action-item-active-background: color-mix(in srgb, currentColor 22%, transparent);
+
 				box-sizing: border-box;
 				display: flex;
+				gap: var(--gl-space-6);
 				align-items: center;
-				gap: 0.6rem;
 				width: 100%;
 				max-width: 100%;
-				margin-block: 0;
-				background-color: var(--vscode-gitlens-decorations\\.statusMergingOrRebasingForegroundColor);
-				color: #000;
-				border-radius: 0.3rem;
 				padding: 0.1rem 0.4rem;
+				margin-block: 0;
+				color: #000;
+				background-color: var(--vscode-gitlens-decorations\\.statusMergingOrRebasingForegroundColor);
+				border-radius: var(--gl-radius-sm);
 			}
 
 			:host([conflicts]) .status {
-				background-color: var(--vscode-gitlens-decorations\\.statusMergingOrRebasingConflictForegroundColor);
+				--action-item-foreground: #fff;
+
 				color: #fff;
+				background-color: var(--vscode-gitlens-decorations\\.statusMergingOrRebasingConflictForegroundColor);
 			}
 
 			.label {
 				flex: 1;
 				min-width: 0;
-				white-space: nowrap;
 				overflow: hidden;
 				text-overflow: ellipsis;
+				white-space: nowrap;
 			}
 
 			.icon,
@@ -47,62 +72,115 @@ export class GlMergeConflictWarning extends LitElement {
 				flex: none;
 			}
 
+			/* Read-only (mode) banner: baseline-align so the "(N/M)" step counter lines up with the
+			   status text. The branch-name chips inflate the label's line-box, so plain center-alignment
+			   leaves the counter sitting too low. Keep the warning icon centered. */
+			:host([readonly]) .status {
+				align-items: baseline;
+			}
+
+			:host([readonly]) .icon {
+				align-self: center;
+			}
+
 			.md-code {
-				background: var(--vscode-textCodeBlock-background);
-				border-radius: 3px;
-				padding: 0px 4px 2px 4px;
+				padding: 0 var(--gl-space-4) var(--gl-space-2);
 				font-family: var(--vscode-editor-font-family);
+				background: var(--vscode-textCodeBlock-background);
+				border-radius: var(--gl-radius-sm);
+			}
+
+			gl-commit-sha::part(label) {
+				font-weight: bold;
+			}
+
+			.link {
+				color: inherit;
+				text-decoration: underline dotted;
+				text-underline-offset: 0.3rem;
+				opacity: 0.9;
+
+				&:hover {
+					text-decoration: none;
+					opacity: 1;
+				}
+			}
+
+			.link--conflicts {
+				margin-left: var(--gl-space-10);
+			}
+
+			.ref-link {
+				color: inherit;
+				text-decoration: none !important;
+				cursor: pointer;
 			}
 		`,
 	];
 
+	@consume({ context: webviewContext })
+	private _webview!: WebviewContext;
+
 	@property({ type: Boolean, reflect: true })
 	conflicts = false;
+
+	/** Opt-in for routing the conflicts status text into Resolve Conflicts mode (fires
+	 *  `ai-resolve-conflicts`). Only hosts that can handle the event (the graph WIP details) should
+	 *  enable it; elsewhere the text falls back to revealing the conflicts. */
+	@property({ type: Boolean, attribute: 'ai-resolve' })
+	aiResolve = false;
+
+	/** Opt-in for showing a "Resume with AI" action on a paused rebase — re-engages automatic rebase
+	 *  (takeover) to finish the remaining steps. Only enabled by hosts where AI is allowed (graph). */
+	@property({ type: Boolean, attribute: 'ai-resume' })
+	aiResume = false;
+
+	/** Whether the working tree has anything staged. Mirrors the takeover loop's own
+	 *  `hasStagedChanges()` gate, so the "Continue Automatic Rebase" affordance matches what a takeover would
+	 *  actually do on a rebase paused without conflicts. */
+	@property({ type: Boolean, attribute: 'has-staged-changes' })
+	hasStagedChanges = false;
+
+	/** Render the bar as a plain status read-out — no paused-op action buttons and no clickable
+	 *  conflicts text. Set by hosts that are in a mode (compose/review/resolve) so the bar doesn't
+	 *  compete with the mode's own controls. */
+	@property({ type: Boolean, attribute: 'readonly', reflect: true })
+	readOnly = false;
 
 	@property({ type: Object })
 	pausedOpStatus?: GitPausedOperationStatus;
 
-	@property()
-	skipCommand = 'gitlens.home.skipPausedOperation';
-
-	@property()
-	continueCommand = 'gitlens.home.continuePausedOperation';
-
-	@property()
-	abortCommand = 'gitlens.home.abortPausedOperation';
-
-	@property()
-	openEditorCommand = 'gitlens.home.openRebaseEditor';
-
-	@property({ type: Object })
-	webviewCommandContext?: { webview: string; webviewInstance: string | undefined };
-
 	private get onSkipUrl() {
-		return this.createCommandLink(this.skipCommand as GlCommands, this.pausedOpStatus);
+		return this.createPausedOperationCommandLink('skip');
 	}
 
 	private get onContinueUrl() {
-		return this.createCommandLink(this.continueCommand as GlCommands, this.pausedOpStatus);
+		return this.createPausedOperationCommandLink('continue');
 	}
 
 	private get onAbortUrl() {
-		return this.createCommandLink(this.abortCommand as GlCommands, this.pausedOpStatus);
+		return this.createPausedOperationCommandLink('abort');
 	}
 
 	private get onOpenEditorUrl() {
-		return this.createCommandLink(this.openEditorCommand as GlCommands, this.pausedOpStatus);
+		return this.createPausedOperationCommandLink('open');
 	}
 
-	private createCommandLink(command: string, args?: any) {
-		if (this.webviewCommandContext != null) {
-			if (args == null) {
-				args = this.webviewCommandContext;
-			} else {
-				args = { ...args, ...this.webviewCommandContext };
-			}
-		}
+	private get onContinueWithAiUrl() {
+		return createCommandLink<ContinueRebaseWithAiCommandArgs>('gitlens.ai.continueRebase', {
+			repoPath: this.pausedOpStatus?.repoPath,
+			source: 'graph',
+		});
+	}
 
-		return createCommandLink(command as GlCommands, args);
+	private get onShowConflictsUrl() {
+		return this.createPausedOperationCommandLink('showConflicts');
+	}
+
+	private createPausedOperationCommandLink(
+		command: 'abort' | 'continue' | 'open' | 'showConflicts' | 'skip',
+	): string {
+		return this._webview.createCommandLink(`gitlens.pausedOperation.${command}:`, this.pausedOpStatus);
 	}
 
 	override render(): unknown {
@@ -119,54 +197,97 @@ export class GlMergeConflictWarning extends LitElement {
 	private renderStatus(pausedOpStatus: GitPausedOperationStatus) {
 		if (pausedOpStatus.type !== 'rebase') {
 			const strings = pausedOperationStatusStringsByType[pausedOpStatus.type];
+			const label = this.conflicts ? strings.conflicts : strings.label;
 			return html`<span class="label"
-				>${this.conflicts ? strings.conflicts : strings.label}
-				<code-icon
-					icon="${pausedOpStatus.incoming.refType === 'branch' ? 'git-branch' : 'git-commit'}"
-					class="icon"
-				></code-icon>
-				${getReferenceLabel(pausedOpStatus.incoming, { expand: false, icon: false })} ${strings.directionality}
-				${getReferenceLabel(pausedOpStatus.current, { expand: false, icon: false })}</span
+				>${this.renderConflictsLink(label)} ${this.renderReference(pausedOpStatus.incoming)}
+				${strings.directionality} ${this.renderReference(pausedOpStatus.current)}</span
 			>`;
 		}
 
 		const started = pausedOpStatus.steps.total > 0;
 		const strings = pausedOperationStatusStringsByType[pausedOpStatus.type];
+		const label = this.conflicts ? strings.conflicts : started ? strings.label : strings.pending;
 		return html`<span class="label"
-				>${this.conflicts ? strings.conflicts : started ? strings.label : strings.pending}
-				<code-icon
-					icon="${pausedOpStatus.incoming.refType === 'branch' ? 'git-branch' : 'git-commit'}"
-					class="icon"
-				></code-icon>
-				${getReferenceLabel(pausedOpStatus.incoming, { expand: false, icon: false })} ${strings.directionality}
-				${getReferenceLabel(pausedOpStatus.current ?? pausedOpStatus.onto, {
-					expand: false,
-					icon: false,
-				})}</span
-			>${started
-				? html`<span class="steps"
-						>(${pausedOpStatus.steps.current.number}/${pausedOpStatus.steps.total})</span
-					>`
-				: nothing}`;
+				>${this.renderConflictsLink(label)} ${this.renderReference(pausedOpStatus.incoming)}
+				${strings.directionality} ${this.renderReference(pausedOpStatus.current ?? pausedOpStatus.onto)}</span
+			>${
+				started
+					? html`<span class="steps"
+							>(${pausedOpStatus.steps.current.number}/${pausedOpStatus.steps.total})</span
+						>`
+					: nothing
+			}`;
 	}
 
+	private renderConflictsLink(label: string) {
+		if (!this.conflicts || this.readOnly) return label;
+
+		// With AI resolve available (graph host), clicking the status text enters Resolve Conflicts mode.
+		// Elsewhere it falls back to revealing the conflicts in the tree / rebase editor.
+		if (this.aiResolve) {
+			return html`<gl-tooltip content="Resolve Conflicts">
+				<a href="#" class="link" @click=${this.onResolveWithAI}>${label}</a>
+			</gl-tooltip>`;
+		}
+
+		return html`<gl-tooltip content="Show Conflicts">
+			<a href="${this.onShowConflictsUrl}" class="link">${label}</a>
+		</gl-tooltip>`;
+	}
+
+	private renderReference(ref: GitReference) {
+		const isBranch = ref.refType === 'branch';
+		const content = isBranch
+			? html`<gl-branch-name .name=${ref.name} .size=${12}></gl-branch-name>`
+			: html`<gl-commit-sha .sha=${ref.ref} .size=${12}></gl-commit-sha>`;
+
+		// Read-only: plain ref text, no jump-to-branch/commit link or tooltip.
+		if (this.readOnly) return content;
+
+		const webviewId = this._webview.webviewId;
+		const isInGraph = webviewId === 'gitlens.graph' || webviewId === 'gitlens.views.graph';
+
+		const tooltip = isInGraph
+			? isBranch
+				? 'Jump to Branch'
+				: 'Jump to Commit'
+			: isBranch
+				? 'Open Branch in Commit Graph'
+				: 'Open Commit in Commit Graph';
+		const jumpUrl = this.createJumpUrl(ref);
+
+		return html`<gl-tooltip content=${tooltip}>
+			<a href=${jumpUrl} class="ref-link">${content}</a>
+		</gl-tooltip>`;
+	}
+
+	private createJumpUrl(ref: GitReference): string {
+		return createCommandLink<ShowInCommitGraphCommandArgs>('gitlens.showInCommitGraph', {
+			ref: ref,
+			source: { source: 'merge-target' },
+		});
+	}
+
+	private onResolveWithAI = (e: Event): void => {
+		e.preventDefault();
+		this.dispatchEvent(new CustomEvent('ai-resolve-conflicts', { bubbles: true, composed: true }));
+	};
+
 	private renderActions() {
-		if (this.pausedOpStatus == null) return nothing;
+		if (this.pausedOpStatus == null || this.readOnly) return nothing;
 
 		const status = this.pausedOpStatus.type;
+		// "Continue Automatic Rebase" mirrors the takeover loop's own gate (`resumingThisStep ||
+		// hasStagedChanges()`): with conflicts it resolves them, and with a staged resolution it
+		// continues and keeps resolving the REMAINING steps — so hiding it once the user stages an
+		// escalated step would strand them on plain "Continue", which ends automation for the rest of
+		// the run. Still hidden for a genuine non-conflict stop (an interactive edit/break with nothing
+		// staged), where a takeover has nothing to continue and would only escalate.
+		const aiRebase = status === 'rebase' && this.aiResume && (this.conflicts || this.hasStagedChanges);
+		// Plain `<op> --continue` is valid once a rebase has no unresolved conflicts.
+		const canContinue = status !== 'revert' && !(status === 'rebase' && this.conflicts);
 
 		return html`<action-nav class="actions">
-			${when(
-				status !== 'revert' && !(status === 'rebase' && this.conflicts),
-				() => html`
-					<action-item label="Continue" icon="debug-continue" href=${this.onContinueUrl}></action-item>
-				`,
-			)}
-			${when(
-				status !== 'merge',
-				() => html`<action-item label="Skip" icon="debug-step-over" href=${this.onSkipUrl}></action-item>`,
-			)}
-			<action-item label="Abort" href=${this.onAbortUrl} icon="circle-slash"></action-item>
 			${when(
 				status === 'rebase',
 				() =>
@@ -176,6 +297,29 @@ export class GlMergeConflictWarning extends LitElement {
 						icon="edit"
 					></action-item>`,
 			)}
+			${when(
+				canContinue,
+				() =>
+					html`<action-item
+						label=${continueLabelsByType[status]}
+						icon="gl-continue"
+						href=${this.onContinueUrl}
+					></action-item>`,
+			)}
+			${when(
+				aiRebase,
+				() =>
+					html`<action-item
+						label="Continue Automatic Rebase"
+						href=${this.onContinueWithAiUrl}
+						icon="gl-continue-sparkle"
+					></action-item>`,
+			)}
+			${when(
+				status !== 'merge',
+				() => html`<action-item label="Skip" icon="gl-skip" href=${this.onSkipUrl}></action-item>`,
+			)}
+			<action-item label="Abort" href=${this.onAbortUrl} icon="gl-abort"></action-item>
 		</action-nav>`;
 	}
 }

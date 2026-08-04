@@ -1,15 +1,17 @@
 import type { AttributeValue, Span, TimeInput } from '@opentelemetry/api';
 import type { Disposable } from 'vscode';
 import { version as codeVersion, env } from 'vscode';
-import { getProxyAgent } from '@env/fetch';
-import { getPlatform } from '@env/platform';
-import type { Source, TelemetryEventData, TelemetryEvents, TelemetryGlobalContext } from '../constants.telemetry';
-import type { Container } from '../container';
-import { configuration } from '../system/-webview/configuration';
+import { getPlatform } from '@env/platform.js';
+import type { Source, TelemetryEventData, TelemetryEvents, TelemetryGlobalContext } from '../constants.telemetry.js';
+import type { Container } from '../container.js';
+import { configuration } from '../system/-webview/configuration.js';
+import { loadChunk } from '../system/-webview/loadChunk.js';
+import { getExtensionModeLabel } from '../system/-webview/vscode.js';
 
 export interface TelemetryContext {
 	env: string;
 	extensionId: string;
+	extensionMode: string;
 	extensionVersion: string;
 	machineId: string;
 	sessionId: string;
@@ -83,6 +85,7 @@ export class TelemetryService implements Disposable {
 		}
 
 		if (this._initializationTimer != null) return;
+
 		this._initializationTimer = setTimeout(() => this.initializeTelemetry(container), 7500);
 	}
 
@@ -93,11 +96,12 @@ export class TelemetryService implements Disposable {
 		}
 
 		this.provider = new (
-			await import(/* webpackChunkName: "telemetry" */ './openTelemetryProvider')
+			await loadChunk(() => import(/* webpackChunkName: "telemetry" */ './openTelemetryProvider.js'))
 		).OpenTelemetryProvider(
 			{
 				env: container.env,
 				extensionId: container.id,
+				extensionMode: getExtensionModeLabel(container.extensionMode),
 				extensionVersion: container.version,
 				machineId: env.machineId,
 				sessionId: env.sessionId,
@@ -110,7 +114,6 @@ export class TelemetryService implements Disposable {
 				vscodeUIKind: String(env.uiKind),
 				vscodeVersion: codeVersion,
 			},
-			getProxyAgent(),
 			container.debugging,
 		);
 
@@ -179,7 +182,14 @@ export class TelemetryService implements Disposable {
 		}
 
 		return {
-			dispose: () => this.sendEvent(name, d as any, source, startTime, Date.now() as TimeInput),
+			dispose: () =>
+				(this.sendEvent as (name: string, data: unknown, ...rest: unknown[]) => void)(
+					name,
+					d,
+					source,
+					startTime,
+					Date.now(),
+				),
 		};
 	}
 
@@ -232,6 +242,9 @@ function addSourceAttributes(
 
 	data ??= {};
 	data['source.name'] = source.source;
+	if (source.correlationId != null) {
+		data['source.correlationId'] = source.correlationId;
+	}
 	if (source.detail != null) {
 		if (typeof source.detail === 'string') {
 			data['source.detail'] = source.detail;

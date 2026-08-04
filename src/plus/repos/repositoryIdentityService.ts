@@ -1,18 +1,23 @@
 import type { Disposable } from 'vscode';
 import { Uri, window } from 'vscode';
-import type { Container } from '../../container';
-import type { RepositoryLocationProvider } from '../../git/location/repositorylocationProvider';
-import { RemoteResourceType } from '../../git/models/remoteResource';
-import type { Repository } from '../../git/models/repository';
+import { RemoteResourceType } from '@gitlens/git/models/remoteResource.js';
 import type {
 	GkProviderId,
 	RepositoryIdentityDescriptor,
 	RepositoryIdentityProviderDescriptor,
-} from '../../git/models/repositoryIdentities';
-import { missingRepositoryId } from '../../git/models/repositoryIdentities';
-import { parseGitRemoteUrl } from '../../git/parsers/remoteParser';
-import { log } from '../../system/decorators/log';
-import { getSettledValue } from '../../system/promise';
+} from '@gitlens/git/models/repositoryIdentities.js';
+import { missingRepositoryId } from '@gitlens/git/models/repositoryIdentities.js';
+import { parseGitRemoteUrl } from '@gitlens/git/utils/remote.utils.js';
+import { debug } from '@gitlens/utils/decorators/log.js';
+import { getScopedLogger } from '@gitlens/utils/logger.scoped.js';
+import { getSettledValue } from '@gitlens/utils/promise.js';
+import type { Container } from '../../container.js';
+import type {
+	RepositoryLocationEntry,
+	RepositoryLocationProvider,
+} from '../../git/location/repositorylocationProvider.js';
+import type { GlRepository } from '../../git/models/repository.js';
+import { getRemoteProviderUrl } from '../../git/utils/-webview/remote.utils.js';
 
 export class RepositoryIdentityService implements Disposable {
 	constructor(
@@ -22,17 +27,17 @@ export class RepositoryIdentityService implements Disposable {
 
 	dispose(): void {}
 
-	@log()
+	@debug()
 	getRepository<T extends string | GkProviderId>(
 		identity: RepositoryIdentityDescriptor<T>,
 		options?: { openIfNeeded?: boolean; keepOpen?: boolean; prompt?: boolean; skipRefValidation?: boolean },
-	): Promise<Repository | undefined> {
+	): Promise<GlRepository | undefined> {
 		return this.locateRepository(identity, options);
 	}
 
-	@log()
+	@debug()
 	async getRepositoryIdentity<T extends string | GkProviderId>(
-		repository: Repository,
+		repository: GlRepository,
 	): Promise<RepositoryIdentityDescriptor<T>> {
 		const [bestRemotePromise, initialCommitShaPromise] = await Promise.allSettled([
 			repository.git.remotes.getBestRemoteWithProvider(),
@@ -48,11 +53,11 @@ export class RepositoryIdentityService implements Disposable {
 		};
 	}
 
-	@log()
+	@debug()
 	private async locateRepository<T extends string | GkProviderId>(
 		identity: RepositoryIdentityDescriptor<T>,
 		options?: { openIfNeeded?: boolean; keepOpen?: boolean; prompt?: boolean; skipRefValidation?: boolean },
-	): Promise<Repository | undefined> {
+	): Promise<GlRepository | undefined> {
 		const hasInitialCommitSha =
 			identity.initialCommitSha != null && identity.initialCommitSha !== missingRepositoryId;
 		const hasRemoteUrl = identity?.remote?.url != null;
@@ -77,7 +82,7 @@ export class RepositoryIdentityService implements Disposable {
 					)
 				: [];
 
-		let foundRepo: Repository | undefined;
+		let foundRepo: GlRepository | undefined;
 		if (matches?.length) {
 			for (const match of matches) {
 				const repo = this.container.git.getRepository(Uri.file(match));
@@ -88,8 +93,8 @@ export class RepositoryIdentityService implements Disposable {
 			}
 
 			if (foundRepo == null && options?.openIfNeeded) {
-				foundRepo = await this.container.git.getOrOpenRepository(Uri.file(matches[0]), {
-					closeOnOpen: !options?.keepOpen,
+				foundRepo = await this.container.git.getOrAddRepository(Uri.file(matches[0]), {
+					opened: options?.keepOpen ?? false,
 				});
 			}
 		} else {
@@ -143,12 +148,13 @@ export class RepositoryIdentityService implements Disposable {
 
 			if (repoLocatedUri == null) return undefined;
 
-			const locatedRepo = await this.container.git.getOrOpenRepository(repoLocatedUri, {
-				closeOnOpen: !options?.keepOpen,
+			const locatedRepo = await this.container.git.getOrAddRepository(repoLocatedUri, {
+				opened: options?.keepOpen ?? false,
 				detectNested: false,
 			});
 
 			if (locatedRepo == null) return undefined;
+
 			if (
 				identity.initialCommitSha == null ||
 				(await locatedRepo.git.refs.isValidReference(identity.initialCommitSha))
@@ -161,9 +167,9 @@ export class RepositoryIdentityService implements Disposable {
 		return foundRepo;
 	}
 
-	@log({ args: { 1: false } })
+	@debug({ args: (repo: GlRepository) => ({ repo: repo.id }) })
 	async storeRepositoryLocation<T extends string | GkProviderId>(
-		repo: Repository,
+		repo: GlRepository,
 		identity?: RepositoryIdentityDescriptor<T>,
 	): Promise<void> {
 		if (repo.virtual || this.locator == null) return;
@@ -179,7 +185,10 @@ export class RepositoryIdentityService implements Disposable {
 		const repoPath = repo.uri.fsPath;
 
 		for (const remote of remotes) {
-			const remoteUrl = await remote.provider?.url({ type: RemoteResourceType.Repo });
+			const remoteUrl =
+				remote.provider != null
+					? await getRemoteProviderUrl(remote.provider, { type: RemoteResourceType.Repo })
+					: undefined;
 			if (remoteUrl != null) {
 				await this.locator.storeLocation(repoPath, remoteUrl);
 			}
@@ -195,6 +204,98 @@ export class RepositoryIdentityService implements Disposable {
 				owner: identity.provider.repoDomain,
 				repoName: identity.provider.repoName,
 			});
+		}
+	}
+
+	@debug({ args: repos => ({ repos: repos.length }) })
+	async storeRepositoryLocations(repos: GlRepository[]): Promise<void> {
+		if (!repos.length || this.locator == null) return;
+
+		const scope = getScopedLogger();
+
+		// Use batched method if available, otherwise fall back to sequential
+		if (this.locator.storeLocations == null) {
+			for (const repo of repos) {
+				try {
+					await this.storeRepositoryLocation(repo);
+				} catch (ex) {
+					scope?.error(ex);
+				}
+			}
+			return;
+		}
+
+		// Gather all identity/remote info for all repos in parallel
+		const repoDataPromises = repos
+			.filter(repo => !repo.virtual)
+			.map(async repo => {
+				const [identityResult, remotesResult] = await Promise.allSettled([
+					this.getRepositoryIdentity(repo),
+					repo.git.remotes.getRemotes(),
+				]);
+
+				const identity = getSettledValue(identityResult);
+				const remotes = getSettledValue(remotesResult) ?? [];
+
+				return { repo: repo, identity: identity, remotes: remotes };
+			});
+
+		const repoDataResults = await Promise.allSettled(repoDataPromises);
+
+		// Build batch of location entries
+		const entries: RepositoryLocationEntry[] = [];
+
+		for (const result of repoDataResults) {
+			if (result.status !== 'fulfilled') continue;
+
+			const { repo, identity, remotes } = result.value;
+			const repoPath = repo.uri.fsPath;
+
+			// Collect remote URLs in parallel
+			const remoteUrlPromises = remotes.map(async (remote): Promise<string | undefined> => {
+				try {
+					return remote.provider != null
+						? await getRemoteProviderUrl(remote.provider, { type: RemoteResourceType.Repo })
+						: undefined;
+				} catch {
+					return undefined;
+				}
+			});
+
+			const remoteUrls = await Promise.all(remoteUrlPromises);
+
+			// Add entries for each remote URL
+			for (const remoteUrl of remoteUrls) {
+				if (remoteUrl != null) {
+					entries.push({ path: repoPath, remoteUrl: remoteUrl, repoInfo: undefined });
+				}
+			}
+
+			// Add entry for provider identity if available
+			if (
+				identity?.provider?.id != null &&
+				identity?.provider?.repoDomain != null &&
+				identity?.provider?.repoName != null
+			) {
+				entries.push({
+					path: repoPath,
+					remoteUrl: undefined,
+					repoInfo: {
+						provider: identity.provider.id,
+						owner: identity.provider.repoDomain,
+						repoName: identity.provider.repoName,
+					},
+				});
+			}
+		}
+
+		// Store all locations in a single batched call
+		if (entries.length) {
+			try {
+				await this.locator.storeLocations(entries);
+			} catch (ex) {
+				scope?.error(ex);
+			}
 		}
 	}
 }

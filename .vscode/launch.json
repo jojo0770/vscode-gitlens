@@ -17,14 +17,14 @@
 				"sourceMapRenames": true,
 				"sourceMaps": true,
 				"trace": true,
-				// "urlFilter": "*eamodio.gitlens*",
+				"urlFilter": "*eamodio.gitlens*",
 				"webRoot": "${workspaceFolder}/src/webviews/apps"
 			},
 			"outFiles": ["${workspaceFolder}/dist/**/*.js"],
 			"pauseForSourceMap": true,
 			"runtimeSourcemapPausePatterns": ["${workspaceFolder}/dist/**/*.js"],
 			"presentation": {
-				"group": "2_run",
+				"group": "1_primary",
 				"order": 1
 			},
 			"showAsyncStacks": true,
@@ -55,14 +55,14 @@
 				"sourceMapRenames": true,
 				"sourceMaps": true,
 				"trace": true,
-				// "urlFilter": "*eamodio.gitlens*",
+				"urlFilter": "*eamodio.gitlens*",
 				"webRoot": "${workspaceFolder}"
 			},
 			"outFiles": ["${workspaceFolder}/dist/browser/**/*.js"],
 			"pauseForSourceMap": true,
 			"runtimeSourcemapPausePatterns": ["${workspaceFolder}/dist/**/*.js"],
 			"presentation": {
-				"group": "2_run",
+				"group": "2_web",
 				"order": 2
 			},
 			"skipFiles": ["<node_internals>/**", "**/node_modules/**", "**/resources/app/out/vs/**"],
@@ -87,15 +87,15 @@
 				"sourceMapRenames": true,
 				"sourceMaps": true,
 				"trace": true,
-				// "urlFilter": "*eamodio.gitlens*",
+				"urlFilter": "*eamodio.gitlens*",
 				"webRoot": "${workspaceFolder}/src/webviews/apps"
 			},
 			"outFiles": ["${workspaceFolder}/dist/**/*.js"],
 			"pauseForSourceMap": true,
 			"runtimeSourcemapPausePatterns": ["${workspaceFolder}/dist/**/*.js"],
 			"presentation": {
-				"group": "2_run",
-				"order": 3
+				"group": "3_sandboxed",
+				"order": 1
 			},
 			"showAsyncStacks": true,
 			"skipFiles": ["<node_internals>/**", "**/node_modules/**", "**/resources/app/out/vs/**"],
@@ -108,22 +108,121 @@
 			"name": "Run Tests",
 			"type": "extensionHost",
 			"request": "launch",
-			"runtimeExecutable": "${execPath}",
-			"args": [
-				"--profile-temp",
-				"--extensionDevelopmentPath=${workspaceFolder}",
-				"--extensionTestsPath=${workspaceFolder}/out/tests"
-			],
-			"outFiles": ["${workspaceFolder}/out/tests/*.test.js"],
+			"testConfiguration": "${workspaceFolder}/.vscode-test.mjs",
+			"outFiles": ["${workspaceFolder}/out/tests/**/*.test.js"],
 			"preLaunchTask": "npm: build:tests",
 			"presentation": {
-				"group": "2_run_tests",
+				"group": "4_tests",
 				"order": 2
 			},
 			"skipFiles": ["<node_internals>/**", "**/node_modules/**", "**/resources/app/out/vs/**"],
 			"smartStep": true,
 			"sourceMapRenames": true,
 			"sourceMaps": true
+		},
+		{
+			"name": "Build & Run",
+			"type": "extensionHost",
+			"request": "launch",
+			"runtimeExecutable": "${execPath}",
+			"args": ["--profile=Debugging (GitLens)", "--extensionDevelopmentPath=${workspaceFolder}"],
+			"debugWebviews": true,
+			"rendererDebugOptions": {
+				"outFiles": ["${workspaceFolder}/dist/webviews/**/*.js"],
+				"pauseForSourceMap": true,
+				"showAsyncStacks": true,
+				"smartStep": true,
+				"sourceMapRenames": true,
+				"sourceMaps": true,
+				"trace": true,
+				"urlFilter": "*eamodio.gitlens*",
+				"webRoot": "${workspaceFolder}/src/webviews/apps"
+			},
+			"outFiles": ["${workspaceFolder}/dist/**/*.js"],
+			"pauseForSourceMap": true,
+			"runtimeSourcemapPausePatterns": ["${workspaceFolder}/dist/**/*.js"],
+			"preLaunchTask": "npm: build",
+			"presentation": {
+				"group": "1_primary",
+				"order": 2
+			},
+			"showAsyncStacks": true,
+			"skipFiles": ["<node_internals>/**", "**/node_modules/**", "**/resources/app/out/vs/**"],
+			"smartStep": true,
+			"sourceMapRenames": true,
+			"sourceMaps": true,
+			"trace": true
+		},
+		{
+			"name": "Build & Run (web)",
+			"type": "extensionHost",
+			"request": "launch",
+			"runtimeExecutable": "${execPath}",
+			"args": [
+				// "--folder-uri=vscode-vfs://github/gitkraken/vscode-gitlens",
+				"--profile=Debugging (GitLens)",
+				"--extensionDevelopmentPath=${workspaceFolder}",
+				"--extensionDevelopmentKind=web"
+			],
+			"debugWebviews": true,
+			"debugWebWorkerHost": true,
+			"rendererDebugOptions": {
+				"outFiles": ["${workspaceFolder}/dist/browser/**/*.js", "${workspaceFolder}/dist/webviews/**/*.js"],
+				"pauseForSourceMap": true,
+				"showAsyncStacks": true,
+				"smartStep": true,
+				"sourceMapRenames": true,
+				"sourceMaps": true,
+				"trace": true,
+				"urlFilter": "*eamodio.gitlens*",
+				"webRoot": "${workspaceFolder}"
+			},
+			"outFiles": ["${workspaceFolder}/dist/browser/**/*.js"],
+			"pauseForSourceMap": true,
+			"runtimeSourcemapPausePatterns": ["${workspaceFolder}/dist/**/*.js"],
+			"preLaunchTask": "npm: build",
+			"presentation": {
+				"group": "2_web",
+				"order": 2
+			},
+			"skipFiles": ["<node_internals>/**", "**/node_modules/**", "**/resources/app/out/vs/**"],
+			"showAsyncStacks": true,
+			"smartStep": true,
+			"sourceMapRenames": true,
+			"sourceMaps": true,
+			"trace": true
+		},
+		{
+			"name": "Build & Run (sandboxed)",
+			"type": "extensionHost",
+			"request": "launch",
+			"runtimeExecutable": "${execPath}",
+			"args": ["--profile-temp", "--extensionDevelopmentPath=${workspaceFolder}"],
+			"debugWebviews": true,
+			"rendererDebugOptions": {
+				"pauseForSourceMap": true,
+				"showAsyncStacks": true,
+				"smartStep": true,
+				"sourceMapRenames": true,
+				"sourceMaps": true,
+				"trace": true,
+				"urlFilter": "*eamodio.gitlens*",
+				"webRoot": "${workspaceFolder}/src/webviews/apps"
+			},
+			"outFiles": ["${workspaceFolder}/dist/**/*.js"],
+			"pauseForSourceMap": true,
+			"runtimeSourcemapPausePatterns": ["${workspaceFolder}/dist/**/*.js"],
+			"preLaunchTask": "npm: build",
+			"presentation": {
+				"group": "3_sandboxed",
+				"order": 2
+			},
+			"showAsyncStacks": true,
+			"skipFiles": ["<node_internals>/**", "**/node_modules/**", "**/resources/app/out/vs/**"],
+			"smartStep": true,
+			"sourceMapRenames": true,
+			"sourceMaps": true,
+			"trace": true
 		},
 		{
 			"name": "Watch & Run",
@@ -140,16 +239,16 @@
 				"sourceMapRenames": true,
 				"sourceMaps": true,
 				"trace": true,
-				// "urlFilter": "*eamodio.gitlens*",
+				"urlFilter": "*eamodio.gitlens*",
 				"webRoot": "${workspaceFolder}/src/webviews/apps"
 			},
 			"outFiles": ["${workspaceFolder}/dist/**/*.js"],
 			"pauseForSourceMap": true,
 			"runtimeSourcemapPausePatterns": ["${workspaceFolder}/dist/**/*.js"],
-			"preLaunchTask": "${defaultBuildTask}",
+			"preLaunchTask": "npm: watch",
 			"presentation": {
-				"group": "1_watch",
-				"order": 1
+				"group": "1_primary",
+				"order": 3
 			},
 			"showAsyncStacks": true,
 			"skipFiles": ["<node_internals>/**", "**/node_modules/**", "**/resources/app/out/vs/**"],
@@ -179,16 +278,16 @@
 				"sourceMapRenames": true,
 				"sourceMaps": true,
 				"trace": true,
-				// "urlFilter": "*eamodio.gitlens*",
+				"urlFilter": "*eamodio.gitlens*",
 				"webRoot": "${workspaceFolder}"
 			},
 			"outFiles": ["${workspaceFolder}/dist/browser/**/*.js"],
 			"pauseForSourceMap": true,
 			"runtimeSourcemapPausePatterns": ["${workspaceFolder}/dist/**/*.js"],
-			"preLaunchTask": "${defaultBuildTask}",
+			"preLaunchTask": "npm: watch",
 			"presentation": {
-				"group": "1_watch",
-				"order": 1
+				"group": "2_web",
+				"order": 3
 			},
 			"skipFiles": ["<node_internals>/**", "**/node_modules/**", "**/resources/app/out/vs/**"],
 			"showAsyncStacks": true,
@@ -211,16 +310,16 @@
 				"sourceMapRenames": true,
 				"sourceMaps": true,
 				"trace": true,
-				// "urlFilter": "*eamodio.gitlens*",
+				"urlFilter": "*eamodio.gitlens*",
 				"webRoot": "${workspaceFolder}/src/webviews/apps"
 			},
 			"outFiles": ["${workspaceFolder}/dist/**/*.js"],
 			"pauseForSourceMap": true,
 			"runtimeSourcemapPausePatterns": ["${workspaceFolder}/dist/**/*.js"],
-			"preLaunchTask": "${defaultBuildTask}",
+			"preLaunchTask": "npm: watch",
 			"presentation": {
-				"group": "1_watch",
-				"order": 2
+				"group": "3_sandboxed",
+				"order": 3
 			},
 			"showAsyncStacks": true,
 			"skipFiles": ["<node_internals>/**", "**/node_modules/**", "**/resources/app/out/vs/**"],
@@ -233,15 +332,11 @@
 			"name": "Watch & Run Tests",
 			"type": "extensionHost",
 			"request": "launch",
-			"args": [
-				"--profile-temp",
-				"--extensionDevelopmentPath=${workspaceFolder}",
-				"--extensionTestsPath=${workspaceFolder}/out/test/suite/index"
-			],
-			"outFiles": ["${workspaceFolder}/out/test/**/*.js", "${workspaceFolder}/dist/**/*.js"],
+			"testConfiguration": "${workspaceFolder}/.vscode-test.mjs",
+			"outFiles": ["${workspaceFolder}/out/tests/**/*.test.js"],
 			"preLaunchTask": "npm: watch:tests",
 			"presentation": {
-				"group": "1_watch_tests",
+				"group": "4_tests",
 				"order": 2
 			},
 			"skipFiles": ["<node_internals>/**", "**/node_modules/**", "**/resources/app/out/vs/**"],

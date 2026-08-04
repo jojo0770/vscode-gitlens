@@ -1,0 +1,130 @@
+import type { PropertyValues } from 'lit';
+import { css, html, LitElement } from 'lit';
+import { customElement, property, query } from 'lit/decorators.js';
+import { ifDefined } from 'lit/directives/if-defined.js';
+import { focusableBaseStyles } from '../styles/lit/a11y.css.js';
+import { elevatedSurface } from '../styles/lit/elevation.css.js';
+
+// #0000004d - light
+
+@customElement('gl-dialog')
+export class GlDialog extends LitElement {
+	static override styles = [
+		focusableBaseStyles,
+		css`
+			:host {
+				display: contents;
+			}
+
+			dialog::backdrop {
+				background-color: #0000004d;
+				backdrop-filter: blur(0.4rem);
+			}
+
+			dialog {
+				--gl-elevation: var(--gl-shadow-dialog);
+				--gl-elevation-border-color: var(--vscode-widget-border);
+
+				width: min-content;
+				min-width: 40rem;
+				max-width: 50rem;
+				padding: var(--gl-space-20);
+				color: var(--vscode-editorWidget-foreground);
+				background: var(--vscode-editorWidget-background);
+				border-radius: var(--gl-radius-sm);
+
+				${elevatedSurface}
+			}
+		`,
+	];
+
+	@property({ type: Boolean, reflect: true })
+	open = false;
+
+	@property({ type: Boolean, reflect: true })
+	modal = false;
+
+	@property()
+	closedby?: 'any' | 'closerequest' | 'none';
+
+	/** Accessible name for the dialog. Slotted headings can't be referenced across the shadow
+	 *  boundary via `aria-labelledby`, so consumers should pass their title text here. */
+	@property()
+	label?: string;
+
+	/** Focus the dialog itself on open instead of its first focusable control (native
+	 *  `showModal()` behavior). Keyboard users still Tab into the controls; nothing renders
+	 *  pre-focused. Per the dialog focusing steps, `autofocus` on the dialog element wins. */
+	@property({ type: Boolean, attribute: 'autofocus-self' })
+	autofocusSelf = false;
+
+	@query('dialog')
+	dialog!: HTMLDialogElement;
+
+	protected override update(changedProperties: PropertyValues): void {
+		super.update(changedProperties);
+
+		if (changedProperties.has('open')) {
+			this.toggleVisibility();
+		}
+	}
+
+	override render() {
+		return html`
+			<dialog
+				part="base"
+				aria-label=${ifDefined(this.label)}
+				?autofocus=${this.autofocusSelf}
+				closedby=${ifDefined(this.closedby)}
+				@close=${this.onDialogClose}
+			>
+				<slot></slot>
+			</dialog>
+		`;
+	}
+
+	// Native Esc/backdrop dismissal closes the inner <dialog> without touching our `open`; sync it
+	// back so consumers' bound state stays in step and re-opening works, and surface a bubbling event.
+	private onDialogClose() {
+		if (!this.open) return;
+
+		this.open = false;
+		this.dispatchEvent(new CustomEvent('gl-dialog-close', { bubbles: true, composed: true }));
+	}
+
+	private toggleVisibility() {
+		if (this.open) {
+			if (this.dialog.open) {
+				return;
+			}
+
+			if (this.modal) {
+				this.dialog.showModal();
+			} else {
+				this.dialog.show();
+			}
+
+			// Chromium doesn't honor `autofocus` on a shadow-hosted dialog element itself (it still
+			// focuses the first focusable descendant), so retarget explicitly.
+			if (this.autofocusSelf) {
+				this.dialog.focus();
+			}
+		} else if (this.dialog.open) {
+			this.dialog.close();
+		}
+	}
+
+	close() {
+		this.open = false;
+		// Close the native dialog synchronously too — the reactive update lands a microtask
+		// later, which is too late for consumers that unmount right after calling close():
+		// native focus restoration only runs if the dialog closes while still connected.
+		if (this.dialog?.open) {
+			this.dialog.close();
+		}
+	}
+
+	show() {
+		this.open = true;
+	}
+}

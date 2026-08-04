@@ -1,19 +1,20 @@
-import type { CancellationToken } from 'vscode';
-import type { GitConfigKeys } from '../../../constants';
-import type { Container } from '../../../container';
-import type { GitConfigEntityIdentifier } from '../../../plus/integrations/providers/models';
+import type { GitBranch } from '@gitlens/git/models/branch.js';
+import type { Issue } from '@gitlens/git/models/issue.js';
+import type { GitBranchReference } from '@gitlens/git/models/reference.js';
+import type { IssueResourceDescriptor, RepositoryDescriptor } from '@gitlens/git/models/resourceDescriptor.js';
+import type { IntegrationBase } from '@gitlens/integrations/models/integration.js';
+import type { GitConfigEntityIdentifier } from '@gitlens/integrations/providers/models.js';
 import {
 	decodeEntityIdentifiersFromGitConfig,
 	encodeIssueOrPullRequestForGitConfig,
 	getIssueFromGitConfigEntityIdentifier,
-} from '../../../plus/integrations/providers/utils';
-import { Logger } from '../../../system/logger';
-import type { MaybePausedResult } from '../../../system/promise';
-import { getSettledValue, pauseOnCancelOrTimeout } from '../../../system/promise';
-import type { GitBranch } from '../../models/branch';
-import type { Issue } from '../../models/issue';
-import type { GitBranchReference } from '../../models/reference';
-import type { IssueResourceDescriptor, RepositoryDescriptor } from '../../models/resourceDescriptor';
+} from '@gitlens/integrations/providers/utils.js';
+import { Logger } from '@gitlens/utils/logger.js';
+import type { MaybePausedResult } from '@gitlens/utils/promise.js';
+import { getSettledValue, pauseOnCancelOrTimeout } from '@gitlens/utils/promise.js';
+import { getRepositoryKey } from '@gitlens/utils/uri.js';
+import type { GkConfigKeys } from '../../../constants.js';
+import type { Container } from '../../../container.js';
 
 export async function addAssociatedIssueToBranch(
 	container: Container,
@@ -21,11 +22,12 @@ export async function addAssociatedIssueToBranch(
 	issue: Issue,
 	owner: RepositoryDescriptor | IssueResourceDescriptor,
 	options?: {
-		cancellation?: CancellationToken;
+		cancellation?: AbortSignal;
 	},
 ): Promise<void> {
 	const { key, encoded } = await getConfigKeyAndEncodedAssociatedIssuesForBranch(container, branch);
-	if (options?.cancellation?.isCancellationRequested) return;
+	if (options?.cancellation?.aborted) return;
+
 	try {
 		const associatedIssues: GitConfigEntityIdentifier[] = encoded
 			? (JSON.parse(encoded) as GitConfigEntityIdentifier[])
@@ -33,10 +35,15 @@ export async function addAssociatedIssueToBranch(
 		if (associatedIssues.some(i => i.entityId === issue.nodeId)) {
 			return;
 		}
+
 		associatedIssues.push(encodeIssueOrPullRequestForGitConfig(issue, owner));
 		await container.git
 			.getRepositoryService(branch.repoPath)
-			.config.setConfig?.(key, JSON.stringify(associatedIssues));
+			.config.setGkConfig?.(key, JSON.stringify(associatedIssues));
+		container.events.fire('git:repo:change', {
+			repoPath: getRepositoryKey(branch.repoPath),
+			changes: ['gkConfig'],
+		});
 	} catch (ex) {
 		Logger.error(ex, 'addAssociatedIssueToBranch');
 	}
@@ -46,12 +53,14 @@ export async function getAssociatedIssuesForBranch(
 	container: Container,
 	branch: GitBranch,
 	options?: {
-		cancellation?: CancellationToken;
+		cancellation?: AbortSignal;
 		timeout?: number;
+		/** Only return issues already in the local cache. No remote fetch — uncached entries are skipped. */
+		cached?: boolean;
 	},
 ): Promise<MaybePausedResult<Issue[] | undefined>> {
 	const { encoded } = await getConfigKeyAndEncodedAssociatedIssuesForBranch(container, branch);
-	if (options?.cancellation?.isCancellationRequested) return { value: undefined, paused: false };
+	if (options?.cancellation?.aborted) return { value: undefined, paused: false };
 
 	let associatedIssues: GitConfigEntityIdentifier[] | undefined;
 	if (encoded) {
@@ -67,7 +76,17 @@ export async function getAssociatedIssuesForBranch(
 				(async () => {
 					return (
 						await Promise.allSettled(
-							(associatedIssues ?? []).map(i => getIssueFromGitConfigEntityIdentifier(container, i)),
+							(associatedIssues ?? []).map(i =>
+								getIssueFromGitConfigEntityIdentifier(id => container.integrations.get(id), i, {
+									cached: options?.cached,
+									peekCachedIssue: (integration, resource, id) =>
+										container.cache.peekIssue(
+											id,
+											resource,
+											integration as IntegrationBase | undefined,
+										),
+								}),
+							),
 						)
 					)
 						.map(r => getSettledValue(r))
@@ -87,23 +106,28 @@ export async function removeAssociatedIssueFromBranch(
 	branch: GitBranchReference,
 	id: string,
 	options?: {
-		cancellation?: CancellationToken;
+		cancellation?: AbortSignal;
 	},
 ): Promise<void> {
 	const { key, encoded } = await getConfigKeyAndEncodedAssociatedIssuesForBranch(container, branch);
-	if (options?.cancellation?.isCancellationRequested) return;
+	if (options?.cancellation?.aborted) return;
+
 	try {
 		let associatedIssues: GitConfigEntityIdentifier[] = encoded
 			? (JSON.parse(encoded) as GitConfigEntityIdentifier[])
 			: [];
 		associatedIssues = associatedIssues.filter(i => i.entityId !== id);
 		if (associatedIssues.length === 0) {
-			await container.git.getRepositoryService(branch.repoPath).config.setConfig?.(key, undefined);
+			await container.git.getRepositoryService(branch.repoPath).config.setGkConfig?.(key, undefined);
 		} else {
 			await container.git
 				.getRepositoryService(branch.repoPath)
-				.config.setConfig?.(key, JSON.stringify(associatedIssues));
+				.config.setGkConfig?.(key, JSON.stringify(associatedIssues));
 		}
+		container.events.fire('git:repo:change', {
+			repoPath: getRepositoryKey(branch.repoPath),
+			changes: ['gkConfig'],
+		});
 	} catch (ex) {
 		Logger.error(ex, 'removeAssociatedIssueFromBranch');
 	}
@@ -112,8 +136,8 @@ export async function removeAssociatedIssueFromBranch(
 async function getConfigKeyAndEncodedAssociatedIssuesForBranch(
 	container: Container,
 	branch: GitBranchReference,
-): Promise<{ key: GitConfigKeys; encoded: string | undefined }> {
-	const key = `branch.${branch.name}.gk-associated-issues` satisfies GitConfigKeys;
-	const encoded = await container.git.getRepositoryService(branch.repoPath).config.getConfig?.(key);
+): Promise<{ key: GkConfigKeys; encoded: string | undefined }> {
+	const key = `branch.${branch.name}.gk-associated-issues` satisfies GkConfigKeys;
+	const encoded = await container.git.getRepositoryService(branch.repoPath).config.getGkConfig?.(key);
 	return { key: key, encoded: encoded };
 }

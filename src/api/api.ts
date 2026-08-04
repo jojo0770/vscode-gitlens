@@ -1,7 +1,7 @@
 import type { Disposable } from 'vscode';
-import { Container } from '../container';
-import { builtInActionRunnerName } from './actionRunners';
-import type { Action, ActionContext, ActionRunner, GitLensApi } from './gitlens';
+import { Container } from '../container.js';
+import { builtInActionRunnerName } from './actionRunners.js';
+import type { Action, ActionContext, ActionRunner, GitLensApi } from './gitlens.d.js';
 
 const emptyDisposable: Disposable = Object.freeze({ dispose: () => {} });
 
@@ -29,7 +29,7 @@ export class Api implements GitLensApi {
 
 export function preview() {
 	return (_target: any, _key: string, descriptor: PropertyDescriptor): void => {
-		// eslint-disable-next-line @typescript-eslint/no-unsafe-function-type
+		// oxlint-disable-next-line typescript/no-unsafe-function-type
 		let fn: Function | undefined;
 		if (typeof descriptor.value === 'function') {
 			fn = descriptor.value;
@@ -39,7 +39,7 @@ export function preview() {
 		if (fn == null) throw new Error('Not supported');
 
 		descriptor.value = function (this: any, ...args: any[]) {
-			// eslint-disable-next-line @typescript-eslint/no-unsafe-return
+			// oxlint-disable-next-line typescript/no-unsafe-return
 			if (Container.instance.prereleaseOrDebugging) return fn.apply(this, args);
 
 			console.error('GitLens preview APIs are only available in the pre-release edition');

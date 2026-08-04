@@ -1,12 +1,12 @@
 import { TreeItem, TreeItemCollapsibleState } from 'vscode';
-import { GitUri } from '../../git/gitUri';
-import type { PullRequest } from '../../git/models/pullRequest';
-import type { ViewsWithCommits } from '../viewBase';
-import { CacheableChildrenViewNode } from './abstract/cacheableChildrenViewNode';
-import type { ViewNode } from './abstract/viewNode';
-import { ContextValues, getViewNodeId } from './abstract/viewNode';
-import { MessageNode } from './common';
-import { DraftNode } from './draftNode';
+import type { PullRequest } from '@gitlens/git/models/pullRequest.js';
+import { GitUri } from '../../git/gitUri.js';
+import type { ViewsWithCommits } from '../viewBase.js';
+import { CacheableChildrenViewNode } from './abstract/cacheableChildrenViewNode.js';
+import type { ViewNode } from './abstract/viewNode.js';
+import { ContextValues, getViewNodeId } from './abstract/viewNode.js';
+import { MessageNode } from './common.js';
+import { DraftNode } from './draftNode.js';
 
 export class CodeSuggestionsNode extends CacheableChildrenViewNode<'drafts-code-suggestions', ViewsWithCommits> {
 	constructor(

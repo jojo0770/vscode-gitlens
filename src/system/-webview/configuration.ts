@@ -1,8 +1,8 @@
 import type { ConfigurationChangeEvent, ConfigurationScope, Disposable, Event, ExtensionContext } from 'vscode';
 import { ConfigurationTarget, EventEmitter, workspace } from 'vscode';
-import type { Config, CoreConfig } from '../../config';
-import { extensionPrefix } from '../../constants';
-import { areEqual } from '../object';
+import { areEqual } from '@gitlens/utils/object.js';
+import type { Config, CoreConfig } from '../../config.js';
+import { extensionPrefix } from '../../constants.js';
 
 interface ConfigurationOverrides {
 	get<T extends ConfigPath>(section: T, value: ConfigPathValue<T>): ConfigPathValue<T>;
@@ -13,7 +13,7 @@ interface ConfigurationOverrides {
 export class Configuration implements Disposable {
 	static configure(context: ExtensionContext): void {
 		context.subscriptions.push(
-			// eslint-disable-next-line @typescript-eslint/no-use-before-define
+			// oxlint-disable-next-line typescript/no-use-before-define
 			workspace.onDidChangeConfiguration(configuration.onConfigurationChanged, configuration),
 		);
 	}
@@ -151,9 +151,13 @@ export class Configuration implements Disposable {
 		section: S,
 		scope?: ConfigurationScope | null,
 	): InspectWorkspaceConfiguration<V> | undefined {
-		return workspace
-			.getConfiguration(extensionPrefix, scope)
-			.inspect<V>(section === undefined ? extensionPrefix : section);
+		return (
+			workspace
+				.getConfiguration(extensionPrefix, scope)
+				// `section` is typed as required but can be undefined at runtime via untyped callers; don't broaden to null
+				// oxlint-disable-next-line typescript/prefer-nullish-coalescing
+				.inspect<V>(section === undefined ? extensionPrefix : section)
+		);
 	}
 
 	inspectAny<S extends string, T>(
@@ -315,7 +319,7 @@ export class Configuration implements Disposable {
 		}
 	}
 
-	matches<S extends ConfigPath>(match: S, section: ConfigPath, value: unknown): value is ConfigPathValue<S> {
+	matches<S extends ConfigPath>(match: S, section: ConfigPath, _value: unknown): _value is ConfigPathValue<S> {
 		return match === section;
 	}
 
@@ -365,6 +369,27 @@ export class Configuration implements Disposable {
 			areEqual(value, inspect.defaultValue) ? undefined : value,
 			ConfigurationTarget.Global,
 		);
+	}
+
+	/**
+	 * Restores a setting to its default by clearing it from every target that holds a value.
+	 *
+	 * Only writes targets that actually have one — VS Code throws when writing `Workspace` with no workspace
+	 * open, or `WorkspaceFolder` with no resource scope, so clearing them unconditionally isn't safe.
+	 */
+	async clear<S extends ConfigPath>(section: S): Promise<void> {
+		const inspect = this.inspect(section);
+		if (inspect == null) return;
+
+		if (inspect.workspaceFolderValue !== undefined) {
+			await this.update(section, undefined, ConfigurationTarget.WorkspaceFolder);
+		}
+		if (inspect.workspaceValue !== undefined) {
+			await this.update(section, undefined, ConfigurationTarget.Workspace);
+		}
+		if (inspect.globalValue !== undefined) {
+			await this.update(section, undefined, ConfigurationTarget.Global);
+		}
 	}
 }
 

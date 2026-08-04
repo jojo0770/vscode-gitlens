@@ -1,31 +1,74 @@
-import { Disposable, ViewColumn } from 'vscode';
-import type { Container } from '../../../container';
-import type { GitReference } from '../../../git/models/reference';
-import type { Repository } from '../../../git/models/repository';
-import { executeCommand, executeCoreCommand, registerCommand } from '../../../system/-webview/command';
-import { configuration } from '../../../system/-webview/configuration';
-import { getContext } from '../../../system/-webview/context';
-import { isScm } from '../../../system/-webview/scm';
-import { ViewNode } from '../../../views/nodes/abstract/viewNode';
-import type { BranchNode } from '../../../views/nodes/branchNode';
-import type { CommitFileNode } from '../../../views/nodes/commitFileNode';
-import type { CommitNode } from '../../../views/nodes/commitNode';
-import { PullRequestNode } from '../../../views/nodes/pullRequestNode';
-import type { StashNode } from '../../../views/nodes/stashNode';
-import type { TagNode } from '../../../views/nodes/tagNode';
+import type { TextEditor, Uri } from 'vscode';
+import { Disposable, ViewColumn, window } from 'vscode';
+import type { GitReference } from '@gitlens/git/models/reference.js';
+import type { SearchQuery } from '@gitlens/git/models/search.js';
+import { isUri } from '@gitlens/utils/uri.js';
+import type { Source } from '../../../constants.telemetry.js';
+import { viewIdsByDefaultContainerId } from '../../../constants.views.js';
+import type { Container } from '../../../container.js';
+import { GitUri } from '../../../git/gitUri.js';
+import type { GlRepository } from '../../../git/models/repository.js';
+import { executeCommand, executeCoreCommand, registerCommand } from '../../../system/-webview/command.js';
+import { configuration } from '../../../system/-webview/configuration.js';
+import { getContext } from '../../../system/-webview/context.js';
+import { loadChunk } from '../../../system/-webview/loadChunk.js';
+import { getScmResourceFolderUri, getScmResourceUri, isScm } from '../../../system/-webview/scm.js';
+import { ViewNode } from '../../../views/nodes/abstract/viewNode.js';
+import type { BranchNode } from '../../../views/nodes/branchNode.js';
+import type { CommitFileNode } from '../../../views/nodes/commitFileNode.js';
+import type { CommitNode } from '../../../views/nodes/commitNode.js';
+import { PullRequestNode } from '../../../views/nodes/pullRequestNode.js';
+import type { StashNode } from '../../../views/nodes/stashNode.js';
+import type { TagNode } from '../../../views/nodes/tagNode.js';
 import type {
 	WebviewPanelShowCommandArgs,
 	WebviewPanelsProxy,
 	WebviewsController,
 	WebviewViewProxy,
-} from '../../webviewsController';
-import type { State } from './protocol';
+} from '../../webviewsController.js';
+import type {
+	GraphActionTarget,
+	GraphCompareSeed,
+	GraphComposeScopeSeed,
+	GraphShowAction,
+	GraphSidebarPanel,
+	State,
+} from './protocol.js';
 
-export type GraphWebviewShowingArgs = [Repository | { ref: GitReference }];
+export type GraphWebviewShowingArgs = [
+	| GlRepository
+	| { ref: GitReference; source?: Source }
+	| { repository: GlRepository; search?: SearchQuery; source?: Source }
+	| { repository: GlRepository; compare: GraphCompareSeed; source?: Source }
+	| { sidebarPanel: GraphSidebarPanel; source?: Source }
+	| {
+			action: GraphShowAction;
+			target?: GraphActionTarget;
+			source?: Source;
+			composeInstructions?: string;
+			composeScope?: GraphComposeScopeSeed;
+	  }
+	| undefined,
+];
 
 export type ShowInCommitGraphCommandArgs =
-	| { ref: GitReference; preserveFocus?: boolean }
-	| Repository
+	| { ref: GitReference; preserveFocus?: boolean; source?: Source; viewColumn?: ViewColumn }
+	| {
+			repository: GlRepository;
+			search?: SearchQuery;
+			selectSha?: string;
+			preserveFocus?: boolean;
+			source?: Source;
+			viewColumn?: ViewColumn;
+	  }
+	| {
+			repository: GlRepository;
+			compare: GraphCompareSeed;
+			preserveFocus?: boolean;
+			source?: Source;
+			viewColumn?: ViewColumn;
+	  }
+	| GlRepository
 	| BranchNode
 	| CommitNode
 	| CommitFileNode
@@ -55,7 +98,9 @@ export function registerGraphWebviewPanel(
 			allowMultipleInstances: configuration.get('graph.allowMultiple'),
 		},
 		async (container, host) => {
-			const { GraphWebviewProvider } = await import(/* webpackChunkName: "webview-graph" */ './graphWebview');
+			const { GraphWebviewProvider } = await loadChunk(
+				() => import(/* webpackChunkName: "webview-graph" */ './graphWebview.js'),
+			);
 			return new GraphWebviewProvider(container, host);
 		},
 	);
@@ -73,12 +118,15 @@ export function registerGraphWebviewView(
 			trackingFeature: 'graphView',
 			type: 'graph',
 			plusFeature: true,
+			location: 'panel',
 			webviewHostOptions: {
 				retainContextWhenHidden: true,
 			},
 		},
 		async (container, host) => {
-			const { GraphWebviewProvider } = await import(/* webpackChunkName: "webview-graph" */ './graphWebview');
+			const { GraphWebviewProvider } = await loadChunk(
+				() => import(/* webpackChunkName: "webview-graph" */ './graphWebview.js'),
+			);
 			return new GraphWebviewProvider(container, host);
 		},
 	);
@@ -88,6 +136,101 @@ export function registerGraphWebviewCommands<T>(
 	container: Container,
 	panels: WebviewPanelsProxy<'gitlens.graph', GraphWebviewShowingArgs, T>,
 ): Disposable {
+	/** Routes to the best graph surface: an existing/visible instance wins over the configured
+	 *  layout, so the request lands on the graph the user is looking at instead of opening a
+	 *  second one in the other surface. */
+	function showOnBestGraphSurface(
+		options: { preserveFocus?: boolean; column?: ViewColumn; source?: Source },
+		...args: GraphWebviewShowingArgs
+	): void {
+		const { preserveFocus = false, column, source } = options;
+		if (configuration.get('graph.layout') === 'panel') {
+			if (!container.views.graph.visible) {
+				const instance = panels.getBestInstance({ preserveFocus: preserveFocus }, ...args);
+				if (instance != null) {
+					void instance.show({ preserveFocus: preserveFocus, column: column, source: source }, ...args);
+					return;
+				}
+			}
+
+			void container.views.graph.show({ preserveFocus: preserveFocus, source: source }, ...args);
+		} else {
+			const instance = panels.getBestInstance({ preserveFocus: preserveFocus }, ...args);
+			if (instance != null) {
+				void instance.show({ preserveFocus: preserveFocus, column: column, source: source }, ...args);
+				return;
+			}
+
+			if (container.views.graph.visible) {
+				void container.views.graph.show({ preserveFocus: preserveFocus, source: source }, ...args);
+				return;
+			}
+
+			void panels.show({ preserveFocus: preserveFocus, column: column, source: source }, ...args);
+		}
+	}
+
+	function showInCommitGraph(args: ShowInCommitGraphCommandArgs): void {
+		if (args instanceof PullRequestNode) {
+			if (args.ref == null) return;
+
+			args = { ref: args.ref };
+		}
+
+		const preserveFocus = 'preserveFocus' in args ? (args.preserveFocus ?? false) : false;
+		const column = 'viewColumn' in args ? args.viewColumn : undefined;
+		const source = 'source' in args ? args.source : undefined;
+		showOnBestGraphSurface({ preserveFocus: preserveFocus, column: column, source: source }, args);
+	}
+
+	async function openFileHistoryInGraph(...args: any[]): Promise<void> {
+		const uri = getUriFromArgs(args);
+		if (uri == null) return;
+
+		const gitUri = await GitUri.fromUri(uri);
+		if (gitUri?.repoPath == null) return;
+
+		const repository = container.git.getRepository(gitUri.repoPath);
+		if (repository == null) return;
+
+		const relativePath = container.git.getRelativePath(gitUri, gitUri.repoPath);
+		const searchQuery: SearchQuery = {
+			query: `file:"${relativePath}"`,
+			filter: true,
+			matchAll: false,
+			matchCase: false,
+			matchRegex: false,
+		};
+
+		// Optional sha passed by callers that have a commit context (e.g. graph details file commands).
+		// Fall back to `gitUri.sha` when the URI itself carries a revision (e.g. Search & Compare results,
+		// graph compare-mode/multicommit panels whose context builds a `gitlens-git://` URI).
+		const selectSha = typeof args[1] === 'string' ? args[1] : gitUri.sha;
+
+		showInCommitGraph({ repository: repository, search: searchQuery, selectSha: selectSha });
+	}
+	async function openFolderHistoryInGraph(...args: any[]): Promise<void> {
+		const uri = getUriFromArgs(args);
+		if (uri == null) return;
+
+		const gitUri = await GitUri.fromUri(uri);
+		if (gitUri?.repoPath == null) return;
+
+		const repository = container.git.getRepository(gitUri.repoPath);
+		if (repository == null) return;
+
+		const relativePath = container.git.getRelativePath(gitUri, gitUri.repoPath);
+		const searchQuery: SearchQuery = {
+			query: `file:"${relativePath}/**"`,
+			filter: true,
+			matchAll: false,
+			matchCase: false,
+			matchRegex: false,
+		};
+
+		showInCommitGraph({ repository: repository, search: searchQuery });
+	}
+
 	return Disposable.from(
 		registerCommand('gitlens.showGraph', (...args: unknown[]) => {
 			const [arg] = args;
@@ -97,38 +240,86 @@ export function registerGraphWebviewCommands<T>(
 				if (arg.rootUri != null) {
 					const repo = container.git.getRepository(arg.rootUri);
 					if (repo != null) {
-						showInGraphArg = repo;
+						showInGraphArg = { repository: repo };
 					}
 				}
 				args = [];
 			} else if (arg instanceof ViewNode) {
 				if (arg.is('repo-folder')) {
-					showInGraphArg = arg.repo;
+					showInGraphArg = { repository: arg.repo };
 				}
 				args = [];
 			}
 
 			if (showInGraphArg != null) {
-				return executeCommand<ShowInCommitGraphCommandArgs>('gitlens.showInCommitGraph', showInGraphArg);
+				showInCommitGraph(showInGraphArg);
+				return;
+			}
+
+			const source =
+				arg != null && typeof arg === 'object' && 'source' in arg
+					? (arg as { source?: Source }).source
+					: undefined;
+
+			// An action (e.g. `enter-compose` from a recompose command) targets the graph the user
+			// can see — route through the same instance-aware selection as `showInCommitGraph`, so
+			// acting from a tree view doesn't open a second graph in the other surface.
+			if (arg != null && typeof arg === 'object' && 'action' in arg) {
+				showOnBestGraphSurface({ source: source }, arg as GraphWebviewShowingArgs[0]);
+				return;
 			}
 
 			if (configuration.get('graph.layout') === 'panel') {
+				// Panel-layout source-forwarding is deferred: `container.views.graph.show({ source }, ...args)`
+				// doesn't typecheck here since `args` is `unknown[]`, not the `WebviewShowingArgs` tuple.
 				return executeCommand('gitlens.showGraphView', ...args);
 			}
 
-			return executeCommand<WebviewPanelShowCommandArgs>('gitlens.showGraphPage', undefined, ...args);
+			return executeCommand<WebviewPanelShowCommandArgs>('gitlens.showGraphPage', { source: source }, ...args);
 		}),
 		registerCommand(`${panels.id}.switchToEditorLayout`, async () => {
 			await configuration.updateEffective('graph.layout', 'editor');
-			queueMicrotask(() => void executeCommand<WebviewPanelShowCommandArgs>('gitlens.showGraphPage'));
+			queueMicrotask(
+				() =>
+					void executeCommand<WebviewPanelShowCommandArgs<GraphWebviewShowingArgs>>('gitlens.showGraphPage'),
+			);
 		}),
 		registerCommand(`${panels.id}.switchToPanelLayout`, async () => {
 			await configuration.updateEffective('graph.layout', 'panel');
 			queueMicrotask(async () => {
 				await executeCoreCommand('gitlens.views.graph.resetViewLocation');
-				await executeCoreCommand('gitlens.views.graphDetails.resetViewLocation');
 				void executeCommand('gitlens.showGraphView');
 			});
+		}),
+		registerCommand('gitlens.graph.simulate.mainView', () => {
+			// Dev/pre-release only (see contributions gating): simulates the #5391 end state where
+			// the Graph has replaced Home as the GitLens side bar's main view, by mutating the same
+			// default-container mapping the real consolidation will change. Arms the one-time layout
+			// prompt (graphWebview.getLayoutPromptNeeded reads this mapping) and — coherently — makes
+			// "Reset Views Layout" send the Graph to the side bar while the simulation is on.
+			// In-memory only; a window reload restores the real defaults.
+			const sidebar = viewIdsByDefaultContainerId.get('workbench.view.extension.gitlens');
+			const panel = viewIdsByDefaultContainerId.get('workbench.view.extension.gitlensPanel');
+			if (sidebar == null || panel == null) return;
+
+			const simulated = sidebar.includes('graph');
+			const [from, to] = simulated ? [sidebar, panel] : [panel, sidebar];
+			// Guard the index — splice(-1, 1) would silently remove the LAST entry and corrupt the
+			// mapping (which Reset Views Layout also depends on) if 'graph' ever isn't where this
+			// toggle expects it (e.g. after the #5391 consolidation changes the defaults)
+			const index = from.indexOf('graph');
+			if (index !== -1) {
+				from.splice(index, 1);
+			}
+			if (!to.includes('graph')) {
+				to.push('graph');
+			}
+
+			void window.showInformationMessage(
+				`Graph-as-main-view simulation: ${simulated ? 'OFF' : 'ON (layout prompt armed)'}`,
+			);
+			// Rebuild the view's bootstrap so the prompt gate re-evaluates (no-op if not yet resolved)
+			void executeCommand('gitlens.views.graph.refresh');
 		}),
 		registerCommand('gitlens.toggleGraph', (...args: any[]) => {
 			if (getContext('gitlens:webviewView:graph:visible')) {
@@ -145,28 +336,7 @@ export function registerGraphWebviewCommands<T>(
 				void executeCoreCommand('workbench.action.toggleMaximizedPanel');
 			}
 		}),
-		registerCommand('gitlens.showInCommitGraph', (args: ShowInCommitGraphCommandArgs) => {
-			if (args instanceof PullRequestNode) {
-				if (args.ref == null) return;
-
-				args = { ref: args.ref };
-			}
-
-			const preserveFocus = 'preserveFocus' in args ? (args.preserveFocus ?? false) : false;
-			if (configuration.get('graph.layout') === 'panel') {
-				if (!container.views.graph.visible) {
-					const instance = panels.getBestInstance({ preserveFocus: preserveFocus }, args);
-					if (instance != null) {
-						void instance.show({ preserveFocus: preserveFocus }, args);
-						return;
-					}
-				}
-
-				void container.views.graph.show({ preserveFocus: preserveFocus }, args);
-			} else {
-				void panels.show({ preserveFocus: preserveFocus }, args);
-			}
-		}),
+		registerCommand('gitlens.showInCommitGraph', showInCommitGraph),
 		registerCommand('gitlens.showInCommitGraphView', (args: ShowInCommitGraphCommandArgs) => {
 			if (args instanceof PullRequestNode) {
 				if (args.ref == null) return;
@@ -175,12 +345,55 @@ export function registerGraphWebviewCommands<T>(
 			}
 
 			const preserveFocus = 'preserveFocus' in args ? (args.preserveFocus ?? false) : false;
-			void container.views.graph.show({ preserveFocus: preserveFocus }, args);
+			const source = 'source' in args ? args.source : undefined;
+			void container.views.graph.show({ preserveFocus: preserveFocus, source: source }, args);
 		}),
 		registerCommand(`${panels.id}.refresh`, () => void panels.getActiveInstance()?.refresh(true)),
 		registerCommand(
 			`${panels.id}.split`,
 			() => void panels.splitActiveInstance({ preserveInstance: false, column: ViewColumn.Beside }),
 		),
+		registerCommand('gitlens.openFileHistoryInGraph', openFileHistoryInGraph),
+		registerCommand('gitlens.openFileHistoryInGraph:editor', openFileHistoryInGraph),
+		registerCommand('gitlens.openFileHistoryInGraph:explorer', openFileHistoryInGraph),
+		registerCommand('gitlens.openFileHistoryInGraph:scm', async (...args: any[]): Promise<void> => {
+			const uri = getScmResourceUri(args);
+			await openFileHistoryInGraph(uri);
+		}),
+		registerCommand('gitlens.openFolderHistoryInGraph', openFolderHistoryInGraph),
+		registerCommand('gitlens.openFolderHistoryInGraph:explorer', openFolderHistoryInGraph),
+		registerCommand('gitlens.openFolderHistoryInGraph:scm', async (...args: any[]): Promise<void> => {
+			const uri = getScmResourceFolderUri(args) ?? getUriFromArgs(args);
+			await openFolderHistoryInGraph(uri);
+		}),
 	);
+}
+
+function getUriFromArgs(args: any[]): Uri | undefined {
+	const scmUri = getScmResourceUri(args);
+	if (scmUri) return scmUri;
+
+	let uri: Uri | undefined;
+	let editor: TextEditor | undefined;
+
+	if (args.length > 0) {
+		const [arg] = args;
+		if (isUri(arg)) {
+			uri = arg;
+		} else if (isUri(arg?.uri)) {
+			uri = arg.uri;
+		} else if (arg?.editor != null) {
+			editor = arg.editor;
+		}
+	}
+
+	if (uri == null && editor == null) {
+		editor = window.activeTextEditor;
+	}
+
+	if (uri == null && editor != null) {
+		uri = editor.document.uri;
+	}
+
+	return uri;
 }

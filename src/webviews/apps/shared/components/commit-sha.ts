@@ -1,31 +1,55 @@
-import type { TemplateResult } from 'lit';
 import { css, html, LitElement, nothing } from 'lit';
 import { customElement, property } from 'lit/decorators.js';
-import { isUncommitted, shortenRevision } from '../../../../git/utils/revision.utils';
-import './code-icon';
-import './copy-container';
+import { isUncommitted, isUncommittedStaged, shortenRevision } from '@gitlens/git/utils/revision.utils.js';
+import './code-icon.js';
+import './copy-container.js';
+
+const styles = css`
+	:host {
+		display: inline-flex;
+		align-items: baseline;
+		max-width: 100%;
+		margin-inline-end: var(--gl-space-2);
+		overflow: hidden;
+		text-overflow: ellipsis;
+		white-space: nowrap;
+	}
+
+	:host(:focus) {
+		outline: var(--gl-border-width) solid var(--vscode-focusBorder);
+		outline-offset: 2px;
+	}
+
+	/* Neutral/grey counterpart to gl-branch-name's pill — same shape, muted (not branch-colored). */
+	:host([appearance='pill']) {
+		padding: 0.1rem 0.6rem;
+		color: var(--vscode-foreground);
+		background-color: color-mix(in srgb, var(--vscode-descriptionForeground) 18%, transparent);
+		border-radius: var(--gl-radius-sm);
+	}
+
+	.label--uncommitted {
+		cursor: default;
+	}
+
+	.icon {
+		align-self: center;
+		margin-right: 0.3rem;
+	}
+`;
 
 @customElement('gl-commit-sha')
 export class GlCommitSha extends LitElement {
-	static override styles = css`
-		:host {
-			display: inline-block;
-			max-width: 100%;
-			align-content: center;
-			white-space: nowrap;
-			overflow: hidden;
-			text-overflow: ellipsis;
-			vertical-align: middle;
-			margin-top: -3px;
-		}
+	static override styles = styles;
 
-		.icon {
-			margin: 0 0.3rem 0.1rem 0.2rem;
-		}
-	`;
+	@property({ reflect: true })
+	appearance?: 'pill';
 
 	@property({ type: String })
 	sha?: string;
+
+	@property({ type: String })
+	icon: string = 'git-commit';
 
 	@property({ type: Number })
 	size: number = 12;
@@ -40,11 +64,76 @@ export class GlCommitSha extends LitElement {
 		if (this.sha == null) return nothing;
 
 		if (!this.sha || isUncommitted(this.sha)) {
-			return html`<span style="cursor:default;">${this.label}</span>`;
+			// Reserve the same leading-icon slot as committed shas so consumers that mix the two
+			// (e.g. the timeline footer's slider readout) keep a consistent horizontal offset.
+			// `pencil` for working-tree changes ("you've been editing") and `check` for staged
+			// ("approved/ready for commit") — the two icons read as a natural progression toward
+			// committed state without leaning on the prior `folder` / `folder-active` pair, which
+			// suggested navigation rather than activity.
+			const uncommittedIcon = isUncommittedStaged(this.sha) ? 'check' : 'pencil';
+			return html`<code-icon part="icon" class="icon" icon="${uncommittedIcon}" size="${this.size}"></code-icon
+				><span part="label" class="label--uncommitted">${this.label}</span>`;
 		}
 
-		return html`<gl-copy-container .content=${this.sha} placement="top">
-			<span><code-icon class="icon" icon="git-commit" size="${this.size}"></code-icon>${this.label}</span>
+		return html`<code-icon part="icon" class="icon" icon="${this.icon}" size="${this.size}"></code-icon
+			><span part="label">${this.label}</span>`;
+	}
+}
+
+@customElement('gl-commit-sha-copy')
+export class GlCommitShaCopy extends LitElement {
+	static override styles = [
+		styles,
+		css`
+			:host(:focus) {
+				outline: none;
+			}
+		`,
+	];
+
+	@property({ type: String })
+	sha?: string;
+
+	@property({ type: String })
+	icon: string = 'git-commit';
+
+	@property({ type: Number })
+	size: number = 12;
+
+	@property({ reflect: true })
+	appearance?: 'toolbar';
+
+	@property({ type: String, attribute: 'copy-label' })
+	copyLabel: string = 'Copy';
+
+	@property({ type: String, attribute: 'copied-label' })
+	copiedLabel: string = 'Copied!';
+
+	@property({ type: String, attribute: 'tooltip-placement' })
+	tooltipPlacement: string = 'top';
+
+	override render(): unknown {
+		if (this.sha == null) return nothing;
+
+		// Empty or uncommitted-sentinel shas have nothing meaningful to copy — render the label
+		// directly so consumers (e.g. the timeline's Working Tree placeholder) still see "Working".
+		if (!this.sha || isUncommitted(this.sha)) {
+			return html`<gl-commit-sha .sha=${this.sha} .icon=${this.icon} .size=${this.size}></gl-commit-sha>`;
+		}
+
+		return html`<gl-copy-container
+			.content=${this.sha}
+			placement="${this.tooltipPlacement}"
+			.copyLabel=${this.copyLabel}
+			.copiedLabel=${this.copiedLabel}
+			.appearance=${this.appearance}
+		>
+			<gl-commit-sha
+				exportparts="icon, label"
+				.sha=${this.sha}
+				.icon=${this.icon}
+				.size=${this.size}
+			></gl-commit-sha>
 		</gl-copy-container>`;
 	}
 }
@@ -52,9 +141,6 @@ export class GlCommitSha extends LitElement {
 declare global {
 	interface HTMLElementTagNameMap {
 		'gl-commit-sha': GlCommitSha;
+		'gl-commit-sha-copy': GlCommitShaCopy;
 	}
-}
-
-export function renderCommitSha(sha: string | undefined, size: number = 12): TemplateResult {
-	return html`<gl-commit-sha .sha=${sha} .size=${size}></gl-commit-sha>`;
 }

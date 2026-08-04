@@ -1,7 +1,26 @@
-import type { Container } from '../container';
-import { command } from '../system/-webview/command';
-import { configuration } from '../system/-webview/configuration';
-import { GlCommandBase } from './commandBase';
+import { commands } from 'vscode';
+import { Logger } from '@gitlens/utils/logger.js';
+import { wait } from '@gitlens/utils/promise.js';
+import type { Container } from '../container.js';
+import { command } from '../system/-webview/command.js';
+import { GlCommandBase } from './commandBase.js';
+
+// VS Code LogLevel enum values
+const enum VSCodeLogLevel {
+	Off = 0,
+	Trace = 1,
+	Debug = 2,
+	Info = 3,
+	Warning = 4,
+	Error = 5,
+}
+
+async function setOutputLogLevel(level: VSCodeLogLevel): Promise<void> {
+	Logger.showOutputChannel(true);
+	// Small delay to ensure the output channel is fully active before setting log level
+	await wait(500);
+	await commands.executeCommand(`workbench.action.output.activeOutputLogLevel.${level}`);
+}
 
 @command()
 export class EnableDebugLoggingCommand extends GlCommandBase {
@@ -9,8 +28,8 @@ export class EnableDebugLoggingCommand extends GlCommandBase {
 		super('gitlens.enableDebugLogging');
 	}
 
-	async execute(): Promise<void> {
-		await configuration.updateEffective('outputLevel', 'debug');
+	execute(): Promise<void> {
+		return setOutputLogLevel(VSCodeLogLevel.Debug);
 	}
 }
 
@@ -20,7 +39,7 @@ export class DisableDebugLoggingCommand extends GlCommandBase {
 		super('gitlens.disableDebugLogging');
 	}
 
-	async execute(): Promise<void> {
-		await configuration.updateEffective('outputLevel', 'error');
+	execute(): Promise<void> {
+		return setOutputLogLevel(VSCodeLogLevel.Info);
 	}
 }

@@ -1,16 +1,31 @@
-import type { GraphBranchesVisibility, ViewShowBranchComparison } from './config';
-import type { AIProviders } from './constants.ai';
-import type { IntegrationIds } from './constants.integrations';
-import type { SubscriptionState } from './constants.subscription';
-import type { TrackedUsage, TrackedUsageKeys } from './constants.telemetry';
-import type { GroupableTreeViewTypes } from './constants.views';
-import type { Environment } from './container';
-import type { FeaturePreviews } from './features';
-import type { GitRevisionRangeNotation } from './git/models/revision';
-import type { OrganizationSettings } from './plus/gk/models/organization';
-import type { PaidSubscriptionPlanIds, Subscription } from './plus/gk/models/subscription';
-import type { IntegrationConnectedKey } from './plus/integrations/models/integration';
-import type { DeepLinkServiceState } from './uris/deepLinks/deepLink';
+import type { ColumnMode } from '@gitkraken/commit-graph/view.js';
+import type { AIProviderAndModel, AIProviders } from '@gitlens/ai/constants.js';
+import type { GitRevisionRangeNotation } from '@gitlens/git/models/revision.js';
+import type {
+	IntegrationIds,
+	StoredConfiguredIntegrationDescriptor,
+	StoredIntegrationConfigurations,
+} from '@gitlens/integrations/constants.js';
+import type { IntegrationConnectedKey } from '@gitlens/integrations/models/integration.js';
+import type { GraphBranchesVisibility, ViewShowBranchComparison } from './config.js';
+import type { SubscriptionState } from './constants.subscription.js';
+import type { TrackedUsage, TrackedUsageKeys } from './constants.telemetry.js';
+import type { GroupableTreeViewTypes, TreeViewTypes } from './constants.views.js';
+import type { Environment } from './container.js';
+import type { FeatureFlagMap } from './featureFlags/featureFlagService.js';
+import type { FeaturePreviews } from './features.js';
+import type { OnboardingStorage } from './onboarding/models/onboarding.js';
+import type { OrganizationSettings } from './plus/gk/models/organization.js';
+import type { PaidSubscriptionPlanIds, Subscription } from './plus/gk/models/subscription.js';
+import type { DeepLinkServiceState } from './uris/deepLinks/deepLink.js';
+import type {
+	GraphDisplayMode,
+	GraphSidebarPanel,
+	GraphTreemapMode,
+	VisualizationMode,
+} from './webviews/plus/graph/protocol.js';
+import type { TimelinePeriod, TimelineSliceBy } from './webviews/plus/timeline/protocol.js';
+import type { OverviewRecentThreshold } from './webviews/shared/overviewBranches.js';
 
 export type SecretKeys =
 	| IntegrationAuthenticationKeys
@@ -25,10 +40,17 @@ export type IntegrationAuthenticationKeys =
 export const enum SyncedStorageKeys {
 	Version = 'gitlens:synced:version',
 	PreReleaseVersion = 'gitlens:synced:preVersion',
+	ApprovedAvatarRemoteTemplates = 'gitlens:avatars:approvedRemoteTemplates',
 }
 
 export type DeprecatedGlobalStorage = {
-	/** @deprecated use `confirm:ai:tos` */
+	/** @deprecated */
+	'confirm:ai:generateCommits': boolean;
+	/** @deprecated */
+	'confirm:ai:generateRebase': boolean;
+	/** @deprecated */
+	'confirm:ai:tos': boolean;
+	/** @deprecated */
 	'confirm:sendToOpenAI': boolean;
 	/** @deprecated */
 	'home:actions:completed': ('dismissed:welcome' | 'opened:scm')[];
@@ -54,21 +76,34 @@ export type DeprecatedGlobalStorage = {
 	'views:commitDetails:dismissed': 'sidebar'[];
 	/** @deprecated */
 	'views:welcome:visible': boolean;
+	/** @deprecated Use OnboardingService */
+	'home:walkthrough:dismissed': boolean;
+	/** @deprecated Use OnboardingService */
+	'mcp:banner:dismissed': boolean;
+	/** @deprecated Use OnboardingService */
+	'views:scm:grouped:welcome:dismissed': boolean;
+	/** @deprecated Use OnboardingService dismiss('composer:onboarding') */
+	'composer:onboarding:dismissed': string;
+	/** @deprecated Use OnboardingService setItemState('composer:onboarding', ...) */
+	'composer:onboarding:stepReached': number;
 } & {
 	/** @deprecated */
 	[key in `disallow:connection:${string}`]: any;
 } & {
-	/** @deprecated use `confirm:ai:tos` */
+	/** @deprecated */
 	[key in `confirm:ai:tos:${AIProviders}`]: boolean;
 };
 
-export type GlobalStorage = {
+interface GlobalStorageCore {
 	avatars: [string, StoredAvatar][];
-	'confirm:ai:generateCommits': boolean;
-	'confirm:ai:generateRebase': boolean;
-	'confirm:ai:tos': boolean;
+	'ai:scope:compose:model': AIProviderAndModel;
+	'ai:scope:review:model': AIProviderAndModel;
+	'ai:scope:resolve:model': AIProviderAndModel;
+	'avatars:approvedRemoteTemplates': Record<string, 'allow' | 'deny'>;
 	repoVisibility: [string, StoredRepoVisibilityInfo][];
 	pendingWhatsNewOnFocus: boolean;
+	/** Ids of one-time settings migrations already applied (see `migrateSettings`). */
+	'settings:migrated': string[];
 	// Don't change this key name ('premium`) as its the stored subscription
 	'premium:subscription': Stored<Subscription & { lastValidatedAt: number | undefined }>;
 	'synced:version': string;
@@ -81,49 +116,60 @@ export type GlobalStorage = {
 	'product:config': Stored<StoredProductConfig>;
 	'confirm:draft:storage': boolean;
 	'home:sections:collapsed': string[];
-	'home:walkthrough:dismissed': boolean;
 	'launchpad:groups:collapsed': StoredLaunchpadGroup[];
 	'launchpad:indicator:hasLoaded': boolean;
 	'launchpad:indicator:hasInteracted': string;
 	'launchpadView:groups:expanded': StoredLaunchpadGroup[];
 	'graph:searchMode': StoredGraphSearchMode;
 	'graph:useNaturalLanguageSearch': boolean;
-	'views:scm:grouped:welcome:dismissed': boolean;
 	'integrations:configured': StoredIntegrationConfigurations;
-} & { [key in `plus:preview:${FeaturePreviews}:usages`]: StoredFeaturePreviewUsagePeriod[] } & {
-	[key in `plus:organization:${string}:settings`]: Stored<
-		(OrganizationSettings & { lastValidatedAt: number }) | undefined
-	>;
-} & {
-	[key in `provider:authentication:skip:${string}`]: boolean;
-} & {
-	[key in `gk:promo:${string}:ai:allAccess:dismissed`]: boolean;
-} & {
-	[key in `gk:promo:${string}:ai:allAccess:notified`]: boolean;
-} & { [key in `gk:${string}:checkin`]: Stored<StoredGKCheckInResponse> } & {
-	[key in `gk:${string}:organizations`]: Stored<StoredOrganization[]>;
-} & { [key in `jira:${string}:organizations`]: Stored<StoredJiraOrganization[] | undefined> } & {
-	[key in `jira:${string}:projects`]: Stored<StoredJiraProject[] | undefined>;
-} & { [key in `azure:${string}:account`]: Stored<StoredAzureAccount | undefined> } & {
-	[key in `azure:${string}:organizations`]: Stored<StoredAzureOrganization[] | undefined>;
-} & {
-	[key in `azure:${string}:projects`]: Stored<StoredAzureProject[] | undefined>;
-} & { [key in `bitbucket:${string}:account`]: Stored<StoredBitbucketAccount | undefined> } & {
-	[key in `bitbucket:${string}:workspaces`]: Stored<StoredBitbucketWorkspace[] | undefined>;
-} & { [key in `bitbucket-server:${string}:account`]: Stored<StoredBitbucketAccount | undefined> };
-
-export type StoredIntegrationConfigurations = Record<
-	IntegrationIds,
-	StoredConfiguredIntegrationDescriptor[] | undefined
->;
-
-export interface StoredConfiguredIntegrationDescriptor {
-	cloud: boolean;
-	integrationId: IntegrationIds;
-	domain?: string;
-	expiresAt?: string;
-	scopes: string;
+	/** Unified onboarding/dismissible UI state */
+	'onboarding:state': OnboardingStorage;
+	'featureFlags:flags': FeatureFlagMap;
 }
+
+type GlobalStorageDynamic = Record<`plus:preview:${FeaturePreviews}:usages`, StoredFeaturePreviewUsagePeriod[]> &
+	Record<
+		`plus:organization:${string}:settings`,
+		Stored<(OrganizationSettings & { lastValidatedAt: number }) | undefined>
+	> &
+	Record<`provider:authentication:skip:${string}`, boolean> &
+	Record<`gk:promo:${string}:ai:allAccess:dismissed`, boolean> &
+	Record<`gk:promo:${string}:ai:allAccess:notified`, boolean> &
+	Record<`gk:${string}:checkin`, Stored<StoredGKCheckInResponse>> &
+	Record<`gk:${string}:organizations`, Stored<StoredOrganization[]>> &
+	Record<`jira:${string}:organizations`, Stored<StoredJiraOrganization[] | undefined>> &
+	Record<`jira:${string}:projects`, Stored<StoredJiraProject[] | undefined>> &
+	Record<`azure:${string}:account`, Stored<StoredAzureAccount | undefined>> &
+	Record<`azure:${string}:organizations`, Stored<StoredAzureOrganization[] | undefined>> &
+	Record<`azure:${string}:projects`, Stored<StoredAzureProject[] | undefined>> &
+	Record<`bitbucket:${string}:account`, Stored<StoredBitbucketAccount | undefined>> &
+	Record<`bitbucket:${string}:workspaces`, Stored<StoredBitbucketWorkspace[] | undefined>> &
+	Record<`bitbucket-server:${string}:account`, Stored<StoredBitbucketAccount | undefined>>;
+
+export type GlobalStorage = GlobalStorageCore & GlobalStorageDynamic;
+
+/**
+ * Storage keys that contain environment-specific data (e.g., file paths, install status).
+ * These are automatically scoped by platform and remote info to avoid conflicts when
+ * globalState is shared across local/remote environments (Windows, WSL, containers, SSH).
+ *
+ * Use `storage.getScoped()` / `storage.storeScoped()` / `storage.deleteScoped()` for these keys.
+ */
+export interface GlobalScopedStorage {
+	'gk:cli:install': StoredGkCLIInstallInfo;
+}
+
+export interface StoredGkCLIInstallInfo {
+	status: 'attempted' | 'unsupported' | 'completed';
+	attempts: number;
+	version?: string;
+}
+
+// Re-export the canonical stored-configuration types (imported above) rather than redefining them here,
+// so the multi-account descriptor shape (id/primary/type/accountName) can't drift between the extension's
+// storage typing and the integrations package that owns it.
+export type { StoredConfiguredIntegrationDescriptor, StoredIntegrationConfigurations };
 
 export interface StoredProductConfig {
 	promos: StoredPromo[];
@@ -141,35 +187,67 @@ export interface StoredPromo {
 }
 
 export type DeprecatedWorkspaceStorage = {
-	/** @deprecated use `confirm:ai:tos` */
+	/** @deprecated */
+	'confirm:ai:tos': boolean;
+	/** @deprecated */
 	'confirm:sendToOpenAI': boolean;
 	/** @deprecated */
 	'graph:banners:dismissed': Record<string, boolean>;
 	/** @deprecated */
 	'views:searchAndCompare:keepResults': boolean;
 } & {
-	/** @deprecated use `confirm:ai:tos` */
+	/** @deprecated */
 	[key in `confirm:ai:tos:${AIProviders}`]: boolean;
 };
 
-export type WorkspaceStorage = {
+interface WorkspaceStorageCore {
 	assumeRepositoriesOnStartup?: boolean;
 	'branch:comparisons': StoredBranchComparisons;
-	'confirm:ai:tos': boolean;
 	'gitComandPalette:usage': StoredRecentUsage;
 	gitPath: string;
 	'graph:columns': Record<string, StoredGraphColumn>;
 	'graph:filtersByRepo': Record<string, StoredGraphFilters>;
-	'remote:default': string;
-	'starred:branches': StoredStarred;
+	'graph:state': StoredGraphState;
+	/** Per-worktree commit draft for the Graph's WIP details panel. Key is the worktree's
+	 *  fsPath — invariant whether the user opens the main repo or the worktree directly. */
+	'graph:wipDrafts': Record<string, StoredGraphWipDraft>;
+	/** Unified onboarding/dismissible UI state (workspace-scoped items) */
+	'onboarding:state': OnboardingStorage;
 	'starred:repositories': StoredStarred;
 	'views:commitDetails:pullRequestExpanded': boolean;
+	'views:commitDetails:showSearchBox': boolean;
+	'views:commitDetails:searchBoxFilter': boolean;
 	'views:repositories:autoRefresh': boolean;
 	'views:searchAndCompare:pinned': StoredSearchAndCompareItems;
 	'views:scm:grouped:selected': GroupableTreeViewTypes;
-} & {
-	[key in IntegrationConnectedKey]: boolean;
-};
+}
+
+/**
+ * Repository filter values:
+ * - `undefined` or `'all'` - show all repositories (new code should set `'all'`)
+ * - `'exclude-worktrees'` - show all except linked worktrees (worktrees whose main repo is also open)
+ * - `string[]` - show only the specified repository IDs
+ */
+export type RepositoryFilterValue = 'all' | 'exclude-worktrees' | string[] | undefined;
+
+type WorkspaceStorageDynamic = Record<IntegrationConnectedKey, boolean> &
+	Record<`views:${TreeViewTypes}:repositoryFilter`, RepositoryFilterValue> &
+	Record<`graph:searchHistory:${string}`, StoredGraphSearchHistory[]> &
+	/** Rollback record for a completed automatic rebase. Key suffix is the repo path. */
+	Record<`autoRebase:undo:${string}`, Stored<StoredAutoRebaseUndo>>;
+
+export interface StoredAutoRebaseUndo {
+	/** The branch that was rebased */
+	branch: string | undefined;
+	/** The branch tip before the rebase (orig-head) */
+	preRebaseSha: string;
+	/** The branch tip when the automatic rebase completed — undo refuses if the branch has moved since */
+	postRebaseSha: string;
+	/** What happened to the autostash at the end of the run */
+	autostash: 'none' | 'reapplied' | 'left-in-stash';
+}
+
+export type WorkspaceStorage = WorkspaceStorageCore & WorkspaceStorageDynamic;
 
 export interface Stored<T, SchemaVersion extends number = 1> {
 	v: SchemaVersion;
@@ -318,12 +396,84 @@ export interface StoredDeepLinkContext {
 	secondaryTargetSha?: string | undefined;
 	useProgress?: boolean | undefined;
 	state?: DeepLinkServiceState | undefined;
+	prData?: string | undefined;
+	issueData?: string | undefined;
+	instructions?: string | undefined;
+	/** Agent descriptor for Start Work / Start Review with `showOpenInAgent`. Plain JSON shape. */
+	agent?: unknown;
+	/** Worktree path for CLI dispatch `cwd`. */
+	worktreePath?: string | undefined;
 }
+
+/** The column-mode vocabulary AS PERSISTED. Deliberately re-declared rather than imported from the
+ *  engine: stored settings are a contract with data already on disk, so an engine-side change must
+ *  surface as a compile error at {@link storedGraphColumnModeBridge} and be answered with a migration
+ *  decision — not silently redefine what existing values mean. */
+export type StoredGraphColumnMode = 'numbers' | 'squares' | 'bar' | 'bipolar' | 'compact';
+
+/** Fails to compile if the persisted vocabulary and the engine's {@link ColumnMode} diverge in EITHER
+ *  direction (a mode added, removed, or renamed). Resolve by migrating stored values, then updating
+ *  {@link StoredGraphColumnMode} to match. */
+type ExactlyEqual<A, B> = [A] extends [B] ? ([B] extends [A] ? true : false) : false;
+export const storedGraphColumnModeBridge: ExactlyEqual<StoredGraphColumnMode, ColumnMode> = true;
 
 export interface StoredGraphColumn {
 	isHidden?: boolean;
-	mode?: string;
+	mode?: StoredGraphColumnMode;
 	width?: number;
+	/** Column↔grouped placement. `graph`: `true` = grouped. `ref`: host zone id = grouped, `false` = column. */
+	grouped?: boolean | string;
+}
+
+export interface StoredGraphState {
+	displayMode?: GraphDisplayMode;
+	visualizationMode?: VisualizationMode;
+	panels?: {
+		details?: {
+			visible?: boolean;
+			position?: number;
+			bottomPosition?: number;
+			/** Whether the file-tree search box is visible. */
+			showSearchBox?: boolean;
+			/** How the file-tree search box presents non-matches: `true` hides them (filter), `false` dims them (highlight). */
+			searchBoxFilter?: boolean;
+		};
+		sidebar?: {
+			visible?: boolean;
+			position?: number;
+			activePanel?: GraphSidebarPanel;
+			/** How the sidebar's filter input presents non-matches: `true` hides them (filter), `false` dims them (highlight). */
+			searchBoxFilter?: boolean;
+		};
+		minimap?: {
+			visible?: boolean;
+			position?: number;
+		};
+	};
+	overview?: {
+		recentThreshold?: OverviewRecentThreshold;
+	};
+	timeline?: {
+		period?: TimelinePeriod;
+		sliceBy?: TimelineSliceBy;
+		showAllBranches?: boolean;
+	};
+	treemap?: {
+		mode?: GraphTreemapMode;
+	};
+}
+
+export interface StoredGraphWipDraft {
+	/** The commit message currently in the WIP commit input. */
+	message: string;
+	/** `true` when the message is user-authored (typed, AI-generated, or restored from an undone
+	 *  commit) and must not be dropped by the HEAD-move auto-clear path. Mirrors the in-memory
+	 *  `commitMessageDirty` signal on the details panel. */
+	messageDirty: boolean;
+	/** Present iff amend mode was active when the draft was saved. `baseSha` records the worktree
+	 *  HEAD the amend was bound to so the existing HEAD-move auto-clear (in
+	 *  `gl-graph-details-panel.ts`) can detect a stale amend on restore. */
+	amend?: { baseSha: string };
 }
 
 export type StoredGraphExcludeTypes = 'remotes' | 'stashes' | 'tags';
@@ -333,9 +483,21 @@ export interface StoredGraphFilters {
 	includeOnlyRefs?: Record<string, StoredGraphIncludeOnlyRef>;
 	excludeRefs?: Record<string, StoredGraphExcludedRef>;
 	excludeTypes?: Record<StoredGraphExcludeTypes, boolean>;
+	pinnedRef?: StoredGraphPinnedRef;
 }
 
 export type StoredGraphRefType = 'head' | 'remote' | 'tag';
+
+export type StoredGraphSearchHistory = {
+	query: string;
+	matchAll: boolean | undefined;
+	matchCase: boolean | undefined;
+	matchRegex: boolean | undefined;
+	matchWholeWord: boolean | undefined;
+	naturalLanguage: boolean | undefined;
+	/** For NL queries, store the last known structured form to show in history */
+	nlStructuredQuery?: string;
+};
 
 export type StoredGraphSearchMode = 'normal' | 'filter';
 
@@ -347,6 +509,13 @@ export interface StoredGraphExcludedRef {
 }
 
 export interface StoredGraphIncludeOnlyRef {
+	id: string;
+	type: StoredGraphRefType;
+	name: string;
+	owner?: string;
+}
+
+export interface StoredGraphPinnedRef {
 	id: string;
 	type: StoredGraphRefType;
 	name: string;

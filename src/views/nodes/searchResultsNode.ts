@@ -1,16 +1,16 @@
 import type { TreeItem } from 'vscode';
 import { ThemeIcon } from 'vscode';
-import { md5 } from '@env/crypto';
-import type { SearchQuery } from '../../constants.search';
-import { executeGitCommand } from '../../git/actions';
-import type { GitLog } from '../../git/models/log';
-import type { CommitsQueryResults } from '../../git/queryResults';
-import { getSearchQueryComparisonKey, getStoredSearchQuery } from '../../git/search';
-import { pluralize } from '../../system/string';
-import type { SearchAndCompareView } from '../searchAndCompareView';
-import type { ViewNode } from './abstract/viewNode';
-import { ContextValues, getViewNodeId } from './abstract/viewNode';
-import { ResultsCommitsNodeBase } from './resultsCommitsNode';
+import type { GitLog } from '@gitlens/git/models/log.js';
+import type { SearchQuery } from '@gitlens/git/models/search.js';
+import { md5 } from '@gitlens/utils/crypto.js';
+import { pluralize } from '@gitlens/utils/string.js';
+import { executeGitCommand } from '../../git/actions.js';
+import type { CommitsQueryResults } from '../../git/queryResults.js';
+import { getSearchQueryComparisonKey, getStoredSearchQuery } from '../../git/utils/-webview/search.utils.js';
+import type { SearchAndCompareView } from '../searchAndCompareView.js';
+import type { ViewNode } from './abstract/viewNode.js';
+import { ContextValues, getViewNodeId } from './abstract/viewNode.js';
+import { ResultsCommitsNodeBase } from './resultsCommitsNode.js';
 
 interface SearchQueryResults {
 	readonly label: string;
@@ -141,7 +141,7 @@ export class SearchResultsNode extends ResultsCommitsNodeBase<'search-results', 
 		await this.replace(currentId, true);
 
 		void this.triggerChange(true);
-		queueMicrotask(() => this.view.reveal(this, { expand: true, focus: true, select: true }));
+		void this.view.reveal(this, { expand: true, focus: true, select: true });
 	}
 
 	private getStorageId() {
@@ -195,7 +195,7 @@ function createSearchQuery(
 		if (log == null) {
 			log = await view.container.git
 				.getRepositoryService(repoPath)
-				.commits.searchCommits(search, { source: 'view', detail: 'search&compare' })
+				.commits.searchCommits(search, { source: { source: 'view', detail: 'search&compare' } })
 				.then(r => r.log);
 		} else if (log instanceof Promise) {
 			log = await log;

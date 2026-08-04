@@ -1,20 +1,20 @@
 import { ThemeIcon, TreeItem, TreeItemCollapsibleState } from 'vscode';
-import type { GitUri } from '../../git/gitUri';
-import type { Repository } from '../../git/models/repository';
-import { map } from '../../system/iterable';
-import type { ViewsWithStashesNode } from '../viewBase';
-import { CacheableChildrenViewNode } from './abstract/cacheableChildrenViewNode';
-import type { ViewNode } from './abstract/viewNode';
-import { ContextValues, getViewNodeId } from './abstract/viewNode';
-import { MessageNode } from './common';
-import { StashNode } from './stashNode';
+import { map } from '@gitlens/utils/iterable.js';
+import type { GitUri } from '../../git/gitUri.js';
+import type { GlRepository } from '../../git/models/repository.js';
+import type { ViewsWithStashesNode } from '../viewBase.js';
+import { CacheableChildrenViewNode } from './abstract/cacheableChildrenViewNode.js';
+import type { ViewNode } from './abstract/viewNode.js';
+import { ContextValues, getViewNodeId } from './abstract/viewNode.js';
+import { MessageNode } from './common.js';
+import { StashNode } from './stashNode.js';
 
 export class StashesNode extends CacheableChildrenViewNode<'stashes', ViewsWithStashesNode> {
 	constructor(
 		uri: GitUri,
 		view: ViewsWithStashesNode,
 		protected override parent: ViewNode,
-		public readonly repo: Repository,
+		public readonly repo: GlRepository,
 	) {
 		super('stashes', uri, view, parent);
 

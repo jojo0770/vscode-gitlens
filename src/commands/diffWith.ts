@@ -1,20 +1,21 @@
 import type { TextDocumentShowOptions, Uri } from 'vscode';
 import { ViewColumn } from 'vscode';
-import { GlyphChars } from '../constants';
-import type { Container } from '../container';
-import type { DiffRange } from '../git/gitProvider';
-import type { GitCommit } from '../git/models/commit';
-import { isCommit } from '../git/models/commit';
-import { deletedOrMissing } from '../git/models/revision';
-import { isShaWithParentSuffix, isUncommitted, shortenRevision } from '../git/utils/revision.utils';
-import { showGenericErrorMessage } from '../messages';
-import { command } from '../system/-webview/command';
-import { diffRangeToSelection, openDiffEditor } from '../system/-webview/vscode/editors';
-import { createMarkdownCommandLink } from '../system/commands';
-import { Logger } from '../system/logger';
-import { basename } from '../system/path';
-import { getSettledValue } from '../system/promise';
-import { GlCommandBase } from './commandBase';
+import { GitCommit } from '@gitlens/git/models/commit.js';
+import { deletedOrMissing } from '@gitlens/git/models/revision.js';
+import type { DiffRange } from '@gitlens/git/providers/types.js';
+import { isShaWithParentSuffix, isUncommitted, shortenRevision } from '@gitlens/git/utils/revision.utils.js';
+import { Logger } from '@gitlens/utils/logger.js';
+import { basename } from '@gitlens/utils/path.js';
+import { getSettledValue } from '@gitlens/utils/promise.js';
+import { GlyphChars } from '../constants.js';
+import type { Source } from '../constants.telemetry.js';
+import type { Container } from '../container.js';
+import { showGenericErrorMessage } from '../messages.js';
+import { command } from '../system/-webview/command.js';
+import { openDiffEditor } from '../system/-webview/vscode/editors.js';
+import { diffRangeToSelection } from '../system/-webview/vscode/range.js';
+import { createMarkdownCommandLink } from '../system/commands.js';
+import { GlCommandBase } from './commandBase.js';
 
 export interface DiffWithCommandArgsRevision {
 	sha: string;
@@ -30,15 +31,20 @@ export interface DiffWithCommandArgs {
 	fromComparison?: boolean;
 	range?: DiffRange;
 	showOptions?: TextDocumentShowOptions;
+	source?: Source;
 }
 
 @command()
 export class DiffWithCommand extends GlCommandBase {
 	static createMarkdownCommandLink(args: DiffWithCommandArgs): string;
-	static createMarkdownCommandLink(commit: GitCommit, range?: DiffRange): string;
-	static createMarkdownCommandLink(argsOrCommit: DiffWithCommandArgs | GitCommit, range?: DiffRange): string {
+	static createMarkdownCommandLink(commit: GitCommit, range?: DiffRange, source?: Source): string;
+	static createMarkdownCommandLink(
+		argsOrCommit: DiffWithCommandArgs | GitCommit,
+		range?: DiffRange,
+		source?: Source,
+	): string {
 		let args: DiffWithCommandArgs | GitCommit;
-		if (isCommit(argsOrCommit)) {
+		if (GitCommit.is(argsOrCommit)) {
 			const commit = argsOrCommit;
 			if (commit.file == null || commit.unresolvedPreviousSha == null) {
 				debugger;
@@ -51,6 +57,7 @@ export class DiffWithCommand extends GlCommandBase {
 					lhs: { sha: 'HEAD', uri: commit.file.uri },
 					rhs: { sha: '', uri: commit.file.uri },
 					range: range,
+					source: source,
 				};
 			} else {
 				args = {
@@ -59,6 +66,7 @@ export class DiffWithCommand extends GlCommandBase {
 					lhs: { sha: commit.unresolvedPreviousSha, uri: commit.file.originalUri ?? commit.file.uri },
 					rhs: { sha: commit.sha, uri: commit.file.uri },
 					range: range,
+					source: source,
 				};
 			}
 		} else {
@@ -121,8 +129,8 @@ export class DiffWithCommand extends GlCommandBase {
 			}
 
 			const [lhsResult, rhsResult] = await Promise.allSettled([
-				svc.getBestRevisionUri(lhsUri.fsPath, lhsResolved.sha),
-				svc.getBestRevisionUri(rhsUri.fsPath, rhsResolved.sha),
+				svc.getBestRevisionUri(lhsUri, lhsResolved.sha),
+				svc.getBestRevisionUri(rhsUri, rhsResolved.sha),
 			]);
 
 			const lhs = getSettledValue(lhsResult);
@@ -146,8 +154,7 @@ export class DiffWithCommand extends GlCommandBase {
 			let lhsSuffix = shortenRevision(lhsResolved.revision);
 			if (lhsResolved.sha === deletedOrMissing) {
 				lhsSuffix = args.fromComparison ? `Missing${!lhsSuffix ? '' : ` in ${lhsSuffix}`}` : '';
-			}
-			if (lhs == null && !rhsResolved.sha) {
+			} else if (lhs == null && !rhsResolved.sha) {
 				if (rhs != null) {
 					lhsSuffix = !lhsSuffix ? '' : `Not in ${lhsSuffix}`;
 					rhsSuffix = '';

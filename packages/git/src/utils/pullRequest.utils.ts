@@ -1,0 +1,168 @@
+import type {
+	PullRequest,
+	PullRequestComparisonRefs,
+	PullRequestRefs,
+	PullRequestRepositoryIdentityDescriptor,
+	PullRequestShape,
+} from '../models/pullRequest.js';
+import { shortenRevision } from './revision.utils.js';
+
+export interface PullRequestUrlIdentity<TProvider extends string = string> {
+	provider?: TProvider;
+
+	ownerAndRepo?: string;
+	prNumber: string;
+}
+
+export function getComparisonRefsForPullRequest(repoPath: string, prRefs: PullRequestRefs): PullRequestComparisonRefs {
+	const refs: PullRequestComparisonRefs = {
+		repoPath: repoPath,
+		base: { ref: prRefs.base.sha, label: `${prRefs.base.branch} (${shortenRevision(prRefs.base.sha)})` },
+		head: { ref: prRefs.head.sha, label: prRefs.head.branch },
+	};
+	return refs;
+}
+
+export function getPullRequestIdentityFromMaybeUrl(search: string): PullRequestUrlIdentity | undefined {
+	let prNumber: string | undefined = undefined;
+
+	let match = search.match(/(?:\/)(\d+)/); // any number starting with "/"
+	if (match != null) {
+		prNumber = match[1];
+	}
+
+	if (prNumber == null) {
+		match = search.match(/^#?(\d+)$/); // just a number or with a leading "#"
+		if (match != null) {
+			prNumber = match[1];
+		}
+	}
+
+	return prNumber == null ? undefined : { ownerAndRepo: undefined, prNumber: prNumber, provider: undefined };
+}
+
+/** A pull request's display number from its url, or `undefined` for a url naming no pull request. Anchors
+ *  on the provider's pull request path segment (GitHub `pull`, Bitbucket `pull-requests`, GitLab
+ *  `merge_requests`, Azure `pullrequest`) so a digit-leading owner (`github.com/1Password/x/pull/123`)
+ *  can't win. */
+export function getPullRequestNumberFromUrl(url: string): string | undefined {
+	// No loose fallback: `getPullRequestIdentityFromMaybeUrl` scans for any `/<digits>`, which reads a bare
+	// repository url like `github.com/1Password/sdk` as pull request #1. Callers that hold a real pull
+	// request fall back to its id instead, and the one that asks whether a pasted url names a pull request
+	// needs "no" for an answer.
+	return url.match(/(?:pull|pull-requests|merge_requests|pullrequest)\/(\d+)(?:\b|\/|$)/)?.[1];
+}
+
+export function getRepositoryIdentityForPullRequest(
+	pr: PullRequest,
+	headRepo: boolean = true,
+): PullRequestRepositoryIdentityDescriptor {
+	if (headRepo) {
+		return {
+			remote: {
+				url: pr.refs?.head?.url,
+				domain: pr.provider.domain,
+			},
+			name: `${pr.refs?.head?.owner ?? pr.repository.owner}/${pr.refs?.head?.repo ?? pr.repository.repo}`,
+			provider: {
+				id: pr.provider.id,
+				domain: pr.provider.domain,
+				repoDomain: pr.refs?.head?.owner ?? pr.repository.owner,
+				repoName: pr.refs?.head?.repo ?? pr.repository.repo,
+			},
+		};
+	}
+
+	return {
+		remote: {
+			url: pr.refs?.base?.url ?? pr.url,
+			domain: pr.provider.domain,
+		},
+		name: `${pr.refs?.base?.owner ?? pr.repository.owner}/${pr.refs?.base?.repo ?? pr.repository.repo}`,
+		provider: {
+			id: pr.provider.id,
+			domain: pr.provider.domain,
+			repoDomain: pr.refs?.base?.owner ?? pr.repository.owner,
+			repoName: pr.refs?.base?.repo ?? pr.repository.repo,
+			repoOwnerDomain: pr.refs?.base?.owner ?? pr.repository.owner,
+		},
+	};
+}
+
+export function isMaybeNonSpecificPullRequestSearchUrl(search: string): boolean {
+	return getPullRequestIdentityFromMaybeUrl(search) != null;
+}
+
+export function serializePullRequest(value: PullRequest): PullRequestShape {
+	const serialized: PullRequestShape = {
+		type: value.type,
+		provider: {
+			id: value.provider.id,
+			name: value.provider.name,
+			domain: value.provider.domain,
+			icon: value.provider.icon,
+		},
+		id: value.id,
+		nodeId: value.nodeId,
+		title: value.title,
+		url: value.url,
+		createdDate: value.createdDate,
+		updatedDate: value.updatedDate,
+		closedDate: value.closedDate,
+		closed: value.closed,
+		author: {
+			id: value.author.id,
+			name: value.author.name,
+			username: value.author.username,
+			avatarUrl: value.author.avatarUrl,
+			url: value.author.url,
+		},
+		state: value.state,
+		mergedDate: value.mergedDate,
+		mergeableState: value.mergeableState,
+		refs: value.refs
+			? {
+					head: {
+						exists: value.refs.head.exists,
+						owner: value.refs.head.owner,
+						repo: value.refs.head.repo,
+						sha: value.refs.head.sha,
+						branch: value.refs.head.branch,
+						url: value.refs.head.url,
+						cloneHttps: value.refs.head.cloneHttps,
+						cloneSsh: value.refs.head.cloneSsh,
+						isFork: value.refs.head.isFork,
+					},
+					base: {
+						exists: value.refs.base.exists,
+						owner: value.refs.base.owner,
+						repo: value.refs.base.repo,
+						sha: value.refs.base.sha,
+						branch: value.refs.base.branch,
+						url: value.refs.base.url,
+						cloneHttps: value.refs.base.cloneHttps,
+						cloneSsh: value.refs.base.cloneSsh,
+						isFork: value.refs.base.isFork,
+					},
+					isCrossRepository: value.refs.isCrossRepository,
+				}
+			: undefined,
+		isDraft: value.isDraft,
+		additions: value.additions,
+		deletions: value.deletions,
+		commentsCount: value.commentsCount,
+		thumbsUpCount: value.thumbsUpCount,
+		reviewDecision: value.reviewDecision,
+		reviewRequests: value.reviewRequests,
+		assignees: value.assignees,
+		project: value.project
+			? {
+					id: value.project.id,
+					name: value.project.name,
+					resourceId: value.project.resourceId,
+					resourceName: value.project.resourceName,
+				}
+			: undefined,
+	};
+	return serialized;
+}

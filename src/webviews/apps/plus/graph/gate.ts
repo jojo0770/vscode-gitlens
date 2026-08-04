@@ -1,62 +1,147 @@
+import { SignalWatcher } from '@lit-labs/signals';
 import { consume } from '@lit/context';
-import { css, html } from 'lit';
-import { customElement, state } from 'lit/decorators.js';
+import { css, html, LitElement } from 'lit';
+import { customElement } from 'lit/decorators.js';
 import { ifDefined } from 'lit/directives/if-defined.js';
-import { createWebviewCommandLink } from '../../../../system/webview';
-import type { State } from '../../../plus/graph/protocol';
-import { GlElement } from '../../shared/components/element';
-import { linkStyles } from '../shared/components/vscode.css';
-import { stateContext } from './context';
-import '../../shared/components/feature-badge';
-import '../../shared/components/feature-gate';
+import { createCommandLink } from '../../../../system/commands.js';
+import { ChooseAccountOrgCommand, ChooseRepositoryCommand } from '../../../plus/graph/protocol.js';
+import { featureGateContentStyles } from '../../shared/components/feature-gate.css.js';
+import { ipcContext } from '../../shared/contexts/ipc.js';
+import { subscriptionContext } from '../../shared/contexts/subscription.js';
+import type { SubscriptionContextState } from '../../shared/contexts/subscription.js';
+import { linkStyles } from '../shared/components/vscode.css.js';
+import { graphStateContext } from './context.js';
+import '../../shared/components/code-icon.js';
+import '../../shared/components/feature-badge.js';
+import '../../shared/components/feature-gate.js';
 
 @customElement('gl-graph-gate')
-export class GlGraphGate extends GlElement {
+export class GlGraphGate extends SignalWatcher(LitElement) {
 	static override styles = [
 		linkStyles,
+		featureGateContentStyles,
 		css`
-			gl-feature-gate gl-feature-badge {
-				vertical-align: super;
-				margin-left: 0.4rem;
-				margin-right: 0.4rem;
+			gl-feature-gate::part(section) {
+				/* Container units (not vw): size against the gate overlay's own box (the
+				   feature-gate host) rather than the webview viewport, so the card keeps tracking
+				   the gated area even if the gate is ever hosted in a sub-region of the view. */
+				width: calc(100cqi - var(--gl-space-16));
+				max-width: 90rem;
 			}
 		`,
 	];
 
-	@consume({ context: stateContext, subscribe: true })
-	@state()
-	state!: State;
+	@consume({ context: subscriptionContext, subscribe: true })
+	private _subscription!: SubscriptionContextState;
+
+	@consume({ context: graphStateContext, subscribe: true })
+	graphState!: typeof graphStateContext.__context__;
+
+	@consume({ context: ipcContext })
+	private readonly _ipc!: typeof ipcContext.__context__;
 
 	override render() {
+		const orgCount = this._subscription.organizationsCount.get();
+
 		return html`<gl-feature-gate
-			.featurePreview=${this.state.featurePreview}
+			.featurePreview=${this.graphState.featurePreview}
 			featurePreviewCommandLink=${ifDefined(
-				this.state.featurePreview
-					? createWebviewCommandLink(
-							'gitlens.plus.continueFeaturePreview',
-							this.state.webviewId,
-							this.state.webviewInstanceId,
-							{ feature: this.state.featurePreview.feature },
-						)
+				this.graphState.featurePreview
+					? createCommandLink('gitlens.plus.continueFeaturePreview', {
+							feature: this.graphState.featurePreview.feature,
+						})
 					: undefined,
 			)}
 			appearance="alert"
+			featureRestriction="private-repos"
 			featureWithArticleIfNeeded="the Commit Graph"
-			?hidden=${this.state.allowed !== false}
+			?allowRepoSwitch=${this.graphState.allowRepoSwitch}
+			?allowOrgSwitch=${orgCount > 0}
 			.source=${{ source: 'graph', detail: 'gate' } as const}
-			.state=${this.state.subscription?.state}
-			.webroot=${this.state.webroot}
+			.state=${this.graphState.subscription?.state}
+			.webroot=${this.graphState.webroot}
+			@gl-switch-repos=${this.onSwitchRepos}
+			@gl-switch-orgs=${this.onSwitchOrgs}
 		>
-			<p slot="feature">
-				<a href="https://help.gitkraken.com/gitlens/gitlens-features/#commit-graph-pro">Commit Graph</a>
-				<gl-feature-badge
-					.source=${{ source: 'graph', detail: 'badge' } as const}
-					subscription="{subscription}"
-				></gl-feature-badge>
-				&mdash; easily visualize your repository and keep track of all work in progress. Use the rich commit
-				search to find a specific commit, message, author, a changed file or files, or even a specific code
-				change.
-			</p>
+			<section slot="feature" class="feature">
+				<header class="feature__header">
+					<div class="icon-cube feature__feature-icon"><code-icon icon="gl-gitlens"></code-icon></div>
+					<hgroup>
+						<h2 class="feature__title">
+							<span>Try the All-New Commit Graph</span>
+							<gl-feature-badge
+								.source=${{ source: 'graph', detail: 'badge' } as const}
+								.subscription=${this.graphState.subscription}
+							></gl-feature-badge>
+						</h2>
+						<p class="feature__lede">Where your development and agentic workflows come together</p>
+					</hgroup>
+				</header>
+
+				<p class="feature__sub">
+					Parallelize your workflow—manage multiple active worktrees, orchestrate concurrent agents, and
+					execute your entire Git lifecycle without context-switching
+				</p>
+
+				<ul class="list">
+					<li class="list__item">
+						<span class="icon-cube"><code-icon icon="layout"></code-icon></span>
+						<span class="list__copy"
+							><strong>Unified Workspace</strong> Centralize your workflow with the Side Bar and dockable
+							Details Panel. Detach the graph into a separate window to maximize your editor space</span
+						>
+					</li>
+
+					<li class="list__item">
+						<span class="icon-cube"><code-icon icon="robot"></code-icon></span>
+						<span class="list__copy"
+							><strong>Orchestrate Agents</strong> Launch, monitor, and interact with agents from the
+							graph, Agents Side Bar, or Kanban board to approve permissions and view execution plans
+							inline</span
+						>
+					</li>
+					<li class="list__item">
+						<span class="icon-cube"><code-icon icon="shield"></code-icon></span>
+						<span class="list__copy"
+							><strong>Command Center</strong> Review changes, stage files, create or compose commits, and
+							resolve conflicts. On a clean worktree the Details Panel guides your next steps—like
+							pulling, pushing, or drafting a PR</span
+						>
+					</li>
+					<li class="list__item">
+						<span class="icon-cube"><code-icon icon="arrow-swap"></code-icon></span>
+						<span class="list__copy"
+							><strong>Parallelize Work</strong> Juggle multiple active worktrees and agent sessions
+							within a single view. Focus the graph on specific changes instantly to review and track
+							where agents are working in real-time</span
+						>
+					</li>
+					<li class="list__item">
+						<span class="icon-cube"><code-icon icon="wand"></code-icon></span>
+						<span class="list__copy"
+							><strong>AI Compose & Review</strong> Bring order from chaos. Restructure changes into
+							clean, review-ready commits automatically. Catch issues early with severity-tagged reviews
+							that you can delegate directly to an agent</span
+						>
+					</li>
+					<li class="list__item">
+						<span class="icon-cube"><code-icon icon="pulse"></code-icon></span>
+						<span class="list__copy"
+							><strong>Deep Visualizations</strong> Analyze repo evolution with the Visual History.
+							Pinpoint hotspots and trends or watch agent activity in real-time using the Files, Commits,
+							and Agent Activity treemaps</span
+						>
+					</li>
+				</ul>
+			</section>
 		</gl-feature-gate>`;
+	}
+
+	private onSwitchRepos(): void {
+		this._ipc.sendCommand(ChooseRepositoryCommand);
+	}
+
+	private onSwitchOrgs(): void {
+		this._ipc.sendCommand(ChooseAccountOrgCommand);
 	}
 }

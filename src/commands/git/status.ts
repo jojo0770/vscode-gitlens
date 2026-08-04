@@ -1,25 +1,38 @@
-import { GlyphChars } from '../../constants';
-import type { Container } from '../../container';
-import type { Repository } from '../../git/models/repository';
-import type { GitStatus } from '../../git/models/status';
-import { createReference, getReferenceLabel } from '../../git/utils/reference.utils';
-import { CommandQuickPickItem } from '../../quickpicks/items/common';
-import { GitWizardQuickPickItem } from '../../quickpicks/items/gitWizard';
-import { pad } from '../../system/string';
-import type { ViewsWithRepositoryFolders } from '../../views/viewBase';
-import type { PartialStepState, StepGenerator, StepState } from '../quickCommand';
-import { endSteps, QuickCommand, StepResultBreak } from '../quickCommand';
-import { pickRepositoryStep, showRepositoryStatusStep } from '../quickCommand.steps';
+import type { GitStatus } from '@gitlens/git/models/status.js';
+import { createReference, getReferenceLabel } from '@gitlens/git/utils/reference.utils.js';
+import { pad } from '@gitlens/utils/string.js';
+import { GlyphChars } from '../../constants.js';
+import type { Container } from '../../container.js';
+import type { GlRepository } from '../../git/models/repository.js';
+import { CommandQuickPickItem } from '../../quickpicks/items/common.js';
+import { GitWizardQuickPickItem } from '../../quickpicks/items/gitWizard.js';
+import type { ViewsWithRepositoryFolders } from '../../views/viewBase.js';
+import type { PartialStepState, StepGenerator, StepsContext } from '../quick-wizard/models/steps.js';
+import { StepResultBreak } from '../quick-wizard/models/steps.js';
+import { QuickCommand } from '../quick-wizard/quickCommand.js';
+import {
+	canSkipRepositoryPick,
+	pickRepositoryStep,
+	showRepositoryStatusStep,
+} from '../quick-wizard/steps/repositories.js';
+import { StepsController } from '../quick-wizard/stepsController.js';
+import { assertStepState } from '../quick-wizard/utils/steps.utils.js';
 
-interface Context {
-	repos: Repository[];
+const Steps = {
+	PickRepo: 'status-pick-repo',
+	ShowStatus: 'status-show-status',
+} as const;
+type StepNames = (typeof Steps)[keyof typeof Steps];
+
+interface Context extends StepsContext<StepNames> {
+	repos: GlRepository[];
 	associatedView: ViewsWithRepositoryFolders;
 	status: GitStatus;
 	title: string;
 }
 
-interface State {
-	repo: string | Repository;
+interface State<Repo = string | GlRepository> {
+	repo: Repo;
 }
 
 export interface StatusGitCommandArgs {
@@ -27,63 +40,59 @@ export interface StatusGitCommandArgs {
 	state?: Partial<State>;
 }
 
-type StatusStepState<T extends State = State> = ExcludeSome<StepState<T>, 'repo', string>;
-
 export class StatusGitCommand extends QuickCommand<State> {
 	constructor(container: Container, args?: StatusGitCommandArgs) {
 		super(container, 'status', 'status', 'Status', {
 			description: 'shows status information about a repository',
 		});
 
-		let counter = 0;
-		if (args?.state?.repo != null) {
-			counter++;
-		}
-
-		this.initialState = {
-			counter: counter,
-			confirm: false,
-			...args?.state,
-		};
+		this.initialState = { confirm: false, ...args?.state };
 	}
 
 	override get canConfirm(): boolean {
 		return false;
 	}
 
-	protected async *steps(state: PartialStepState<State>): StepGenerator {
-		const context: Context = {
+	protected createContext(context?: StepsContext<any>): Context {
+		return {
+			...context,
+			container: this.container,
 			repos: this.container.git.openRepositories,
 			associatedView: this.container.views.commits,
 			status: undefined!,
 			title: this.title,
 		};
+	}
 
-		let skippedStepOne = false;
+	protected async *steps(state: PartialStepState<State>, context?: Context): StepGenerator {
+		context ??= this.createContext();
+		using steps = new StepsController<StepNames>(context, this);
 
-		while (this.canStepsContinue(state)) {
+		while (!steps.isComplete) {
 			context.title = this.title;
 
-			if (state.counter < 1 || state.repo == null || typeof state.repo === 'string') {
-				skippedStepOne = false;
-				if (context.repos.length === 1) {
-					skippedStepOne = true;
-					if (state.repo == null) {
-						state.counter++;
-					}
-
-					state.repo = context.repos[0];
+			if (steps.isAtStep(Steps.PickRepo) || state.repo == null || typeof state.repo === 'string') {
+				// Skip the picker only when the sole available repo is the one requested
+				if (canSkipRepositoryPick(context.repos, state.repo)) {
+					[state.repo] = context.repos;
 				} else {
-					const result = yield* pickRepositoryStep(state, context);
-					// Always break on the first step (so we will go back)
-					if (result === StepResultBreak) break;
+					using step = steps.enterStep(Steps.PickRepo);
+
+					const result = yield* pickRepositoryStep(state, context, step);
+					if (result === StepResultBreak) {
+						state.repo = undefined!;
+						if (step.goBack() == null) break;
+						continue;
+					}
 
 					state.repo = result;
 				}
 			}
 
+			assertStepState<State<GlRepository>>(state);
+
 			context.status = (await state.repo.git.status.getStatus())!;
-			if (context.status == null) return;
+			if (context.status == null) break;
 
 			context.title = `${this.title}${pad(GlyphChars.Dot, 2, 2)}${getReferenceLabel(
 				createReference(context.status.branch, state.repo.path, {
@@ -95,32 +104,33 @@ export class StatusGitCommand extends QuickCommand<State> {
 				{ icon: false },
 			)}`;
 
-			const result = yield* showRepositoryStatusStep(state as StatusStepState, context);
-			if (result === StepResultBreak) {
-				// If we skipped the previous step, make sure we back up past it
-				if (skippedStepOne) {
-					state.counter--;
+			{
+				using step = steps.enterStep(Steps.ShowStatus);
+
+				const result = yield* showRepositoryStatusStep(state, context);
+				if (result === StepResultBreak) {
+					if (step.goBack() == null) break;
+					continue;
 				}
 
-				continue;
-			}
+				if (result instanceof GitWizardQuickPickItem) {
+					const r = yield* result.executeSteps(context, this.startedFrom);
+					if (r === StepResultBreak) {
+						steps.markStepsComplete();
+					}
 
-			if (result instanceof GitWizardQuickPickItem) {
-				const r = yield* result.executeSteps(this.pickedVia);
-				state.counter--;
-				if (r === StepResultBreak) {
-					endSteps(state);
+					continue;
 				}
 
-				continue;
-			}
+				if (result instanceof CommandQuickPickItem) {
+					steps.markStepsComplete();
 
-			if (result instanceof CommandQuickPickItem) {
-				endSteps(state);
-
-				void result.execute();
-				break;
+					void result.execute();
+					break;
+				}
 			}
 		}
+
+		return steps.isComplete ? undefined : StepResultBreak;
 	}
 }

@@ -1,7 +1,7 @@
 import { css, html, LitElement } from 'lit';
 import { customElement, property } from 'lit/decorators.js';
-import '../code-icon';
-import '../overlays/tooltip';
+import '../code-icon.js';
+import '../overlays/tooltip.js';
 
 @customElement('gl-avatar')
 export class GlAvatar extends LitElement {
@@ -14,11 +14,11 @@ export class GlAvatar extends LitElement {
 
 			.avatar {
 				display: inline-flex;
+				justify-content: center;
 				width: var(--gl-avatar-size, 1.6rem);
 				aspect-ratio: 1;
 				vertical-align: middle;
 				border-radius: 100%;
-				justify-content: center;
 			}
 
 			.thumb {
@@ -31,9 +31,9 @@ export class GlAvatar extends LitElement {
 				justify-content: center;
 				font-size: clamp(0.8rem, calc(var(--gl-avatar-size, 1.6rem) * 0.5), 1.1rem);
 				line-height: 1;
+				color: var(--gl-avatar-text-color, var(--vscode-descriptionForeground));
 				text-transform: uppercase;
 				cursor: default;
-				color: var(--vscode-descriptionForeground);
 			}
 
 			.thumb--media {
@@ -42,6 +42,10 @@ export class GlAvatar extends LitElement {
 				height: auto;
 				object-fit: cover;
 				object-position: 50% 50%;
+			}
+
+			.avatar:hover {
+				transform: scale(1.2);
 			}
 		`,
 	];
@@ -65,10 +69,10 @@ export class GlAvatar extends LitElement {
 
 	private renderAvatar() {
 		if (this.href) {
-			return html`<a href=${this.href} class="avatar">${this.renderContent()}</a>`;
+			return html`<a href=${this.href} class="avatar" part="avatar">${this.renderContent()}</a>`;
 		}
 
-		return html`<span class="avatar">${this.renderContent()}</span>`;
+		return html`<span class="avatar" part="avatar">${this.renderContent()}</span>`;
 	}
 
 	private renderContent() {

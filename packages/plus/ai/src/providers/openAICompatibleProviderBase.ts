@@ -1,0 +1,311 @@
+import { CancellationError, isCancellationError } from '@gitlens/utils/cancellation.js';
+import { uuid } from '@gitlens/utils/crypto.js';
+import { getLoggableName } from '@gitlens/utils/logger.js';
+import { maybeStartScopedLogger } from '@gitlens/utils/logger.scoped.js';
+import type { AIProviders } from '../constants.js';
+import { AIError, AIErrorReason } from '../errors.js';
+import type { AIActionType, AIModel, AIProviderDescriptor } from '../models/model.js';
+import type { AIChatMessage, AIChatMessageRole, AIProvider, AIProviderResponse } from '../models/provider.js';
+import { getActionName, getReducedMaxInputTokens, getValidatedTemperature } from '../utils/ai.utils.js';
+import type { AIProviderContext } from './context.js';
+
+export abstract class OpenAICompatibleProviderBase<T extends AIProviders> implements AIProvider<T> {
+	constructor(protected readonly context: AIProviderContext) {}
+
+	dispose(): void {}
+	[Symbol.dispose](): void {
+		this.dispose();
+	}
+
+	abstract readonly id: T;
+	abstract readonly name: string;
+	protected abstract readonly descriptor: AIProviderDescriptor<T>;
+	protected abstract readonly config: { keyUrl?: string; keyValidator?: RegExp };
+
+	async configured(silent: boolean): Promise<boolean> {
+		try {
+			const apiKey = await this.getApiKey(silent);
+			return apiKey != null;
+		} catch (ex) {
+			if (isCancellationError(ex)) return false;
+
+			throw ex;
+		}
+	}
+
+	async getApiKey(silent: boolean): Promise<string | undefined> {
+		const orgConf = this.context.getProviderConfig(this.id);
+		if (!orgConf.enabled) return undefined;
+		if (orgConf.key) return orgConf.key;
+
+		const { keyUrl, keyValidator } = this.config;
+
+		return this.context.getApiKey(
+			{
+				id: this.id,
+				name: this.name,
+				requiresAccount: this.descriptor.requiresAccount,
+				validator: keyValidator != null ? v => keyValidator.test(v) : () => true,
+				url: keyUrl,
+			},
+			silent,
+		);
+	}
+
+	abstract getModels(): Promise<readonly AIModel<T>[]>;
+
+	protected abstract getUrl(_model: AIModel<T>): string | undefined;
+
+	protected getHeaders<TAction extends AIActionType>(
+		_action: TAction,
+		apiKey: string,
+		_model: AIModel<T>,
+		_url: string,
+		// Deliberately unused here: only the GitKraken provider forwards the conversation ID (as
+		// `GK-Conversation-ID`); it must never reach third-party APIs.
+		_conversationId?: string,
+	): Record<string, string> | Promise<Record<string, string>> {
+		return {
+			Accept: 'application/json',
+			'Content-Type': 'application/json',
+			Authorization: `Bearer ${apiKey}`,
+		};
+	}
+
+	async sendRequest<TAction extends AIActionType>(
+		action: TAction,
+		model: AIModel<T>,
+		apiKey: string,
+		getMessages: (maxInputTokens: number, retries: number) => Promise<AIChatMessage[]>,
+		options: {
+			signal: AbortSignal;
+			modelOptions?: { outputTokens?: number; temperature?: number };
+			conversationId?: string;
+		},
+	): Promise<AIProviderResponse<void> | undefined> {
+		using scope = maybeStartScopedLogger(`${getLoggableName(this)}.sendRequest`);
+
+		try {
+			const result = await this.fetch(
+				action,
+				model,
+				apiKey,
+				getMessages,
+				options.modelOptions,
+				options.signal,
+				options.conversationId,
+			);
+			return result;
+		} catch (ex) {
+			if (isCancellationError(ex)) {
+				scope?.error(ex, `Cancelled request to ${getActionName(action)}: (${model.provider.name})`);
+				throw ex;
+			}
+
+			scope?.error(ex, `Unable to ${getActionName(action)}: (${model.provider.name})`);
+			if (ex instanceof AIError) throw ex;
+
+			debugger;
+			throw new Error(`Unable to ${getActionName(action)}: (${model.provider.name}) ${ex.message}`, {
+				cause: ex,
+			});
+		}
+	}
+
+	protected async fetch<TAction extends AIActionType>(
+		action: TAction,
+		model: AIModel<T>,
+		apiKey: string,
+		messages: (maxInputTokens: number, retries: number) => Promise<AIChatMessage[]>,
+		modelOptions?: { outputTokens?: number; temperature?: number },
+		signal?: AbortSignal,
+		conversationId?: string,
+	): Promise<AIProviderResponse<void>> {
+		let retries = 0;
+		let maxInputTokens = model.maxTokens.input;
+
+		while (true) {
+			const request: ChatCompletionRequest = {
+				model: model.id,
+				...this.extractSystemPrompt(await messages(maxInputTokens, retries)),
+				stream: false,
+				max_completion_tokens: model.maxTokens.output
+					? Math.min(modelOptions?.outputTokens ?? Infinity, model.maxTokens.output)
+					: modelOptions?.outputTokens,
+				temperature: getValidatedTemperature(
+					model,
+					modelOptions?.temperature ?? model.temperature,
+					this.context.defaultTemperature,
+				),
+			};
+
+			const rsp = await this.fetchCore(action, model, apiKey, request, signal, conversationId);
+			if (!rsp.ok) {
+				const result = await this.handleFetchFailure(rsp, action, model, retries, maxInputTokens);
+				if (result.retry) {
+					maxInputTokens = result.maxInputTokens;
+					retries++;
+					continue;
+				}
+			}
+
+			const data: ChatCompletionResponse = (await rsp.json()) as ChatCompletionResponse;
+			const result: AIProviderResponse<void> = {
+				id: data.id ?? uuid(),
+				content: data.choices?.[0].message.content?.trim() ?? data.content?.[0]?.text?.trim() ?? '',
+				model: model,
+				usage: {
+					promptTokens: data.usage?.prompt_tokens ?? data.usage?.input_tokens,
+					completionTokens: data.usage?.completion_tokens ?? data.usage?.output_tokens,
+					totalTokens: data.usage?.total_tokens,
+					limits:
+						data?.usage?.gk != null
+							? {
+									used: data.usage.gk.used,
+									limit: data.usage.gk.limit,
+									resetsOn: new Date(data.usage.gk.resets_on),
+								}
+							: undefined,
+				},
+				result: undefined,
+			};
+			return result;
+		}
+	}
+
+	/**
+	 * Returns the message-related request fields. The default sends every message inline (OpenAI
+	 * Chat Completions semantics); providers whose API carries the initial system prompt separately
+	 * (e.g. Anthropic's top-level `system`) override this to extract it from the messages.
+	 */
+	protected extractSystemPrompt(messages: AIChatMessage<AIChatMessageRole>[]): {
+		messages: AIChatMessage<AIChatMessageRole>[];
+		system?: string;
+	} {
+		return { messages: messages };
+	}
+
+	protected async handleFetchFailure<TAction extends AIActionType>(
+		rsp: Response,
+		_action: TAction,
+		model: AIModel<T>,
+		retries: number,
+		maxInputTokens: number,
+	): Promise<{ retry: true; maxInputTokens: number }> {
+		if (rsp.status === 404) {
+			throw new AIError(
+				AIErrorReason.Unauthorized,
+				new Error(`Your API key doesn't seem to have access to the selected '${model.id}' model`),
+			);
+		}
+		if (rsp.status === 429) {
+			throw new AIError(
+				AIErrorReason.RateLimitOrFundsExceeded,
+				new Error(
+					`(${this.name}) ${rsp.status}: Too many requests (rate limit exceeded) or your account is out of funds`,
+				),
+			);
+		}
+
+		let json;
+		try {
+			json = (await rsp.json()) as { error?: { code: string; message: string } } | undefined;
+		} catch {}
+
+		if (Array.isArray(json)) {
+			json = json[0];
+		}
+		if (json?.error?.code === 'context_length_exceeded') {
+			if (retries < 3) {
+				return { retry: true, maxInputTokens: getReducedMaxInputTokens(maxInputTokens, retries + 1) };
+			}
+
+			throw new AIError(
+				AIErrorReason.RequestTooLarge,
+				new Error(`(${this.name}) ${rsp.status}: ${json?.error?.message || rsp.statusText}`),
+			);
+		}
+
+		throw new Error(`(${this.name}) ${rsp.status}: ${json?.error?.message || rsp.statusText}`);
+	}
+
+	protected async fetchCore<TAction extends AIActionType>(
+		action: TAction,
+		model: AIModel<T>,
+		apiKey: string,
+		request: object,
+		signal: AbortSignal | undefined,
+		conversationId?: string,
+	): Promise<Response> {
+		const url = this.getUrl(model);
+		if (!url) {
+			throw new Error(`(${this.name}) ${getActionName(action)}: No URL configured`);
+		}
+
+		try {
+			return await this.context.fetch(url, {
+				headers: await this.getHeaders(action, apiKey, model, url, conversationId),
+				method: 'POST',
+				body: JSON.stringify(request),
+				signal: signal,
+			});
+		} catch (ex) {
+			if (ex.name === 'AbortError') throw new CancellationError(ex);
+			throw ex;
+		}
+	}
+}
+
+interface ChatCompletionRequest {
+	model: string;
+	messages: AIChatMessage<AIChatMessageRole>[];
+
+	/** Anthropic carries the initial system prompt here instead of as a `system`-role message */
+	system?: string;
+
+	/** @deprecated but used by Anthropic & Gemini */
+	max_tokens?: number;
+	/** Currently can't be used for Anthropic & Gemini */
+	max_completion_tokens?: number;
+	metadata?: Record<string, string>;
+	stream?: boolean;
+	temperature?: number;
+	top_p?: number;
+
+	/** Not supported by many models/providers */
+	reasoning_effort?: 'low' | 'medium' | 'high';
+}
+
+interface ChatCompletionResponse {
+	id: string;
+	model: string;
+	/** OpenAI compatible output */
+	choices?: {
+		index: number;
+		message: {
+			role: string;
+			content: string | null;
+			refusal: string | null;
+		};
+		finish_reason: string;
+	}[];
+	/** Anthropic output */
+	content?: { type: 'text'; text: string }[];
+	usage: {
+		/** OpenAI compatible */
+		prompt_tokens?: number;
+		completion_tokens?: number;
+		total_tokens?: number;
+
+		/** Anthropic */
+		input_tokens?: number;
+		output_tokens?: number;
+
+		/** GitKraken */
+		gk: {
+			used: number;
+			limit: number;
+			resets_on: string;
+		};
+	};
+}

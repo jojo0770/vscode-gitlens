@@ -1,8 +1,9 @@
 import { css, html, LitElement } from 'lit';
 import { customElement, property } from 'lit/decorators.js';
 import { when } from 'lit/directives/when.js';
-import '../overlays/popover';
-import './avatar';
+import '../code-icon.js';
+import '../overlays/popover.js';
+import './avatar.js';
 
 export interface AvatarShape {
 	src?: string;
@@ -12,7 +13,32 @@ export interface AvatarShape {
 
 @customElement('gl-avatar-list')
 export class GlAvatarList extends LitElement {
-	// static override styles = [];
+	static override styles = [
+		css`
+			/* Exposed as gl-avatar-list::part(base) — rebase-entry restyles it to right-align. */
+			.avatar-group {
+				display: inline-flex;
+				flex-direction: row;
+				align-items: center;
+				justify-content: center;
+			}
+
+			.avatar-group > *:not(:first-child) {
+				margin-left: calc(var(--gl-avatar-size, 1.6rem) * -0.2);
+			}
+
+			.avatar-group:focus-within > *,
+			.avatar-group:hover > * {
+				opacity: 0.5;
+			}
+
+			.avatar-group:focus-within > *:focus,
+			.avatar-group:hover > *:hover {
+				z-index: var(--gl-avatar-selected-zindex, 1) !important;
+				opacity: 1;
+			}
+		`,
+	];
 
 	@property({ type: Number })
 	max: number = 3;
@@ -21,7 +47,7 @@ export class GlAvatarList extends LitElement {
 	avatars: AvatarShape[] = [];
 
 	override render(): unknown {
-		return html`<gl-avatar-group>${this.renderList()}</gl-avatar-group>`;
+		return html`<div class="avatar-group" part="base">${this.renderList()}</div>`;
 	}
 
 	private renderList() {
@@ -30,58 +56,28 @@ export class GlAvatarList extends LitElement {
 
 		return html`
 			${avatars.map(
-				avatar => html`<gl-avatar .src=${avatar.src} .name=${avatar.name} .href=${avatar.href}></gl-avatar>`,
+				avatar =>
+					html`<gl-avatar exportparts="avatar" .src=${avatar.src} .name=${avatar.name} .href=${avatar.href}
+						>${!avatar.src ? html`<code-icon icon="account"></code-icon>` : ''}</gl-avatar
+					>`,
 			)}
 			${when(
-				overflowAvatars.length > 0,
+				overflowAvatars.length,
 				() =>
 					html`<gl-popover>
-						<gl-avatar slot="anchor" class="overflow">+${overflowAvatars.length}</gl-avatar>
+						<gl-avatar exportparts="avatar" slot="anchor" class="overflow"
+							>+${overflowAvatars.length}</gl-avatar
+						>
 						<div slot="content" class="overflow-list">
 							${overflowAvatars.map(
 								avatar =>
-									html`<gl-avatar
-										.src=${avatar.src}
-										.name=${avatar.name}
-										.href=${avatar.href}
-									></gl-avatar>`,
+									html`<gl-avatar .src=${avatar.src} .name=${avatar.name} .href=${avatar.href}
+										>${!avatar.src ? html`<code-icon icon="account"></code-icon>` : ''}</gl-avatar
+									>`,
 							)}
 						</div>
 					</gl-popover>`,
 			)}
 		`;
-	}
-}
-
-@customElement('gl-avatar-group')
-export class GlAvatarGroup extends LitElement {
-	static override styles = [
-		css`
-			.avatar-group {
-				display: inline-flex;
-				flex-direction: row;
-				justify-content: center;
-				align-items: center;
-			}
-
-			.avatar-group::slotted(*:not(:first-child)) {
-				margin-left: calc(var(--gl-avatar-size, 1.6rem) * -0.2);
-			}
-
-			.avatar-group:focus-within::slotted(*),
-			.avatar-group:hover::slotted(*) {
-				opacity: 0.5;
-			}
-
-			.avatar-group:focus-within::slotted(*:focus),
-			.avatar-group:hover::slotted(*:hover) {
-				opacity: 1;
-				z-index: var(--gl-avatar-selected-zindex, 1) !important;
-			}
-		`,
-	];
-
-	override render(): unknown {
-		return html`<slot class="avatar-group" part="base"></slot>`;
 	}
 }

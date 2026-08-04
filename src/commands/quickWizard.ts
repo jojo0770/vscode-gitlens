@@ -1,26 +1,29 @@
-import type { Container } from '../container';
-import type { LaunchpadCommandArgs } from '../plus/launchpad/launchpad';
-import type { AssociateIssueWithBranchCommandArgs, StartWorkCommandArgs } from '../plus/startWork/startWork';
-import { command } from '../system/-webview/command';
-import type { ChangeBranchMergeTargetCommandArgs } from './changeBranchMergeTarget';
-import type { CommandContext } from './commandContext';
-import type { QuickWizardCommandArgsWithCompletion } from './quickWizard.base';
-import { QuickWizardCommandBase } from './quickWizard.base';
+import type { Container } from '../container.js';
+import type { LaunchpadCommandArgs } from '../plus/launchpad/launchpad.js';
+import type { StartReviewCommandArgs } from '../plus/launchpad/startReview.js';
+import type { AssociateIssueWithBranchCommandArgs } from '../plus/startWork/associateIssueWithBranch.js';
+import type { StartWorkCommandArgs } from '../plus/startWork/startWork.js';
+import { command } from '../system/-webview/command.js';
+import type { CommandContext } from './commandContext.js';
+import type { QuickWizardCommandArgsWithCompletion } from './quick-wizard/models/quickWizard.js';
+import { QuickWizardCommandBase } from './quick-wizard/quickWizardCommandBase.js';
 
 export type QuickWizardCommandArgs =
 	| LaunchpadCommandArgs
+	| StartReviewCommandArgs
 	| StartWorkCommandArgs
-	| AssociateIssueWithBranchCommandArgs
-	| ChangeBranchMergeTargetCommandArgs;
+	| AssociateIssueWithBranchCommandArgs;
 
 @command()
 export class QuickWizardCommand extends QuickWizardCommandBase {
 	constructor(container: Container) {
 		super(container, [
 			'gitlens.showLaunchpad',
+			'gitlens.startReview',
+			'gitlens.startReview.openInAgent',
 			'gitlens.startWork',
+			'gitlens.startWork.openInAgent',
 			'gitlens.associateIssueWithBranch',
-			'gitlens.changeBranchMergeTarget',
 		]);
 	}
 
@@ -29,14 +32,32 @@ export class QuickWizardCommand extends QuickWizardCommandBase {
 			case 'gitlens.showLaunchpad':
 				return this.execute({ command: 'launchpad', ...args });
 
+			case 'gitlens.startReview':
+				return this.execute({ command: 'startReview', ...args });
+
+			case 'gitlens.startReview.openInAgent': {
+				const reviewArgs = args as Partial<StartReviewCommandArgs> | undefined;
+				return this.execute({
+					...reviewArgs,
+					command: 'startReview',
+					showOpenInAgent: 'agent',
+				});
+			}
+
 			case 'gitlens.startWork':
 				return this.execute({ command: 'startWork', ...args });
 
+			case 'gitlens.startWork.openInAgent': {
+				const workArgs = args as Partial<StartWorkCommandArgs> | undefined;
+				return this.execute({
+					...workArgs,
+					command: 'startWork',
+					showOpenInAgent: 'agent',
+				});
+			}
+
 			case 'gitlens.associateIssueWithBranch':
 				return this.execute({ command: 'associateIssueWithBranch', ...args });
-
-			case 'gitlens.changeBranchMergeTarget':
-				return this.execute({ command: 'changeBranchMergeTarget', ...args });
 
 			default:
 				return this.execute(args);

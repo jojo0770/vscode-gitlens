@@ -1,8 +1,8 @@
 import { css, html, LitElement, nothing } from 'lit';
 import { customElement, property } from 'lit/decorators.js';
 import { when } from 'lit/directives/when.js';
-import { baseStyles } from './pill.css';
-import '../code-icon';
+import { baseStyles } from './pill.css.js';
+import '../code-icon.js';
 
 @customElement('gl-tracking-pill')
 export class GlTrackingPill extends LitElement {
@@ -10,13 +10,21 @@ export class GlTrackingPill extends LitElement {
 		baseStyles,
 		css`
 			.pill {
-				gap: 0.1rem;
+				gap: var(--gl-space-2);
 				text-transform: none;
+				user-select: none;
 			}
 
 			.state {
+				display: inline-flex;
+				gap: 0.1rem;
+				align-items: center;
 				-webkit-font-smoothing: antialiased;
 				-moz-osx-font-smoothing: grayscale;
+				/* Off by default; a consumer (e.g. the graph ref pill) sets the duration so the ahead/behind
+				   colors fade IN SYNC with the surrounding pill's hover/selection transition instead of
+				   snapping back early. */
+				transition: color var(--gl-tracking-color-transition, 0s) ease-out;
 			}
 
 			.state--missing code-icon {
@@ -37,15 +45,17 @@ export class GlTrackingPill extends LitElement {
 
 			.state code-icon {
 				font-size: inherit !important;
+				font-weight: inherit !important;
 				line-height: inherit !important;
+				transition: color var(--gl-tracking-color-transition, 0s) ease-out;
 			}
 
 			.working {
 				display: inline-block;
 				width: 1rem;
-				text-align: center;
-				vertical-align: text-bottom;
 				font-weight: normal;
+				vertical-align: text-bottom;
+				text-align: center;
 			}
 		`,
 	];
@@ -85,7 +95,7 @@ export class GlTrackingPill extends LitElement {
 			}
 
 			return html`<span part="base" class="pill${this.outlined ? ' pill--outlined' : ''}">
-				<span class="state${this.colorized ? ' state--ahead' : ''}"><code-icon icon="check"></code-icon></span>
+				<span class="state${this.colorized ? ' state--ahead' : ''}"><code-icon icon="sync"></code-icon></span>
 			</span>`;
 		}
 

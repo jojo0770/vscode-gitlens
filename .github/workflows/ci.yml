@@ -1,0 +1,301 @@
+name: CI
+
+on:
+    push:
+        branches:
+            - main
+    pull_request:
+        branches: ['*']
+        types:
+            - opened
+            - reopened
+            - synchronize
+            - ready_for_review
+    workflow_dispatch:
+
+jobs:
+    build:
+        name: Format, Typecheck, Lint, & Build
+        runs-on: ubuntu-latest
+        if: ${{ !github.event.pull_request.draft }}
+        timeout-minutes: 10
+        steps:
+            - name: Checkout
+              uses: actions/checkout@v4
+
+            - name: Calc tools versions
+              id: tools-versions
+              run: |
+                  NODE_VERSION=$(jq -r '.engines.node | gsub("[^0-9.]"; "")' package.json)
+                  PNPM_VERSION=$(jq -r '.packageManager | split("@")[1]' package.json)
+                  echo "node-version=$NODE_VERSION" >> $GITHUB_OUTPUT
+                  echo "pnpm-version=$PNPM_VERSION" >> $GITHUB_OUTPUT
+
+            - name: Setup Node.js
+              uses: actions/setup-node@v4
+              with:
+                  node-version: ${{ steps.tools-versions.outputs.node-version }}
+
+            - name: Install pnpm
+              uses: pnpm/action-setup@v4
+              with:
+                  version: ${{ steps.tools-versions.outputs.pnpm-version }}
+
+            - name: Get pnpm store directory
+              shell: bash
+              run: |
+                  echo "STORE_PATH=$(pnpm store path --silent)" >> $GITHUB_ENV
+
+            - name: Setup pnpm cache
+              uses: actions/cache@v4
+              with:
+                  path: ${{ env.STORE_PATH }}
+                  key: ${{ runner.os }}-pnpm-store-${{ hashFiles('**/pnpm-lock.yaml') }}
+                  restore-keys: |
+                      ${{ runner.os }}-pnpm-store-
+
+            - name: Install dependencies
+              run: pnpm install --frozen-lockfile
+
+            - name: Check formatting
+              run: pnpm run fmt:check
+
+            - name: Build (production)
+              run: pnpm run bundle
+
+    unit-tests:
+        name: Unit Tests
+        runs-on: ubuntu-latest
+        if: ${{ !github.event.pull_request.draft }}
+        timeout-minutes: 15
+        steps:
+            - name: Checkout
+              uses: actions/checkout@v4
+
+            - name: Calc tools versions
+              id: tools-versions
+              run: |
+                  NODE_VERSION=$(jq -r '.engines.node | gsub("[^0-9.]"; "")' package.json)
+                  PNPM_VERSION=$(jq -r '.packageManager | split("@")[1]' package.json)
+                  echo "node-version=$NODE_VERSION" >> $GITHUB_OUTPUT
+                  echo "pnpm-version=$PNPM_VERSION" >> $GITHUB_OUTPUT
+
+            - name: Setup Node.js
+              uses: actions/setup-node@v4
+              with:
+                  node-version: ${{ steps.tools-versions.outputs.node-version }}
+
+            - name: Install pnpm
+              uses: pnpm/action-setup@v4
+              with:
+                  version: ${{ steps.tools-versions.outputs.pnpm-version }}
+
+            - name: Get pnpm store directory
+              shell: bash
+              run: |
+                  echo "STORE_PATH=$(pnpm store path --silent)" >> $GITHUB_ENV
+
+            - name: Setup pnpm cache
+              uses: actions/cache@v4
+              with:
+                  path: ${{ env.STORE_PATH }}
+                  key: ${{ runner.os }}-pnpm-store-${{ hashFiles('**/pnpm-lock.yaml') }}
+                  restore-keys: |
+                      ${{ runner.os }}-pnpm-store-
+
+            - name: Install dependencies
+              run: pnpm install --frozen-lockfile
+
+            - name: Run unit tests
+              run: xvfb-run -a pnpm run test
+
+            # Excluded from `pnpm run test` because they spawn real git against temp repos; run them
+            # here so the provider suites that exercise actual git behavior still gate CI.
+            - name: Run integration tests
+              run: pnpm --filter ./packages/git-cli run test:integration
+
+    derive-matrix:
+        name: Derive editor matrix
+        runs-on: ubuntu-latest
+        if: ${{ github.event_name == 'workflow_dispatch' }}
+        timeout-minutes: 5
+        outputs:
+            editors: ${{ steps.gen.outputs.editors }}
+        steps:
+            - name: Checkout
+              uses: actions/checkout@v4
+
+            - name: Calc tools versions
+              id: tools-versions
+              run: |
+                  NODE_VERSION=$(jq -r '.engines.node | gsub("[^0-9.]"; "")' package.json)
+                  echo "node-version=$NODE_VERSION" >> $GITHUB_OUTPUT
+
+            - name: Setup Node.js
+              uses: actions/setup-node@v4
+              with:
+                  node-version: ${{ steps.tools-versions.outputs.node-version }}
+
+            # Single source of truth for the editor matrix is tests/e2e/editors.ts; read it directly
+            # (Node strips the TS types) so the CI matrix never drifts from the Playwright projects.
+            # `ciEditors` is `editors` minus login-walled forks (e.g. Cursor) that can't run in CI —
+            # the exclusion lives in the registry, not here, so this step stays a dumb serializer.
+            - name: Generate matrix
+              id: gen
+              run: |
+                  editors=$(node --experimental-strip-types -e "import('./tests/e2e/editors.ts').then(m => console.log(JSON.stringify(m.ciEditors)))")
+                  # Heredoc-delimited output is robust even if the value ever spans lines — this is the
+                  # workflow's source of truth, and a bare `echo name=$value` would corrupt fromJSON().
+                  {
+                    echo "editors<<EOF"
+                    echo "$editors"
+                    echo "EOF"
+                  } >> "$GITHUB_OUTPUT"
+
+    e2e-tests:
+        name: E2E Tests (${{ matrix.editor.name }})
+        needs: derive-matrix
+        runs-on: ubuntu-latest
+        if: ${{ github.event_name == 'workflow_dispatch' }}
+        timeout-minutes: 25
+        # Experimental forks have known editor-specific UI gaps; keep them informational so they don't
+        # block CI, while non-experimental editors (VS Code, Windsurf) remain required.
+        continue-on-error: ${{ matrix.editor.experimental }}
+        strategy:
+            fail-fast: false
+            matrix:
+                editor: ${{ fromJSON(needs.derive-matrix.outputs.editors) }}
+        steps:
+            - name: Checkout
+              uses: actions/checkout@v4
+
+            - name: Calc tools versions
+              id: tools-versions
+              run: |
+                  NODE_VERSION=$(jq -r '.engines.node | gsub("[^0-9.]"; "")' package.json)
+                  PNPM_VERSION=$(jq -r '.packageManager | split("@")[1]' package.json)
+                  echo "node-version=$NODE_VERSION" >> $GITHUB_OUTPUT
+                  echo "pnpm-version=$PNPM_VERSION" >> $GITHUB_OUTPUT
+
+            - name: Setup Node.js
+              uses: actions/setup-node@v4
+              with:
+                  node-version: ${{ steps.tools-versions.outputs.node-version }}
+
+            - name: Install pnpm
+              uses: pnpm/action-setup@v4
+              with:
+                  version: ${{ steps.tools-versions.outputs.pnpm-version }}
+
+            - name: Get pnpm store directory
+              shell: bash
+              run: |
+                  echo "STORE_PATH=$(pnpm store path --silent)" >> $GITHUB_ENV
+
+            - name: Setup pnpm cache
+              uses: actions/cache@v4
+              with:
+                  path: ${{ env.STORE_PATH }}
+                  key: ${{ runner.os }}-pnpm-store-${{ hashFiles('**/pnpm-lock.yaml') }}
+                  restore-keys: |
+                      ${{ runner.os }}-pnpm-store-
+
+            - name: Install dependencies
+              run: pnpm install --frozen-lockfile
+
+            - name: Build (production with DEBUG for simulator)
+              run: pnpm run bundle:e2e
+
+            # Provisions a VS Code-compatible editor binary for forks and exposes its path via the
+            # editor's env var (matrix.editor.envVar), which the Playwright project reads. VS Code
+            # itself is downloaded by the harness, so no path is emitted for it.
+            - name: Provision editor
+              run: |
+                  set -euo pipefail
+                  id="${{ matrix.editor.id }}"
+                  exe=""
+                  case "$id" in
+                    vscode)
+                      : # Harness downloads VS Code via @vscode/test-electron
+                      ;;
+                    windsurf)
+                      url=$(curl -fsSL "https://windsurf-stable.codeium.com/api/update/linux-x64/stable/latest" | jq -r '.url')
+                      echo "Downloading Windsurf: $url"
+                      curl -fsSL "$url" -o /tmp/windsurf.tar.gz
+                      mkdir -p /tmp/windsurf && tar -xzf /tmp/windsurf.tar.gz -C /tmp/windsurf
+                      # Windsurf's Electron binary is named after its codename (devin-desktop)
+                      exe=$(find /tmp/windsurf -maxdepth 2 -type f \( -name devin-desktop -o -name windsurf \) | head -n1)
+                      ;;
+                    kiro)
+                      url=$(curl -fsSL "https://prod.download.desktop.kiro.dev/stable/metadata-linux-x64-stable.json" | jq -r '.releases[].updateTo.url | select(endswith(".tar.gz"))' | head -n1)
+                      echo "Downloading Kiro: $url"
+                      curl -fsSL "$url" -o /tmp/kiro.tar.gz
+                      mkdir -p /tmp/kiro && tar -xzf /tmp/kiro.tar.gz -C /tmp/kiro
+                      exe=$(find /tmp/kiro -maxdepth 2 -type f -name kiro | head -n1)
+                      ;;
+                    cursor)
+                      url=$(curl -fsSL "https://www.cursor.com/api/download?platform=linux-x64&releaseTrack=stable" | jq -r '.downloadUrl')
+                      echo "Downloading Cursor: $url"
+                      curl -fsSL "$url" -o /tmp/cursor.AppImage
+                      chmod +x /tmp/cursor.AppImage
+                      ( cd /tmp && ./cursor.AppImage --appimage-extract >/dev/null )
+                      exe=$(find /tmp/squashfs-root -type f -path '*/usr/share/cursor/cursor' | head -n1)
+                      [ -z "$exe" ] && exe=$(find /tmp/squashfs-root -maxdepth 2 -type f -name cursor | head -n1)
+                      ;;
+                    positron)
+                      # Positron ships no GitHub release assets; binaries live on Posit's CDN.
+                      # releases.json carries the current version's direct .deb URL (no version hardcode).
+                      url=$(curl -fsSL "https://cdn.posit.co/positron/releases/deb/x86_64/releases.json" | jq -r '.url')
+                      echo "Downloading Positron: $url"
+                      curl -fsSL "$url" -o /tmp/positron.deb
+                      mkdir -p /tmp/positron && dpkg-deb -x /tmp/positron.deb /tmp/positron
+                      # Electron binary is /usr/share/positron/positron (code-oss layout); the bin/ wrapper is deeper
+                      exe=$(find /tmp/positron/usr/share -maxdepth 2 -type f -name positron | head -n1)
+                      ;;
+                    *)
+                      echo "::error::Unknown editor id '$id'"; exit 1
+                      ;;
+                  esac
+                  if [ "$id" != "vscode" ]; then
+                    if [ -z "$exe" ] || [ ! -f "$exe" ]; then
+                      echo "::error::Could not resolve $id executable"; exit 1
+                    fi
+                    chmod +x "$exe"
+                    echo "Resolved $id executable: $exe"
+                    # Expose the path via the editor's env var so the Playwright project picks it up.
+                    echo "${{ matrix.editor.envVar }}=$exe" >> "$GITHUB_ENV"
+                  fi
+
+            # Invoke Playwright directly via `pnpm exec` — `pnpm run test:e2e -- --project=<id>`
+            # keeps the literal `--`, which Playwright treats as a positional filter (not the
+            # `--project` option), so the filter is ignored and EVERY registered project runs
+            # (e.g. vscode + windsurf → ~2x the tests). Passing --project straight to the binary
+            # applies it correctly, keeping each matrix job scoped to its own editor.
+            # `--workers` per editor (editors.ts `ciWorkers`, default 4): heavier forks (Positron) thrash
+            # the runner at 4 concurrent Electron instances, so they run with fewer.
+            - name: Run E2E tests
+              run: >
+                  xvfb-run --auto-servernum --server-args="-screen 0 1920x1080x16"
+                  pnpm exec playwright test -c tests/e2e/playwright.config.ts
+                  --project=${{ matrix.editor.id }} --workers=${{ matrix.editor.ciWorkers || 4 }}
+
+            # Upload on both pass and fail (skip only on cancel) so results/report are available to
+            # inspect even when the job is green — flaky-retry traces (trace: on-first-retry) land in
+            # out/test-results/ but would be dropped by an `if: failure()` gate on a passing run.
+            - name: Upload test results
+              if: ${{ !cancelled() }}
+              uses: actions/upload-artifact@v4
+              with:
+                  name: playwright-results-${{ matrix.editor.id }}
+                  path: out/test-results/
+                  retention-days: 7
+                  if-no-files-found: ignore
+
+            - name: Upload Playwright report
+              if: ${{ !cancelled() }}
+              uses: actions/upload-artifact@v4
+              with:
+                  name: playwright-report-${{ matrix.editor.id }}
+                  path: playwright-report/
+                  retention-days: 7
+                  if-no-files-found: ignore

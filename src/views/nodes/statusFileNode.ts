@@ -1,26 +1,28 @@
 import type { Command } from 'vscode';
-import { MarkdownString, ThemeIcon, TreeItem, TreeItemCollapsibleState } from 'vscode';
-import type { DiffWithCommandArgs } from '../../commands/diffWith';
-import type { DiffWithPreviousCommandArgs } from '../../commands/diffWithPrevious';
-import { StatusFileFormatter } from '../../git/formatters/statusFormatter';
-import { GitUri } from '../../git/gitUri';
-import type { GitCommit } from '../../git/models/commit';
-import type { GitFileWithCommit } from '../../git/models/file';
-import { isGitFileChange } from '../../git/models/fileChange';
-import { getGitFileStatusIcon } from '../../git/utils/fileStatus.utils';
-import { shortenRevision } from '../../git/utils/revision.utils';
-import { createCommand } from '../../system/-webview/command';
-import { relativeDir } from '../../system/-webview/path';
-import { editorLineToDiffRange } from '../../system/-webview/vscode/editors';
-import { joinPaths } from '../../system/path';
-import type { ViewsWithCommits } from '../viewBase';
-import { getFileTooltip, ViewFileNode } from './abstract/viewFileNode';
-import type { ViewNode } from './abstract/viewNode';
-import { ContextValues } from './abstract/viewNode';
-import { FileRevisionAsCommitNode } from './fileRevisionAsCommitNode';
-import type { FileNode } from './folderNode';
+import { MarkdownString, ThemeIcon, TreeItem, TreeItemCollapsibleState, Uri } from 'vscode';
+import type { GitCommit } from '@gitlens/git/models/commit.js';
+import type { GitFileWithCommit } from '@gitlens/git/models/file.js';
+import { GitFileChange } from '@gitlens/git/models/fileChange.js';
+import type { GitRevisionReference } from '@gitlens/git/models/reference.js';
+import { getGitFileStatusIcon } from '@gitlens/git/utils/fileStatus.utils.js';
+import { shortenRevision } from '@gitlens/git/utils/revision.utils.js';
+import { joinPaths } from '@gitlens/utils/path.js';
+import type { DiffWithCommandArgs } from '../../commands/diffWith.js';
+import type { DiffWithPreviousCommandArgs } from '../../commands/diffWithPrevious.js';
+import { StatusFileFormatter } from '../../git/formatters/statusFormatter.js';
+import { GitUri } from '../../git/gitUri.js';
+import { createCommand } from '../../system/-webview/command.js';
+import { relativeDir } from '../../system/-webview/path.js';
+import { editorLineToDiffRange } from '../../system/-webview/vscode/range.js';
+import type { ViewsWithCommits } from '../viewBase.js';
+import { getFileTooltip } from './abstract/viewFileNode.js';
+import type { ViewNode } from './abstract/viewNode.js';
+import { ContextValues } from './abstract/viewNode.js';
+import { ViewRefFileNode } from './abstract/viewRefNode.js';
+import { FileRevisionAsCommitNode } from './fileRevisionAsCommitNode.js';
+import type { FileNode } from './folderNode.js';
 
-export class StatusFileNode extends ViewFileNode<'status-file', ViewsWithCommits> implements FileNode {
+export class StatusFileNode extends ViewRefFileNode<'status-file', ViewsWithCommits> implements FileNode {
 	private readonly _files: GitFileWithCommit[];
 	private readonly _hasStagedChanges: boolean;
 	private readonly _hasUnstagedChanges: boolean;
@@ -33,16 +35,6 @@ export class StatusFileNode extends ViewFileNode<'status-file', ViewsWithCommits
 		files: GitFileWithCommit[],
 		type: 'ahead' | 'behind' | 'working',
 	) {
-		let file;
-		for (const f of files.reverse()) {
-			if (file == null) {
-				file = f;
-			} else if (file.status === 'M' || f.status !== 'M') {
-				file = f;
-			}
-		}
-		file ??= files[files.length - 1];
-
 		let hasStagedChanges = false;
 		let hasUnstagedChanges = false;
 		let ref;
@@ -67,6 +59,16 @@ export class StatusFileNode extends ViewFileNode<'status-file', ViewsWithCommits
 			}
 		}
 
+		let file;
+		for (const f of files.reverse()) {
+			if (file == null) {
+				file = f;
+			} else if (file.status === 'M' || f.status !== 'M') {
+				file = f;
+			}
+		}
+		file ??= files.at(-1)!;
+
 		super('status-file', GitUri.fromFile(file, repoPath, ref), view, parent, file);
 
 		this._files = files;
@@ -79,8 +81,59 @@ export class StatusFileNode extends ViewFileNode<'status-file', ViewsWithCommits
 		return this.fileName;
 	}
 
+	get commit(): GitCommit {
+		return this._files[0]?.commit;
+	}
+
+	private _description: string | undefined;
+	get description(): string {
+		this._description ??= StatusFileFormatter.fromTemplate(
+			this.view.config.formats.files.description,
+			{ ...this.file, commit: this.commit },
+			{ relativePath: this.relativePath },
+		);
+		return this._description;
+	}
+
 	get fileName(): string {
 		return this.file.path;
+	}
+
+	private _folderName: string | undefined;
+	get folderName(): string {
+		this._folderName ??= relativeDir(this.uri.relativePath);
+		return this._folderName;
+	}
+
+	private _label: string | undefined;
+	get label(): string {
+		this._label ??= StatusFileFormatter.fromTemplate(
+			this.view.config.formats.files.label,
+			{ ...this.file, commit: this.commit },
+			{ relativePath: this.relativePath },
+		);
+		return this._label;
+	}
+
+	get priority(): number {
+		if (this._hasStagedChanges && !this._hasUnstagedChanges) return -3;
+		if (this._hasStagedChanges) return -2;
+		if (this._hasUnstagedChanges) return -1;
+		return 0;
+	}
+
+	get ref(): GitRevisionReference {
+		return this.commit;
+	}
+
+	private _relativePath: string | undefined;
+	get relativePath(): string | undefined {
+		return this._relativePath;
+	}
+	set relativePath(value: string | undefined) {
+		this._relativePath = value;
+		this._label = undefined;
+		this._description = undefined;
 	}
 
 	getChildren(): ViewNode[] {
@@ -106,7 +159,7 @@ export class StatusFileNode extends ViewFileNode<'status-file', ViewsWithCommits
 			.map(
 				f =>
 					`${getFileTooltip(f, getStatusSuffix(f))}${
-						isGitFileChange(f) && f.stats != null ? '\n\n' : '\\\n'
+						GitFileChange.is(f) && f.stats != null ? '\n\n' : '\\\n'
 					}`,
 			)
 			.join('')
@@ -117,9 +170,7 @@ export class StatusFileNode extends ViewFileNode<'status-file', ViewsWithCommits
 		item.tooltip = new MarkdownString(tooltip, true);
 
 		if (this._hasStagedChanges || this._hasUnstagedChanges) {
-			item.contextValue = ContextValues.File;
-			item.contextValue += this._hasStagedChanges ? '+staged' : '';
-			item.contextValue += this._hasUnstagedChanges ? '+unstaged' : '';
+			item.contextValue = `${ContextValues.File}${this._hasStagedChanges ? '+staged' : ''}${this._hasUnstagedChanges ? '+unstaged' : ''}${this.file.submodule != null ? '+submodule' : ''}`;
 
 			// Use the file icon and decorations
 			item.resourceUri = this.view.container.git.getAbsoluteUri(this.file.path, this.repoPath);
@@ -129,11 +180,10 @@ export class StatusFileNode extends ViewFileNode<'status-file', ViewsWithCommits
 
 			const icon = getGitFileStatusIcon(this.file.status);
 			item.iconPath = {
-				dark: this.view.container.context.asAbsolutePath(joinPaths('images', 'dark', icon)),
-				light: this.view.container.context.asAbsolutePath(joinPaths('images', 'light', icon)),
+				dark: Uri.file(this.view.container.context.asAbsolutePath(joinPaths('images', 'dark', icon))),
+				light: Uri.file(this.view.container.context.asAbsolutePath(joinPaths('images', 'light', icon))),
 			};
 		}
-		// }
 
 		// Only cache the label/description for a single refresh
 		this._label = undefined;
@@ -142,73 +192,10 @@ export class StatusFileNode extends ViewFileNode<'status-file', ViewsWithCommits
 		return item;
 	}
 
-	private _description: string | undefined;
-	get description(): string {
-		if (this._description == null) {
-			this._description = StatusFileFormatter.fromTemplate(
-				this.view.config.formats.files.description,
-				{
-					...this.file,
-					commit: this.commit,
-				},
-				{
-					relativePath: this.relativePath,
-				},
-			);
-		}
-		return this._description;
-	}
-
-	private _folderName: string | undefined;
-	get folderName(): string {
-		if (this._folderName == null) {
-			this._folderName = relativeDir(this.uri.relativePath);
-		}
-		return this._folderName;
-	}
-
-	private _label: string | undefined;
-	get label(): string {
-		if (this._label == null) {
-			this._label = StatusFileFormatter.fromTemplate(
-				this.view.config.formats.files.label,
-				{
-					...this.file,
-					commit: this.commit,
-				},
-				{
-					relativePath: this.relativePath,
-				},
-			);
-		}
-		return this._label;
-	}
-
-	get commit(): GitCommit {
-		return this._files[0]?.commit;
-	}
-
-	get priority(): number {
-		if (this._hasStagedChanges && !this._hasUnstagedChanges) return -3;
-		if (this._hasStagedChanges) return -2;
-		if (this._hasUnstagedChanges) return -1;
-		return 0;
-	}
-
-	private _relativePath: string | undefined;
-	get relativePath(): string | undefined {
-		return this._relativePath;
-	}
-	set relativePath(value: string | undefined) {
-		this._relativePath = value;
-		this._label = undefined;
-		this._description = undefined;
-	}
-
 	override getCommand(): Command | undefined {
 		if ((this._hasStagedChanges || this._hasUnstagedChanges) && this._files.length === 1) {
 			return createCommand<[undefined, DiffWithPreviousCommandArgs]>(
-				'gitlens.diffWithPrevious',
+				'gitlens.diffWithPrevious:views',
 				'Open Changes with Previous Revision',
 				undefined,
 				{
@@ -224,7 +211,7 @@ export class StatusFileNode extends ViewFileNode<'status-file', ViewsWithCommits
 		switch (this._type) {
 			case 'ahead':
 			case 'behind': {
-				const lhs = this._files[this._files.length - 1].commit;
+				const lhs = this._files.at(-1)!.commit;
 				const rhs = this._files[0].commit;
 
 				commandArgs = {
@@ -252,7 +239,7 @@ export class StatusFileNode extends ViewFileNode<'status-file', ViewsWithCommits
 				break;
 			}
 			default: {
-				const commit = this._files[this._files.length - 1].commit;
+				const commit = this._files.at(-1)!.commit;
 				const file = commit.fileset?.files?.find(f => f.path === this.file.path) ?? this.file;
 				commandArgs = {
 					lhs: {

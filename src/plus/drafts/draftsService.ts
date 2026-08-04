@@ -1,36 +1,33 @@
 import type { EntityIdentifier } from '@gitkraken/provider-apis';
 import { EntityIdentifierUtils } from '@gitkraken/provider-apis/entity-identifiers';
 import type { Disposable } from 'vscode';
-import type { HeadersInit } from '@env/fetch';
-import { getAvatarUri } from '../../avatars';
-import type { IntegrationIds } from '../../constants.integrations';
-import type { Container } from '../../container';
-import type { GitCommit } from '../../git/models/commit';
-import type { PullRequest } from '../../git/models/pullRequest';
-import { isRepository, Repository } from '../../git/models/repository';
+import type { GitCommit } from '@gitlens/git/models/commit.js';
+import type { PullRequest } from '@gitlens/git/models/pullRequest.js';
 import type {
 	GkRepositoryId,
 	RepositoryIdentity,
 	RepositoryIdentityRequest,
 	RepositoryIdentityResponse,
-} from '../../git/models/repositoryIdentities';
-import type { GitUser } from '../../git/models/user';
-import { getRemoteProviderMatcher } from '../../git/remotes/remoteProviders';
-import { isSha, isUncommitted, shortenRevision } from '../../git/utils/revision.utils';
-import { log } from '../../system/decorators/log';
-import { Logger } from '../../system/logger';
-import type { LogScope } from '../../system/logger.scope';
-import { getLogScope } from '../../system/logger.scope';
-import { getSettledValue } from '../../system/promise';
-import type { OrganizationMember } from '../gk/models/organization';
-import type { SubscriptionAccount } from '../gk/models/subscription';
-import type { ServerConnection } from '../gk/serverConnection';
-import { providersMetadata, supportsCodeSuggest } from '../integrations/providers/models';
-import { getEntityIdentifierInput } from '../integrations/providers/utils';
-import type { LaunchpadItem } from '../launchpad/launchpadProvider';
+} from '@gitlens/git/models/repositoryIdentities.js';
+import type { GitUser } from '@gitlens/git/models/user.js';
+import { createRemoteProviderMatcher } from '@gitlens/git/remotes/matcher.js';
+import { isSha, isUncommitted, shortenRevision } from '@gitlens/git/utils/revision.utils.js';
+import type { IntegrationIds } from '@gitlens/integrations/constants.js';
+import { providersMetadata, supportsCodeSuggest } from '@gitlens/integrations/providers/models.js';
+import { getEntityIdentifierInput } from '@gitlens/integrations/providers/utils.js';
+import { debug } from '@gitlens/utils/decorators/log.js';
+import type { ScopedLogger } from '@gitlens/utils/logger.scoped.js';
+import { getScopedLogger } from '@gitlens/utils/logger.scoped.js';
+import { getSettledValue } from '@gitlens/utils/promise.js';
+import { getAvatarUri } from '../../avatars.js';
+import type { Container } from '../../container.js';
+import { GlRepository } from '../../git/models/repository.js';
+import { buildRemoteProviderConfigs } from '../../git/remotes/remoteProviderConfigs.js';
+import { getBestRemoteWithIntegration, getRemoteIntegration } from '../../git/utils/-webview/remote.utils.js';
+import type { OrganizationMember } from '../gk/models/organization.js';
+import type { SubscriptionAccount } from '../gk/models/subscription.js';
+import type { ServerConnection } from '../gk/serverConnection.js';
 import type {
-	CodeSuggestionCounts,
-	CodeSuggestionCountsResponse,
 	CreateDraftChange,
 	CreateDraftPatchRequestFromChange,
 	CreateDraftRequest,
@@ -49,7 +46,7 @@ import type {
 	DraftType,
 	DraftUser,
 	DraftVisibility,
-} from './models/drafts';
+} from './models/drafts.js';
 
 export interface ProviderAuth {
 	provider: IntegrationIds;
@@ -64,14 +61,14 @@ export class DraftService implements Disposable {
 
 	dispose(): void {}
 
-	@log({ args: { 2: false } })
+	@debug({ args: (type: DraftType, title: string) => ({ type: type, title: title }) })
 	async createDraft(
 		type: DraftType,
 		title: string,
 		changes: CreateDraftChange[],
 		options?: { description?: string; visibility?: DraftVisibility; prEntityId?: string },
 	): Promise<Draft> {
-		const scope = getLogScope();
+		const scope = getScopedLogger();
 
 		try {
 			const results = await Promise.allSettled(changes.map(c => this.getCreateDraftPatchRequestFromChange(c)));
@@ -86,9 +83,7 @@ export class DraftService implements Disposable {
 					// Don't include empty patches -- happens when there are changes in a range that undo each other
 					if (r.value.contents) {
 						patchRequests.push(r.value);
-						if (user == null) {
-							user = r.value.user;
-						}
+						user ??= r.value.user;
 					}
 				} else {
 					failed.push(r.reason);
@@ -102,12 +97,13 @@ export class DraftService implements Disposable {
 
 			type DraftResult = { data: CreateDraftResponse };
 
-			let providerAuthHeader: HeadersInit | undefined;
+			let providerAuthHeader: RequestInit['headers'] | undefined;
 			let prEntityIdBody: { prEntityId: string } | undefined;
 			if (type === 'suggested_pr_change') {
 				if (options?.prEntityId == null) {
 					throw new Error('No pull request info provided');
 				}
+
 				prEntityIdBody = {
 					prEntityId: options.prEntityId,
 				};
@@ -117,6 +113,7 @@ export class DraftService implements Disposable {
 				if (providerAuth == null) {
 					throw new Error('No provider integration found');
 				}
+
 				providerAuthHeader = {
 					'Provider-Auth': Buffer.from(JSON.stringify(providerAuth)).toString('base64'),
 				};
@@ -240,7 +237,7 @@ export class DraftService implements Disposable {
 			return newDraft;
 		} catch (ex) {
 			debugger;
-			Logger.error(ex, scope);
+			scope?.error(ex);
 
 			throw ex;
 		}
@@ -321,14 +318,19 @@ export class DraftService implements Disposable {
 		};
 	}
 
-	@log()
+	@debug()
 	async deleteDraft(id: string): Promise<void> {
 		await this.connection.fetchGkApi(`v1/drafts/${id}`, { method: 'DELETE' });
 	}
 
-	@log<DraftService['archiveDraft']>({ args: { 1: opts => JSON.stringify({ ...opts, providerAuth: undefined }) } })
+	@debug({
+		args: (draft, options) => ({
+			draft: draft.id,
+			options: JSON.stringify({ ...options, providerAuth: undefined }),
+		}),
+	})
 	async archiveDraft(draft: Draft, options?: { providerAuth?: ProviderAuth; archiveReason?: string }): Promise<void> {
-		const scope = getLogScope();
+		const scope = getScopedLogger();
 
 		try {
 			let providerAuth = options?.providerAuth;
@@ -360,15 +362,15 @@ export class DraftService implements Disposable {
 			}
 		} catch (ex) {
 			debugger;
-			Logger.error(ex, scope);
+			scope?.error(ex);
 
 			throw ex;
 		}
 	}
 
-	@log<DraftService['getDraft']>({ args: { 1: opts => JSON.stringify({ ...opts, providerAuth: undefined }) } })
+	@debug({ args: (id, options) => ({ id: id, options: JSON.stringify({ ...options, providerAuth: undefined }) }) })
 	async getDraft(id: string, options?: { providerAuth?: ProviderAuth }): Promise<Draft> {
-		const scope = getLogScope();
+		const scope = getScopedLogger();
 
 		type Result = { data: DraftResponse };
 
@@ -385,14 +387,13 @@ export class DraftService implements Disposable {
 		]);
 
 		if (rspResult.status === 'rejected') {
-			Logger.error(rspResult.reason, scope, `Unable to open draft '${id}': ${rspResult.reason}`);
+			scope?.error(rspResult.reason, `Unable to open draft '${id}': ${rspResult.reason}`);
 			throw new Error(`Unable to open draft '${id}': ${rspResult.reason}`);
 		}
 
 		if (changesetsResult.status === 'rejected') {
-			Logger.error(
+			scope?.error(
 				changesetsResult.reason,
-				scope,
 				`Unable to open changeset for draft '${id}': ${changesetsResult.reason}`,
 			);
 			throw new Error(`Unable to open changesets for draft '${id}': ${changesetsResult.reason}`);
@@ -423,7 +424,7 @@ export class DraftService implements Disposable {
 		return newDraft;
 	}
 
-	@log()
+	@debug()
 	async getDrafts(isArchived?: boolean): Promise<Draft[]> {
 		return this.getDraftsCore(isArchived ? { isArchived: isArchived } : undefined);
 	}
@@ -433,7 +434,7 @@ export class DraftService implements Disposable {
 		providerAuth?: ProviderAuth;
 		isArchived?: boolean;
 	}): Promise<Draft[]> {
-		const scope = getLogScope();
+		const scope = getScopedLogger();
 		type Result = { data: DraftResponse[] };
 
 		const queryStrings = [];
@@ -442,6 +443,7 @@ export class DraftService implements Disposable {
 			if (options.providerAuth == null) {
 				throw new Error('No provider integration found');
 			}
+
 			fromPrEntityId = true;
 			queryStrings.push(`prEntityId=${encodeURIComponent(options.prEntityId)}`);
 		}
@@ -477,19 +479,18 @@ export class DraftService implements Disposable {
 		const account = getSettledValue(subscriptionResult)?.account;
 		const members = getSettledValue(membersResult);
 
-		return drafts.map(
-			(d): Draft =>
-				formatDraft(d, {
-					account: account,
-					members: members,
-					fromPrEntityId: fromPrEntityId,
-				}),
+		return drafts.map((d): Draft =>
+			formatDraft(d, {
+				account: account,
+				members: members,
+				fromPrEntityId: fromPrEntityId,
+			}),
 		);
 	}
 
-	@log()
+	@debug()
 	async getChangesets(id: string): Promise<DraftChangeset[]> {
-		const scope = getLogScope();
+		const scope = getScopedLogger();
 
 		type Result = { data: DraftChangesetResponse[] };
 
@@ -509,13 +510,13 @@ export class DraftService implements Disposable {
 
 			return changesets;
 		} catch (ex) {
-			Logger.error(ex, scope);
+			scope?.error(ex);
 
 			throw ex;
 		}
 	}
 
-	@log()
+	@debug()
 	async getPatch(id: string): Promise<DraftPatch> {
 		const patch = await this.getPatchCore(id);
 
@@ -528,7 +529,7 @@ export class DraftService implements Disposable {
 	}
 
 	private async getPatchCore(id: string): Promise<DraftPatch> {
-		const scope = getLogScope();
+		const scope = getScopedLogger();
 		type Result = { data: DraftPatchResponse };
 
 		// GET /v1/patches/:patchId
@@ -547,8 +548,8 @@ export class DraftService implements Disposable {
 
 	async getPatchDetails(id: string): Promise<DraftPatchDetails>;
 	async getPatchDetails(patch: DraftPatch): Promise<DraftPatchDetails>;
-	@log<DraftService['getPatchDetails']>({
-		args: { 0: idOrPatch => (typeof idOrPatch === 'string' ? idOrPatch : idOrPatch.id) },
+	@debug({
+		args: idOrPatch => ({ idOrPatch: typeof idOrPatch === 'string' ? idOrPatch : idOrPatch.id }),
 	})
 	async getPatchDetails(idOrPatch: string | DraftPatch): Promise<DraftPatchDetails> {
 		const patch = typeof idOrPatch === 'string' ? await this.getPatchCore(idOrPatch) : idOrPatch;
@@ -565,7 +566,7 @@ export class DraftService implements Disposable {
 		const repositoryOrIdentity = getSettledValue(repositoryResult)!;
 
 		let repoPath = '';
-		if (isRepository(repositoryOrIdentity)) {
+		if (GlRepository.is(repositoryOrIdentity)) {
 			repoPath = repositoryOrIdentity.path;
 		}
 
@@ -597,9 +598,9 @@ export class DraftService implements Disposable {
 		return contentsRsp.text();
 	}
 
-	@log()
+	@debug()
 	async updateDraftVisibility(id: string, visibility: DraftVisibility): Promise<Draft> {
-		const scope = getLogScope();
+		const scope = getScopedLogger();
 
 		type Result = { data: Draft };
 
@@ -617,15 +618,15 @@ export class DraftService implements Disposable {
 
 			return draft;
 		} catch (ex) {
-			Logger.error(ex, scope);
+			scope?.error(ex);
 
 			throw ex;
 		}
 	}
 
-	@log()
+	@debug()
 	async getDraftUsers(id: string): Promise<DraftUser[]> {
-		const scope = getLogScope();
+		const scope = getScopedLogger();
 
 		type Result = { data: DraftUser[] };
 
@@ -640,15 +641,15 @@ export class DraftService implements Disposable {
 
 			return users;
 		} catch (ex) {
-			Logger.error(ex, scope);
+			scope?.error(ex);
 
 			throw ex;
 		}
 	}
 
-	@log({ args: { 1: false } })
+	@debug({ args: (id: string) => ({ id: id }) })
 	async addDraftUsers(id: string, pendingUsers: DraftPendingUser[]): Promise<DraftUser[]> {
-		const scope = getLogScope();
+		const scope = getScopedLogger();
 
 		type Result = { data: DraftUser[] };
 		type Request = { id: string; users: DraftPendingUser[] };
@@ -660,10 +661,7 @@ export class DraftService implements Disposable {
 
 			const rsp = await this.connection.fetchGkApi(`/v1/drafts/${id}/users`, {
 				method: 'POST',
-				body: JSON.stringify({
-					id: id,
-					users: pendingUsers,
-				} as Request),
+				body: JSON.stringify({ id: id, users: pendingUsers } satisfies Request),
 			});
 
 			if (rsp?.ok === false) {
@@ -674,15 +672,15 @@ export class DraftService implements Disposable {
 
 			return users;
 		} catch (ex) {
-			Logger.error(ex, scope);
+			scope?.error(ex);
 
 			throw ex;
 		}
 	}
 
-	@log()
+	@debug()
 	async removeDraftUser(id: string, userId: DraftUser['userId']): Promise<boolean> {
-		const scope = getLogScope();
+		const scope = getScopedLogger();
 		try {
 			const rsp = await this.connection.fetchGkApi(`/v1/drafts/${id}/users/${userId}`, { method: 'DELETE' });
 
@@ -692,23 +690,23 @@ export class DraftService implements Disposable {
 
 			return true;
 		} catch (ex) {
-			Logger.error(ex, scope);
+			scope?.error(ex);
 
 			throw ex;
 		}
 	}
 
-	@log()
+	@debug()
 	async getRepositoryOrIdentity(
 		draftId: Draft['id'],
 		repoId: GkRepositoryId,
 		options?: { openIfNeeded?: boolean; keepOpen?: boolean; prompt?: boolean; skipRefValidation?: boolean },
-	): Promise<Repository | RepositoryIdentity> {
+	): Promise<GlRepository | RepositoryIdentity> {
 		const identity = await this.getRepositoryIdentity(draftId, repoId);
 		return (await this.container.repositoryIdentity.getRepository(identity, options)) ?? identity;
 	}
 
-	@log()
+	@debug()
 	async getRepositoryIdentity(draftId: Draft['id'], repoId: GkRepositoryId): Promise<RepositoryIdentity> {
 		type Result = { data: RepositoryIdentityResponse };
 
@@ -723,7 +721,9 @@ export class DraftService implements Disposable {
 		} else if (data.provider?.repoName != null) {
 			name = data.provider.repoName;
 		} else if (data.remote?.url != null && data.remote?.domain != null && data.remote?.path != null) {
-			const matcher = await getRemoteProviderMatcher(this.container);
+			const configuredIntegrations = this.container.integrations.getConfigured();
+			const configs = buildRemoteProviderConfigs(null, configuredIntegrations);
+			const matcher = createRemoteProviderMatcher(configs);
 			const provider = matcher(data.remote.url, data.remote.domain, data.remote.path, undefined);
 			name = provider?.repoName ?? data.remote.path;
 		} else {
@@ -744,14 +744,14 @@ export class DraftService implements Disposable {
 	}
 
 	async getProviderAuthFromRepoOrIntegrationId(
-		repoOrIntegrationId: Repository | IntegrationIds,
+		repoOrIntegrationId: GlRepository | IntegrationIds,
 	): Promise<ProviderAuth | undefined> {
 		let integration;
-		if (isRepository(repoOrIntegrationId)) {
-			const remote = await repoOrIntegrationId.git.remotes.getBestRemoteWithIntegration();
+		if (GlRepository.is(repoOrIntegrationId)) {
+			const remote = await getBestRemoteWithIntegration(repoOrIntegrationId.path);
 			if (remote == null) return undefined;
 
-			integration = await remote.getIntegration();
+			integration = await getRemoteIntegration(remote);
 		} else {
 			const metadata = providersMetadata[repoOrIntegrationId];
 			if (metadata == null) return undefined;
@@ -786,10 +786,10 @@ export class DraftService implements Disposable {
 			return undefined;
 		}
 
-		let repo: Repository | undefined;
+		let repo: GlRepository | undefined;
 		// avoid calling getRepositoryOrIdentity if possible
 		if (patch.repository != null) {
-			if (patch.repository instanceof Repository) {
+			if (patch.repository instanceof GlRepository) {
 				repo = patch.repository;
 			} else {
 				repo = await this.container.repositoryIdentity.getRepository(patch.repository);
@@ -798,7 +798,7 @@ export class DraftService implements Disposable {
 
 		if (repo == null) {
 			const repositoryOrIdentity = await this.getRepositoryOrIdentity(draft.id, patch.gkRepositoryId);
-			if (!(repositoryOrIdentity instanceof Repository)) {
+			if (!(repositoryOrIdentity instanceof GlRepository)) {
 				return undefined;
 			}
 
@@ -808,34 +808,24 @@ export class DraftService implements Disposable {
 		return this.getProviderAuthFromRepoOrIntegrationId(repo);
 	}
 
+	@debug({ args: (pullRequest, repository) => ({ pullRequest: pullRequest.id, repository: repository.id }) })
 	async getCodeSuggestions(
 		pullRequest: PullRequest,
-		repository: Repository,
-		options?: { includeArchived?: boolean },
-	): Promise<Draft[]>;
-	async getCodeSuggestions(
-		launchpadItem: LaunchpadItem,
-		integrationId: IntegrationIds,
-		options?: { includeArchived?: boolean },
-	): Promise<Draft[]>;
-	@log<DraftService['getCodeSuggestions']>({ args: { 0: i => i.id, 1: r => (isRepository(r) ? r.id : r) } })
-	async getCodeSuggestions(
-		item: PullRequest | LaunchpadItem,
-		repositoryOrIntegrationId: Repository | IntegrationIds,
+		repository: GlRepository,
 		options?: { includeArchived?: boolean },
 	): Promise<Draft[]> {
-		if (!supportsCodeSuggest(item.provider)) return [];
+		if (!supportsCodeSuggest(pullRequest.provider)) return [];
 
-		const entityIdentifier = getEntityIdentifierInput(item);
+		const entityIdentifier = getEntityIdentifierInput(pullRequest);
 		const prEntityId = EntityIdentifierUtils.encode(entityIdentifier);
-		const providerAuth = await this.getProviderAuthFromRepoOrIntegrationId(repositoryOrIntegrationId);
+		const providerAuth = await this.getProviderAuthFromRepoOrIntegrationId(repository);
 
 		// swallowing this error as we don't need to fail here
 		try {
 			const drafts = await this.getDraftsCore({
 				prEntityId: prEntityId,
 				providerAuth: providerAuth,
-				isArchived: options?.includeArchived != null ? options.includeArchived : true,
+				isArchived: options?.includeArchived ?? true,
 			});
 			return drafts;
 		} catch (_ex) {
@@ -843,62 +833,22 @@ export class DraftService implements Disposable {
 		}
 	}
 
-	@log<DraftService['getCodeSuggestionCounts']>({ args: { 0: prs => prs.map(pr => pr.id).join(',') } })
-	async getCodeSuggestionCounts(pullRequests: PullRequest[]): Promise<CodeSuggestionCounts> {
-		const scope = getLogScope();
-
-		type Result = { data: CodeSuggestionCountsResponse };
-
-		const prEntityIds = pullRequests
-			.filter(pr => supportsCodeSuggest(pr.provider))
-			.map(pr => {
-				return EntityIdentifierUtils.encode(getEntityIdentifierInput(pr));
-			});
-
-		if (prEntityIds.length === 0) {
-			return {};
-		}
-
-		const body = JSON.stringify({
-			prEntityIds: prEntityIds,
-		});
-
-		try {
-			const rsp = await this.connection.fetchGkApi(
-				'v1/drafts/counts',
-				{ method: 'POST', body: body },
-				{ query: 'type=suggested_pr_change' },
-			);
-
-			if (!rsp.ok) {
-				await handleBadDraftResponse('Unable to open code suggestion counts', rsp, scope);
-			}
-
-			return ((await rsp.json()) as Result).data.counts;
-		} catch (ex) {
-			debugger;
-			Logger.error(ex, scope);
-
-			throw ex;
-		}
-	}
-
-	generateWebUrl(draftId: string): string;
-	generateWebUrl(draft: Draft): string;
-	generateWebUrl(draftOrDraftId: Draft | string): string {
+	generateWebUrl(draftId: string): Promise<string>;
+	generateWebUrl(draft: Draft): Promise<string>;
+	generateWebUrl(draftOrDraftId: Draft | string): Promise<string> {
 		const id = typeof draftOrDraftId === 'string' ? draftOrDraftId : draftOrDraftId.id;
 		return this.container.urls.getGkDevUrl(['drafts', id]);
 	}
 }
 
-async function handleBadDraftResponse(message: string, rsp?: any, scope?: LogScope) {
+async function handleBadDraftResponse(message: string, rsp?: any, scope?: ScopedLogger) {
 	let json: { error?: { message?: string } } | { error?: string } | undefined;
 	try {
 		json = (await rsp?.json()) as { error?: { message?: string } } | { error?: string } | undefined;
 	} catch {}
 	const rspErrorMessage = typeof json?.error === 'string' ? json.error : (json?.error?.message ?? rsp?.statusText);
 	const errorMessage = rsp != null ? `${message}: (${rsp?.status}) ${rspErrorMessage}` : message;
-	Logger.error(undefined, scope, errorMessage);
+	scope?.error(undefined, errorMessage);
 	throw new Error(errorMessage);
 }
 
@@ -917,7 +867,7 @@ function formatDraft(
 		isMine = true;
 		author = {
 			id: draftResponse.createdBy,
-			name: `${options.account.name} (you)`,
+			name: options.account.name,
 			email: options.account.email,
 			avatarUri: getAvatarUri(options.account.email),
 		};
@@ -994,7 +944,7 @@ function formatPatch(
 		commit?: GitCommit;
 		contents?: string;
 		files?: DraftPatchFileChange[];
-		repository?: Repository | RepositoryIdentity;
+		repository?: GlRepository | RepositoryIdentity;
 	},
 ): DraftPatch {
 	return {

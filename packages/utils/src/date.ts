@@ -1,0 +1,474 @@
+// NOTE@eamodio If this changes we need to update the replacement function too (since its parameter number/order relies on the matching)
+const customDateTimeFormatParserRegex =
+	/(?<literal>\[.*?\])|(?<year>YYYY|YY)|(?<month>M{1,4})|(?<day>Do|DD?)|(?<weekday>d{2,4})|(?<hour>HH?|hh?)|(?<minute>mm?)|(?<second>ss?)|(?<fractionalSecond>SSS)|(?<dayPeriod>A|a)|(?<timeZoneName>ZZ?)/g;
+const dateTimeFormatRegex = /(?<dateStyle>full|long|medium|short)(?:\+(?<timeStyle>full|long|medium|short))?/;
+const relativeUnitThresholds: [Intl.RelativeTimeFormatUnit, number, number, string][] = [
+	['year', 24 * 60 * 60 * 1000 * (365 * 2 - 1), 24 * 60 * 60 * 1000 * 365, 'yr'],
+	['month', (24 * 60 * 60 * 1000 * 365) / 12, (24 * 60 * 60 * 1000 * 365) / 12, 'mo'],
+	['week', 24 * 60 * 60 * 1000 * 7, 24 * 60 * 60 * 1000 * 7, 'wk'],
+	['day', 24 * 60 * 60 * 1000, 24 * 60 * 60 * 1000, 'd'],
+	['hour', 60 * 60 * 1000, 60 * 60 * 1000, 'h'],
+	['minute', 60 * 1000, 60 * 1000, 'm'],
+	['second', 1000, 1000, 's'],
+];
+// Built ONCE from the table above (not per-call `.find()` scans, and not a Map — plain object property
+// reads are monomorphic/faster than Map.get for this) — backs unitDivisorMs/unitThresholdMs below. Never
+// touched on fromNow's own hot path (see the loop in fromNow itself).
+const unitDivisors: Partial<Record<Intl.RelativeTimeFormatUnit, number>> = {};
+const unitThresholds: Partial<Record<Intl.RelativeTimeFormatUnit, number>> = {};
+for (const [unit, threshold, divisor] of relativeUnitThresholds) {
+	unitDivisors[unit] = divisor;
+	unitThresholds[unit] = threshold;
+}
+
+type DateStyle = 'full' | 'long' | 'medium' | 'short';
+type TimeStyle = 'full' | 'long' | 'medium' | 'short';
+export type DateTimeFormat = DateStyle | `${DateStyle}+${TimeStyle}`;
+
+let locale: string | undefined;
+const dateTimeFormatCache = new Map<string | undefined, Intl.DateTimeFormat>();
+let defaultLocales: string[] | undefined;
+let defaultRelativeTimeFormat: InstanceType<typeof Intl.RelativeTimeFormat> | undefined;
+let defaultShortRelativeTimeFormat: InstanceType<typeof Intl.RelativeTimeFormat> | undefined;
+
+const numberFormatCache = new Map<string | undefined, Intl.NumberFormat>();
+
+export function setDefaultDateLocales(locales: string | string[] | null | undefined): void {
+	if (typeof locales === 'string') {
+		if (locales === 'system' || locales.trim().length === 0) {
+			defaultLocales = undefined;
+		} else {
+			defaultLocales = [locales];
+		}
+	} else {
+		defaultLocales = locales ?? undefined;
+	}
+
+	defaultRelativeTimeFormat = undefined;
+	defaultShortRelativeTimeFormat = undefined;
+	dateTimeFormatCache.clear();
+
+	numberFormatCache.clear();
+
+	locale = undefined;
+}
+
+export function createFromDateDelta(
+	date: Date,
+	delta: { years?: number; months?: number; days?: number; hours?: number; minutes?: number; seconds?: number },
+): Date {
+	const d = new Date(date.getTime());
+
+	for (const [key, value] of Object.entries(delta)) {
+		if (!value) continue;
+
+		switch (key) {
+			case 'years':
+				d.setFullYear(d.getFullYear() + value);
+				break;
+			case 'months':
+				d.setMonth(d.getMonth() + value);
+				break;
+			case 'days':
+				d.setDate(d.getDate() + value);
+				break;
+			case 'hours':
+				d.setHours(d.getHours() + value);
+				break;
+			case 'minutes':
+				d.setMinutes(d.getMinutes() + value);
+				break;
+			case 'seconds':
+				d.setSeconds(d.getSeconds() + value);
+				break;
+		}
+	}
+
+	return d;
+}
+
+/** The unit + truncated magnitude `fromNow` would pick for `date` relative to `now` — same threshold
+ *  table + truncation `fromNow` formats with, factored out so a caller that needs to CLASSIFY a date
+ *  (not just format it) can't drift from what the column actually displays. Allocation-free (no `Date`
+ *  construction — both `date` and `now` are read as epoch ms when passed as numbers). `now` defaults to
+ *  `Date.now()`; a caller classifying many rows against the SAME instant should pass it explicitly. */
+export function fromNowUnit(
+	date: Date | number,
+	now: Date | number = Date.now(),
+): { unit: Intl.RelativeTimeFormatUnit; value: number } | undefined {
+	const elapsed =
+		(typeof date === 'number' ? date : date.getTime()) - (typeof now === 'number' ? now : now.getTime());
+	// Guard against invalid dates (e.g. `new Date(<unparseable>)`) — mirrors fromNow's own guard.
+	if (!Number.isFinite(elapsed)) return undefined;
+
+	const elapsedABS = Math.abs(elapsed);
+	for (const [unit, threshold, divisor] of relativeUnitThresholds) {
+		if (elapsedABS >= threshold || threshold === 1000 /* second */) {
+			return { unit: unit, value: Math.trunc(elapsed / divisor) };
+		}
+	}
+	return undefined;
+}
+
+/** Allocation-free sibling of `fromNowUnit` for a caller that only needs to CLASSIFY (compare two dates'
+ *  groups) rather than build the `{unit,value}` object — same loop over the same table, so it can't
+ *  drift from `fromNowUnit`/`fromNow`. Encodes the result as `unitOrdinal*100000 + truncValue` (ordinal
+ *  0 = 'year' … 6 = 'second', matching `relativeUnitThresholds`' order; `truncValue` keeps its sign, so
+ *  a positive result means `date` is in the FUTURE relative to `now`). */
+export function fromNowUnitKey(date: Date | number, now: Date | number = Date.now()): number | undefined {
+	const elapsed =
+		(typeof date === 'number' ? date : date.getTime()) - (typeof now === 'number' ? now : now.getTime());
+	if (!Number.isFinite(elapsed)) return undefined;
+
+	const elapsedABS = Math.abs(elapsed);
+	let ordinal = 0;
+	for (const [, threshold, divisor] of relativeUnitThresholds) {
+		if (elapsedABS >= threshold || threshold === 1000 /* second */) {
+			return ordinal * 100_000 + Math.trunc(elapsed / divisor);
+		}
+
+		ordinal++;
+	}
+	return undefined;
+}
+
+/** The divisor (ms) `fromNowUnit` divides elapsed time by for `unit` — i.e. the elapsed-ms width one
+ *  step of `value` represents. Exported so a caller reconstructing a `fromNowUnit` result's elapsed
+ *  WINDOW (its start/end bounds) doesn't have to re-derive the thresholds table itself. */
+export function unitDivisorMs(unit: Intl.RelativeTimeFormatUnit): number {
+	return unitDivisors[unit] ?? 0;
+}
+
+/** The elapsed-ms THRESHOLD `fromNowUnit` requires to classify into `unit` at all (only differs from
+ *  `unitDivisorMs` for 'year' — see the table above). Exported so a caller clamping a group's elapsed
+ *  window to where the NEXT unit actually takes over (not just `n+1` steps of the same divisor) can read
+ *  the real cutover point instead of re-deriving the thresholds table itself. */
+export function unitThresholdMs(unit: Intl.RelativeTimeFormatUnit): number {
+	return unitThresholds[unit] ?? 0;
+}
+
+// fromNow keeps its OWN single-pass loop (not routed through fromNowUnit) — one iteration, no
+// intermediate {unit,value} object allocation on this hot formatting path; fromNowUnit below iterates
+// the SAME `relativeUnitThresholds` array, so the two classifications can't drift apart. `now` defaults
+// to `Date.now()`, like fromNowUnit's — pass it to pin the instant (a caller comparing against its own
+// clock read otherwise sits one unpredictable tick away from the bucket it expects).
+export function fromNow(date: Date | number, short?: boolean, now: Date | number = Date.now()): string {
+	const elapsed =
+		(typeof date === 'number' ? date : date.getTime()) - (typeof now === 'number' ? now : now.getTime());
+	// Guard against invalid dates (e.g. `new Date(<unparseable>)`), since a non-finite value would throw in `Intl.RelativeTimeFormat.format`
+	if (!Number.isFinite(elapsed)) return '';
+
+	for (const [unit, threshold, divisor, shortUnit] of relativeUnitThresholds) {
+		const elapsedABS = Math.abs(elapsed);
+		if (elapsedABS >= threshold || threshold === 1000 /* second */) {
+			if (short) {
+				if (locale == null) {
+					if (defaultShortRelativeTimeFormat != null) {
+						locale = defaultShortRelativeTimeFormat.resolvedOptions().locale;
+					} else if (defaultRelativeTimeFormat != null) {
+						locale = defaultRelativeTimeFormat.resolvedOptions().locale;
+					} else {
+						defaultShortRelativeTimeFormat = new Intl.RelativeTimeFormat(defaultLocales, {
+							localeMatcher: 'best fit',
+							numeric: 'always',
+							style: 'narrow',
+						});
+						locale = defaultShortRelativeTimeFormat.resolvedOptions().locale;
+					}
+				}
+
+				if (locale === 'en' || locale?.startsWith('en-')) {
+					const value = Math.floor(elapsedABS / divisor);
+					return `${value}${shortUnit}`;
+				}
+
+				defaultShortRelativeTimeFormat ??= new Intl.RelativeTimeFormat(defaultLocales, {
+					localeMatcher: 'best fit',
+					numeric: 'always',
+					style: 'narrow',
+				});
+
+				return defaultShortRelativeTimeFormat.format(Math.trunc(elapsed / divisor), unit);
+			}
+
+			defaultRelativeTimeFormat ??= new Intl.RelativeTimeFormat(defaultLocales, {
+				localeMatcher: 'best fit',
+				numeric: 'auto',
+				style: 'long',
+			});
+			return defaultRelativeTimeFormat.format(Math.trunc(elapsed / divisor), unit);
+		}
+	}
+
+	return '';
+}
+
+export function formatDate(
+	date: Date | number,
+	format: 'full' | 'long' | 'medium' | 'short' | string | null | undefined,
+	locale?: string,
+	cache: boolean = true,
+): string {
+	format = format ?? undefined;
+
+	// Guard against invalid dates (e.g. `new Date(<unparseable>)`), since they would throw in `Intl.DateTimeFormat.format`
+	if (Number.isNaN(typeof date === 'number' ? date : date.getTime())) return '';
+
+	const key = `${locale ?? ''}:${format}`;
+
+	let formatter = dateTimeFormatCache.get(key);
+	if (formatter == null) {
+		const options = getDateTimeFormatOptionsFromFormatString(format);
+
+		let locales;
+		if (locale == null) {
+			locales = defaultLocales;
+		} else if (locale === 'system') {
+			locales = undefined;
+		} else {
+			locales = [locale];
+		}
+
+		formatter = new Intl.DateTimeFormat(locales, options);
+		if (cache) {
+			dateTimeFormatCache.set(key, formatter);
+		}
+	}
+
+	if (format == null || dateTimeFormatRegex.test(format)) {
+		return formatter.format(date);
+	}
+
+	function getTimeFormatter(format: TimeStyle) {
+		const key = `${locale ?? ''}:time:${format}`;
+
+		let formatter = dateTimeFormatCache.get(key);
+		if (formatter == null) {
+			const options: Intl.DateTimeFormatOptions = { localeMatcher: 'best fit', timeStyle: format };
+
+			let locales;
+			if (locale == null) {
+				locales = defaultLocales;
+			} else if (locale === 'system') {
+				locales = undefined;
+			} else {
+				locales = [locale];
+			}
+
+			formatter = new Intl.DateTimeFormat(locales, options);
+			if (cache) {
+				dateTimeFormatCache.set(key, formatter);
+			}
+		}
+
+		return formatter;
+	}
+
+	const parts = formatter.formatToParts(date);
+	return format.replace(
+		customDateTimeFormatParserRegex,
+		(
+			_match,
+			literal,
+			_year,
+			_month,
+			_day,
+			_weekday,
+			_hour,
+			_minute,
+			_second,
+			_fractionalSecond,
+			_dayPeriod,
+			_timeZoneName,
+			_offset,
+			_s,
+			groups,
+		) => {
+			if (literal != null) return (literal as string).substring(1, literal.length - 1);
+
+			for (const [key, value] of Object.entries(groups)) {
+				if (value == null) continue;
+
+				const part = parts.find(p => p.type === key);
+
+				if (value === 'Do' && part?.type === 'day') {
+					return formatWithOrdinal(Number(part.value));
+				} else if (value === 'a' && part?.type === 'dayPeriod') {
+					// For some reason the Intl.DateTimeFormat doesn't honor the `dayPeriod` value and always returns the long version, so use the "short" timeStyle instead
+					const dayPeriod = getTimeFormatter('short')
+						.formatToParts(date)
+						.find(p => p.type === 'dayPeriod');
+					return ` ${(dayPeriod ?? part)?.value ?? ''}`;
+				}
+				return part?.value ?? '';
+			}
+
+			return '';
+		},
+	);
+}
+
+export function getDateDifference(
+	first: Date | number,
+	second: Date | number,
+	unit?: 'days' | 'hours' | 'minutes' | 'seconds',
+	roundFn?: (value: number) => number,
+): number {
+	const diff =
+		(typeof second === 'number' ? second : second.getTime()) -
+		(typeof first === 'number' ? first : first.getTime());
+	const round = roundFn ?? Math.floor;
+	switch (unit) {
+		case 'days':
+			return round(diff / (1000 * 60 * 60 * 24));
+		case 'hours':
+			return round(diff / (1000 * 60 * 60));
+		case 'minutes':
+			return round(diff / (1000 * 60));
+		case 'seconds':
+			return round(diff / 1000);
+		default:
+			return diff;
+	}
+}
+
+function getDateTimeFormatOptionsFromFormatString(
+	format: DateTimeFormat | string | undefined,
+): Intl.DateTimeFormatOptions {
+	if (format == null) return { localeMatcher: 'best fit', dateStyle: 'full', timeStyle: 'short' };
+
+	const match = dateTimeFormatRegex.exec(format);
+	if (match?.groups != null) {
+		const { dateStyle, timeStyle } = match.groups;
+		return {
+			localeMatcher: 'best fit',
+			dateStyle: (dateStyle as Intl.DateTimeFormatOptions['dateStyle']) || 'full',
+			timeStyle: (timeStyle as Intl.DateTimeFormatOptions['timeStyle']) || undefined,
+		};
+	}
+
+	const options: Intl.DateTimeFormatOptions = { localeMatcher: 'best fit' };
+
+	for (const { groups } of format.matchAll(customDateTimeFormatParserRegex)) {
+		if (groups == null) continue;
+
+		for (const [key, value] of Object.entries(groups)) {
+			if (value == null) continue;
+
+			switch (key) {
+				case 'year':
+					options.year = value.length === 4 ? 'numeric' : '2-digit';
+					break;
+				case 'month':
+					switch (value.length) {
+						case 4:
+							options.month = 'long';
+							break;
+						case 3:
+							options.month = 'short';
+							break;
+						case 2:
+							options.month = '2-digit';
+							break;
+						case 1:
+							options.month = 'numeric';
+							break;
+					}
+					break;
+				case 'day':
+					if (value === 'DD') {
+						options.day = '2-digit';
+					} else {
+						options.day = 'numeric';
+					}
+					break;
+				case 'weekday':
+					switch (value.length) {
+						case 4:
+							options.weekday = 'long';
+							break;
+						case 3:
+							options.weekday = 'short';
+							break;
+						case 2:
+							options.weekday = 'narrow';
+							break;
+					}
+					break;
+				case 'hour':
+					options.hour = value.length === 2 ? '2-digit' : 'numeric';
+					options.hour12 = value === 'hh' || value === 'h';
+					break;
+				case 'minute':
+					options.minute = value.length === 2 ? '2-digit' : 'numeric';
+					break;
+				case 'second':
+					options.second = value.length === 2 ? '2-digit' : 'numeric';
+					break;
+				case 'fractionalSecond':
+					(options as unknown as { fractionalSecondDigits?: number }).fractionalSecondDigits = 3;
+					break;
+				case 'dayPeriod':
+					options.dayPeriod = 'narrow';
+					options.hour12 = true;
+					options.hourCycle = 'h12';
+					break;
+				case 'timeZoneName':
+					options.timeZoneName = value.length === 2 ? 'long' : 'short';
+					break;
+			}
+		}
+	}
+
+	return options;
+}
+
+export function getTimeRemaining(
+	expiresOn: string | undefined,
+	unit?: 'days' | 'hours' | 'minutes' | 'seconds',
+): number | undefined {
+	return expiresOn != null ? getDateDifference(Date.now(), new Date(expiresOn), unit, Math.round) : undefined;
+}
+
+const ordinals = ['th', 'st', 'nd', 'rd'];
+function formatWithOrdinal(n: number): string {
+	const v = n % 100;
+	return `${n}${ordinals[(v - 20) % 10] ?? ordinals[v] ?? ordinals[0]}`;
+}
+
+export function formatNumeric(
+	value: number,
+	style?: 'decimal' | 'currency' | 'percent' | 'unit' | null | undefined,
+	locale?: string,
+): string {
+	const format = getNumericFormat(style, locale);
+	return format(value);
+}
+
+export function getNumericFormat(
+	style?: 'decimal' | 'currency' | 'percent' | 'unit' | null | undefined,
+	locale?: string,
+): Intl.NumberFormat['format'] {
+	style ??= 'decimal';
+
+	const key = `${locale ?? ''}:${style}`;
+
+	let formatter = numberFormatCache.get(key);
+	if (formatter == null) {
+		const options: Intl.NumberFormatOptions = { localeMatcher: 'best fit', style: style };
+
+		let locales;
+		if (locale == null) {
+			locales = defaultLocales;
+		} else if (locale === 'system') {
+			locales = undefined;
+		} else {
+			locales = [locale];
+		}
+
+		formatter = new Intl.NumberFormat(locales, options);
+		numberFormatCache.set(key, formatter);
+	}
+
+	return formatter.format;
+}

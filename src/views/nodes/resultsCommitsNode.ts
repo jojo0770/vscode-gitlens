@@ -1,26 +1,28 @@
 import { TreeItem, TreeItemCollapsibleState } from 'vscode';
-import type { TreeViewNodeTypes } from '../../constants.views';
-import { GitUri } from '../../git/gitUri';
-import { isStash } from '../../git/models/commit';
-import type { GitRevisionRange } from '../../git/models/revision';
-import type { CommitsQueryResults, FilesQueryResults } from '../../git/queryResults';
-import { getChangesForChangelog } from '../../git/utils/-webview/log.utils';
-import type { AIGenerateChangelogChanges } from '../../plus/ai/aiProviderService';
-import { configuration } from '../../system/-webview/configuration';
-import { debug } from '../../system/decorators/log';
-import { map } from '../../system/iterable';
-import type { Deferred } from '../../system/promise';
-import { defer, pauseOnCancelOrTimeout } from '../../system/promise';
-import type { ViewsWithCommits } from '../viewBase';
-import type { PageableViewNode } from './abstract/viewNode';
-import { ContextValues, getViewNodeId, ViewNode } from './abstract/viewNode';
-import { AutolinkedItemsNode } from './autolinkedItemsNode';
-import { CommitNode } from './commitNode';
-import { LoadMoreNode, MessageNode } from './common';
-import { ContributorsNode } from './contributorsNode';
-import { ResultsFilesNode } from './resultsFilesNode';
-import { StashNode } from './stashNode';
-import { insertDateMarkers } from './utils/-webview/node.utils';
+import { GitCommit } from '@gitlens/git/models/commit.js';
+import type { GitRevisionRange } from '@gitlens/git/models/revision.js';
+import { trace } from '@gitlens/utils/decorators/log.js';
+import { map } from '@gitlens/utils/iterable.js';
+import { getLoggableName } from '@gitlens/utils/logger.js';
+import { maybeStartScopedLogger } from '@gitlens/utils/logger.scoped.js';
+import type { Deferred } from '@gitlens/utils/promise.js';
+import { defer, pauseOnCancelOrTimeout } from '@gitlens/utils/promise.js';
+import type { TreeViewNodeTypes } from '../../constants.views.js';
+import { GitUri } from '../../git/gitUri.js';
+import type { CommitsQueryResults, FilesQueryResults } from '../../git/queryResults.js';
+import { getChangesForChangelog } from '../../git/utils/-webview/log.utils.js';
+import type { AIGenerateChangelogChanges } from '../../plus/ai/actions/generateChangelog.js';
+import { configuration } from '../../system/-webview/configuration.js';
+import type { ViewsWithCommits } from '../viewBase.js';
+import type { PageableViewNode } from './abstract/viewNode.js';
+import { ContextValues, getViewNodeId, ViewNode } from './abstract/viewNode.js';
+import { AutolinkedItemsNode } from './autolinkedItemsNode.js';
+import { CommitNode } from './commitNode.js';
+import { LoadMoreNode, MessageNode } from './common.js';
+import { ContributorsNode } from './contributorsNode.js';
+import { ResultsFilesNode } from './resultsFilesNode.js';
+import { StashNode } from './stashNode.js';
+import { insertDateMarkers } from './utils/-webview/node.utils.js';
 
 interface Options {
 	autolinks: boolean;
@@ -54,7 +56,7 @@ export class ResultsCommitsNodeBase<Type extends TreeViewNodeTypes, View extends
 		super(type, GitUri.fromRepoPath(repoPath), view, parent);
 
 		if (_results.direction != null) {
-			this.updateContext({ branchStatusUpstreamType: _results.direction });
+			this.updateContext({ branchStatusUpstreamType: _results.direction, repoPath: repoPath });
 		}
 		this._uniqueId = getViewNodeId(this.type, this.context);
 		this.limit = this.view.getNodeLastKnownLimit(this);
@@ -138,7 +140,7 @@ export class ResultsCommitsNodeBase<Type extends TreeViewNodeTypes, View extends
 		children.push(
 			...insertDateMarkers(
 				map(log.commits.values(), c =>
-					isStash(c)
+					GitCommit.isStash(c)
 						? new StashNode(this.view, this, c, { allowFilteredFiles: allowFilteredFiles, icon: true })
 						: new CommitNode(this.view, this, c, undefined, undefined, getBranchAndTagTips, {
 								allowFilteredFiles: allowFilteredFiles,
@@ -152,7 +154,7 @@ export class ResultsCommitsNodeBase<Type extends TreeViewNodeTypes, View extends
 		);
 
 		if (log.hasMore) {
-			children.push(new LoadMoreNode(this.view, this, children[children.length - 1]));
+			children.push(new LoadMoreNode(this.view, this, children.at(-1)!));
 		}
 
 		this._onChildrenCompleted?.fulfill();
@@ -171,8 +173,6 @@ export class ResultsCommitsNodeBase<Type extends TreeViewNodeTypes, View extends
 
 			const result = await pauseOnCancelOrTimeout(this.getCommitsQueryResults(), undefined, 100);
 			if (!result.paused) {
-				state = this._options.expand ? TreeItemCollapsibleState.Expanded : TreeItemCollapsibleState.Collapsed;
-
 				({ label, log } = result.value);
 
 				state = !log?.commits.size
@@ -182,11 +182,24 @@ export class ResultsCommitsNodeBase<Type extends TreeViewNodeTypes, View extends
 						: TreeItemCollapsibleState.Collapsed;
 			} else {
 				queueMicrotask(async () => {
+					using scope = maybeStartScopedLogger(`${getLoggableName(this)}.getTreeItem`);
 					try {
-						await this._onChildrenCompleted?.promise;
+						if (this._onChildrenCompleted?.promise != null) {
+							const timeout = new Promise<void>(resolve => {
+								setTimeout(() => {
+									scope?.error(undefined, 'onChildrenCompleted promise timed out after 30s');
+									resolve();
+								}, 30000); // 30 second timeout
+							});
+
+							await Promise.race([this._onChildrenCompleted.promise, timeout]);
+						}
+
 						void (await result.value);
 						this.view.triggerNodeChange(this.parent);
-					} catch {}
+					} catch (ex) {
+						scope?.error(ex, 'Failed awaiting children completion');
+					}
 				});
 
 				// Need to use Collapsed before we have results or the item won't show up in the view until the children are awaited
@@ -204,7 +217,7 @@ export class ResultsCommitsNodeBase<Type extends TreeViewNodeTypes, View extends
 		return item;
 	}
 
-	@debug()
+	@trace()
 	override refresh(reset: boolean = false): void {
 		if (reset) {
 			this._commitsQueryResultsPromise = undefined;

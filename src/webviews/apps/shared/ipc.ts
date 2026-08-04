@@ -1,15 +1,24 @@
 /*global window */
-import { getScopedCounter } from '../../../system/counter';
-import { debug, logName } from '../../../system/decorators/log';
-import { Logger } from '../../../system/logger';
-import { getLogScope, getNewLogScope } from '../../../system/logger.scope';
-import type { Serialized } from '../../../system/serialize';
-import { maybeStopWatch } from '../../../system/stopwatch';
-import type { IpcCallParamsType, IpcCallResponseParamsType, IpcCommand, IpcMessage, IpcRequest } from '../../protocol';
-import { ipcPromiseSettled, isIpcPromise } from '../../protocol';
-import { DOM } from './dom';
-import type { Disposable, Event } from './events';
-import { Emitter } from './events';
+import { inflateSync, strFromU8 } from 'fflate';
+import { getScopedCounter } from '@gitlens/utils/counter.js';
+import { debug, logName } from '@gitlens/utils/decorators/log.js';
+import { Logger } from '@gitlens/utils/logger.js';
+import { getScopedLogger, maybeStartScopedLogger } from '@gitlens/utils/logger.scoped.js';
+import { maybeStopWatch } from '@gitlens/utils/stopwatch.js';
+import { deserializeIpcData } from '../../../system/ipcSerialize.js';
+import type { Serialized } from '../../../system/serialize.js';
+import type {
+	IpcCallParamsType,
+	IpcCallResponseParamsType,
+	IpcCommand,
+	IpcMessage,
+	IpcRequest,
+} from '../../ipc/models/ipc.js';
+import { IpcPromiseSettled } from '../../protocol.js';
+import { isRpcMessage } from '../../rpc/constants.js';
+import { DOM } from './dom.js';
+import type { Disposable, Event } from './events.js';
+import { Emitter } from './events.js';
 
 export interface HostIpcApi {
 	postMessage(msg: unknown): void;
@@ -20,8 +29,22 @@ export interface HostIpcApi {
 declare function acquireVsCodeApi(): HostIpcApi;
 
 let _api: HostIpcApi | undefined;
+let _factory: (() => HostIpcApi) | undefined;
+
+/**
+ * Sets a custom factory for the host IPC API.
+ * Call this before any other RPC/IPC initialization when hosting
+ * webviews outside of VS Code.
+ *
+ * @param factory - A function that returns a HostIpcApi implementation
+ */
+export function setHostIpcFactory(factory: () => HostIpcApi): void {
+	_factory = factory;
+	_api = undefined; // Reset cached instance so next call uses the new factory
+}
+
 export function getHostIpcApi(): HostIpcApi {
-	return (_api ??= acquireVsCodeApi());
+	return (_api ??= _factory != null ? _factory() : acquireVsCodeApi());
 }
 
 const ipcSequencer = getScopedCounter();
@@ -29,9 +52,17 @@ function nextIpcId() {
 	return `webview:${ipcSequencer.next()}`;
 }
 
+// Stable per-JS-module-evaluation fingerprint. Two readies with the same `clientId` came from the same iframe; two readies
+// with different `clientId`s came from different iframes (VS Code recreated the iframe).
+const _clientId = `wv-${Math.random().toString(36).slice(2, 10)}`;
+const _clientLoadedAt = Date.now();
+export function getWebviewClientInfo(): { clientId: string; clientLoadedAt: number } {
+	return { clientId: _clientId, clientLoadedAt: _clientLoadedAt };
+}
+
 type PendingHandler = (msg: IpcMessage) => void;
 
-@logName<HostIpc>(c => `${c.appName}(HostIpc)`)
+@logName(c => `${c.appName}(HostIpc)`)
 export class HostIpc implements Disposable {
 	private _onReceiveMessage = new Emitter<IpcMessage>();
 	get onReceiveMessage(): Event<IpcMessage> {
@@ -41,7 +72,6 @@ export class HostIpc implements Disposable {
 	private readonly _api: HostIpcApi;
 	private readonly _disposable: Disposable;
 	private _pendingHandlers = new Map<string, PendingHandler>();
-	private _textDecoder: TextDecoder | undefined;
 
 	constructor(private readonly appName: string) {
 		this._api = getHostIpcApi();
@@ -52,22 +82,45 @@ export class HostIpc implements Disposable {
 		this._disposable.dispose();
 	}
 
-	@debug<HostIpc['onMessageReceived']>({ args: { 0: e => `${e.data.id}, method=${e.data.method}` } })
+	@debug({ args: e => ({ e: `${e.data.id}|${e.data.method}` }) })
 	private onMessageReceived(e: MessageEvent) {
-		const scope = getLogScope();
+		// Skip RPC transport messages — these are handled by the Supertalk endpoint
+		if (isRpcMessage(e.data)) return;
 
 		const msg = e.data as IpcMessage;
-		if (msg.packed && msg.params instanceof Uint8Array) {
-			const sw = maybeStopWatch(getNewLogScope(` deserializing msg=${e.data.method}`, scope), {
-				log: false,
-				logLevel: 'debug',
-			});
-			this._textDecoder ??= new TextDecoder();
-			msg.params = JSON.parse(this._textDecoder.decode(msg.params));
-			sw?.stop();
+		using scope = maybeStartScopedLogger(`(e=${msg.id}|${msg.method})`, undefined, {
+			scope: getScopedLogger(),
+		});
+		const sw = maybeStopWatch(scope, {
+			log: { onlyExit: true, level: 'debug' },
+		});
+
+		if (msg.compressed && msg.params instanceof Uint8Array) {
+			if (msg.compressed === 'deflate') {
+				try {
+					msg.params = strFromU8(inflateSync(msg.params));
+				} catch (ex) {
+					debugger;
+					console.warn('IPC deflate decompression failed, assuming uncompressed', ex);
+					msg.params = strFromU8(msg.params as Uint8Array);
+				}
+			} else {
+				msg.params = strFromU8(msg.params);
+			}
+			sw?.restart({ message: `\u2022 decompressed (${msg.compressed}) serialized params` });
 		}
 
-		this.replaceIpcPromisesWithPromises(msg.params);
+		if (typeof msg.params === 'string') {
+			msg.params = deserializeIpcData(msg.params, v => this.getResponsePromise(v.method, v.id));
+			sw?.stop({ message: `\u2022 deserialized params` });
+		} else if (msg.params == null) {
+			sw?.stop({ message: `\u2022 no params` });
+		} else {
+			sw?.stop({ message: `\u2022 invalid params` });
+			debugger;
+		}
+
+		scope?.addExitInfo(`ipc (host -> webview) duration=${Date.now() - msg.timestamp}ms`);
 
 		// If we have a completionId, then this is a response to a request and it should be handled directly
 		if (msg.completionId != null) {
@@ -80,22 +133,13 @@ export class HostIpc implements Disposable {
 		this._onReceiveMessage.fire(msg);
 	}
 
-	replaceIpcPromisesWithPromises(data: unknown): void {
-		if (data == null || typeof data !== 'object') return;
-
-		for (const key in data) {
-			const value = (data as Record<string, unknown>)[key];
-			if (isIpcPromise(value)) {
-				(data as Record<string, unknown>)[key] = this.getResponsePromise(value.method, value.id);
-			} else {
-				this.replaceIpcPromisesWithPromises(value);
-			}
-		}
+	deserializeIpcData<T>(data: string): T {
+		return deserializeIpcData<T>(data, v => this.getResponsePromise(v.method, v.id));
 	}
 
 	sendCommand<T extends IpcCommand>(commandType: T, params?: never): void;
 	sendCommand<T extends IpcCommand<unknown>>(commandType: T, params: IpcCallParamsType<T>): void;
-	@debug<HostIpc['sendCommand']>({ args: { 0: c => c.method, 1: false } })
+	@debug({ args: commandType => ({ commandType: commandType.method }) })
 	sendCommand<T extends IpcCommand | IpcCommand<unknown>>(commandType: T, params?: IpcCallParamsType<T>): void {
 		const id = nextIpcId();
 		// this.log(`${this.appName}.sendCommand(${id}): name=${command.method}`);
@@ -105,10 +149,12 @@ export class HostIpc implements Disposable {
 			scope: commandType.scope,
 			method: commandType.method,
 			params: params,
+			compressed: false,
+			timestamp: Date.now(),
 		} satisfies IpcMessage<IpcCallParamsType<T>>);
 	}
 
-	@debug<HostIpc['sendRequest']>({ args: { 0: c => c.method, 1: false, 2: false } })
+	@debug({ args: requestType => ({ requestType: requestType.method }) })
 	async sendRequest<T extends IpcRequest<unknown, unknown>>(
 		requestType: T,
 		params: IpcCallParamsType<T>,
@@ -122,6 +168,8 @@ export class HostIpc implements Disposable {
 			scope: requestType.scope,
 			method: requestType.method,
 			params: params,
+			compressed: false,
+			timestamp: Date.now(),
 			completionId: id,
 		} satisfies IpcMessage<IpcCallParamsType<T>>);
 		return promise;
@@ -150,7 +198,7 @@ export class HostIpc implements Disposable {
 			this._pendingHandlers.set(queueKey, msg => {
 				dispose.call(this);
 
-				if (msg.method === ipcPromiseSettled.method) {
+				if (msg.method === IpcPromiseSettled.method) {
 					const params = msg.params as PromiseSettledResult<unknown>;
 					if (params.status === 'rejected') {
 						queueMicrotask(() => reject(new Error(params.reason)));
@@ -180,13 +228,13 @@ export class HostIpc implements Disposable {
 		this.setPersistedState(state);
 	}
 
-	@debug<HostIpc['postMessage']>({ args: { 0: e => `${e.id}, method=${e.method}` } })
+	@debug({ args: e => ({ e: `${e.id}, method=${e.method}` }) })
 	private postMessage(e: IpcMessage) {
 		this._api.postMessage(e);
 	}
 }
 
-export function assertsSerialized<T>(obj: unknown): asserts obj is Serialized<T> {}
+export function assertsSerialized<T>(_obj: unknown): asserts _obj is Serialized<T> {}
 
 function getQueueKey(method: string, id: string) {
 	return `${method}|${id}`;

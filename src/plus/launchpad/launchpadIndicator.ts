@@ -1,23 +1,22 @@
 import type { ConfigurationChangeEvent, StatusBarItem } from 'vscode';
 import { Disposable, MarkdownString, StatusBarAlignment, ThemeColor, window } from 'vscode';
-import type { OpenWalkthroughCommandArgs } from '../../commands/walkthroughs';
-import { proBadge } from '../../constants';
-import type { Colors } from '../../constants.colors';
-import type { GitCloudHostIntegrationId } from '../../constants.integrations';
-import type { Container } from '../../container';
-import { createCommand, executeCommand, registerCommand } from '../../system/-webview/command';
-import { configuration } from '../../system/-webview/configuration';
-import { once } from '../../system/event';
-import { groupByMap } from '../../system/iterable';
-import { wait } from '../../system/promise';
-import { pluralize } from '../../system/string';
-import { isWalkthroughSupported } from '../../telemetry/walkthroughStateProvider';
-import type { ConnectionStateChangeEvent } from '../integrations/integrationService';
-import type { LaunchpadCommandArgs } from './launchpad';
-import type { LaunchpadItem, LaunchpadProvider, LaunchpadRefreshEvent } from './launchpadProvider';
-import { groupAndSortLaunchpadItems, supportedLaunchpadIntegrations } from './launchpadProvider';
-import type { LaunchpadGroup } from './models/launchpad';
-import { launchpadGroupIconMap, launchpadPriorityGroups } from './models/launchpad';
+import type { GitCloudHostIntegrationId } from '@gitlens/integrations/constants.js';
+import type { ConnectionStateChangeEvent } from '@gitlens/integrations/integrationService.js';
+import { once } from '@gitlens/utils/event.js';
+import { groupByMap } from '@gitlens/utils/iterable.js';
+import { wait } from '@gitlens/utils/promise.js';
+import { pluralize } from '@gitlens/utils/string.js';
+import type { OpenWalkthroughCommandArgs } from '../../commands/walkthroughs.js';
+import type { Colors } from '../../constants.colors.js';
+import { proBadge } from '../../constants.js';
+import type { Container } from '../../container.js';
+import { createCommand, executeCommand, registerCommand } from '../../system/-webview/command.js';
+import { configuration } from '../../system/-webview/configuration.js';
+import type { LaunchpadCommandArgs } from './launchpad.js';
+import type { LaunchpadItem, LaunchpadProvider, LaunchpadRefreshEvent } from './launchpadProvider.js';
+import { groupAndSortLaunchpadItems, supportedLaunchpadIntegrations } from './launchpadProvider.js';
+import type { LaunchpadGroup } from './models/launchpad.js';
+import { launchpadGroupIconMap, launchpadPriorityGroups } from './models/launchpad.js';
 
 type LaunchpadIndicatorState = 'idle' | 'disconnected' | 'loading' | 'load' | 'failed';
 
@@ -123,7 +122,7 @@ export class LaunchpadIndicator implements Disposable {
 			return;
 		}
 
-		if (e.error != null) {
+		if (e.error != null && !e.items?.length) {
 			this.updateStatusBarState('failed');
 
 			return;
@@ -141,7 +140,7 @@ export class LaunchpadIndicator implements Disposable {
 		}
 
 		const items = await this.provider.getCategorizedItems();
-		if (items.error != null) {
+		if (items.error != null && !items.items?.length) {
 			this.updateStatusBarState('failed');
 
 			return;
@@ -231,7 +230,9 @@ export class LaunchpadIndicator implements Disposable {
 						// If something else has already caused a refresh, don't do another one
 						if (this._hasRefreshed) return;
 
-						void this.provider.getCategorizedItems({ force: true });
+						// Don't force at startup -- nothing is cached yet, so this still fetches, but it shares the
+						// gate with any load already in flight instead of duplicating the whole pipeline
+						void this.provider.getCategorizedItems();
 					});
 				} else {
 					void this.provider.getCategorizedItems({ force: true });
@@ -253,19 +254,11 @@ export class LaunchpadIndicator implements Disposable {
 		tooltip.isTrusted = true;
 
 		tooltip.appendMarkdown(`GitLens Launchpad ${proBadge}\u00a0\u00a0\u00a0\u00a0&mdash;\u00a0\u00a0\u00a0\u00a0`);
-		if (isWalkthroughSupported()) {
-			tooltip.appendMarkdown(
-				`[$(question)](command:gitlens.launchpad.indicator.action?%22info%22 "What is this?")`,
-			);
-		}
+		tooltip.appendMarkdown(`[$(question)](command:gitlens.launchpad.indicator.action?%22info%22 "What is this?")`);
 		tooltip.appendMarkdown('\u00a0');
 		tooltip.appendMarkdown(`[$(gear)](command:workbench.action.openSettings?%22gitlens.launchpad%22 "Settings")`);
 		tooltip.appendMarkdown('\u00a0\u00a0|\u00a0\u00a0');
 		tooltip.appendMarkdown(`[$(circle-slash) Hide](command:gitlens.launchpad.indicator.action?%22hide%22 "Hide")`);
-
-		const launchpadLink = isWalkthroughSupported()
-			? '[Launchpad](command:gitlens.launchpad.indicator.action?%22info%22 "Learn about Launchpad")'
-			: 'Launchpad';
 
 		if (
 			state === 'idle' ||
@@ -275,7 +268,7 @@ export class LaunchpadIndicator implements Disposable {
 		) {
 			tooltip.appendMarkdown('\n\n---\n\n');
 			tooltip.appendMarkdown(
-				`${launchpadLink} organizes your pull requests into actionable groups to help you focus and keep your team unblocked.`,
+				`[Launchpad](command:gitlens.launchpad.indicator.action?%22info%22 "Learn about Launchpad") organizes your pull requests into actionable groups to help you focus and keep your team unblocked.`,
 			);
 			tooltip.appendMarkdown(
 				"\n\nIt's always accessible using the `GitLens: Open Launchpad` command from the Command Palette.",
@@ -354,7 +347,7 @@ export class LaunchpadIndicator implements Disposable {
 		let priorityItem: { item: LaunchpadItem; groupLabel: string } | undefined;
 
 		const groupedItems = groupAndSortLaunchpadItems(categorizedItems);
-		const totalGroupedItems = Array.from(groupedItems.values()).reduce((total, group) => total + group.length, 0);
+		const totalGroupedItems = [...groupedItems.values()].reduce((total, group) => total + group.length, 0);
 
 		const hasImportantGroupsWithItems = groups.some(group => groupedItems.get(group)?.length);
 		if (totalGroupedItems === 0) {
@@ -615,6 +608,7 @@ export class LaunchpadIndicator implements Disposable {
 
 	private storeFirstInteractionIfNeeded() {
 		if (this.container.storage.get('launchpad:indicator:hasInteracted') != null) return;
+
 		void this.container.storage.store('launchpad:indicator:hasInteracted', new Date().toISOString());
 	}
 
@@ -623,10 +617,17 @@ export class LaunchpadIndicator implements Disposable {
 	}
 }
 
+/** Serializable stand-in for `Error` — the summary crosses the webview RPC, which uses `JSON.stringify` */
+export interface LaunchpadSummaryError {
+	name: string;
+	message: string;
+}
+
 export interface LaunchpadSummaryResult {
 	total: number;
 	groups: LaunchpadGroup[];
 	hasGroupedItems: boolean;
+	error?: LaunchpadSummaryError;
 
 	mergeable?: {
 		total: number;
@@ -663,7 +664,7 @@ export function generateLaunchpadSummary(
 	groups: LaunchpadGroup[],
 ): LaunchpadSummaryResult {
 	const groupedItems = groupAndSortLaunchpadItems(items);
-	const total = Array.from(groupedItems.values()).reduce((total, group) => total + group.length, 0);
+	const total = [...groupedItems.values()].reduce((total, group) => total + group.length, 0);
 	const hasGroupedItems = groups.some(group => groupedItems.get(group)?.length);
 
 	if (total === 0 || !hasGroupedItems) {

@@ -2,24 +2,26 @@ import { consume } from '@lit/context';
 import { css, html, LitElement } from 'lit';
 import { customElement, property, query } from 'lit/decorators.js';
 import { ifDefined } from 'lit/directives/if-defined.js';
-import { urls } from '../../../../../constants';
+import { pluralize } from '@gitlens/utils/string.js';
+import { urls } from '../../../../../constants.js';
 import {
 	proFeaturePreviewUsages,
 	proTrialLengthInDays,
 	SubscriptionState,
-} from '../../../../../constants.subscription';
-import type { Source } from '../../../../../constants.telemetry';
-import type { FeaturePreview } from '../../../../../features';
-import { getFeaturePreviewStatus } from '../../../../../features';
-import type { SubscriptionUpgradeCommandArgs } from '../../../../../plus/gk/models/subscription';
-import { createCommandLink } from '../../../../../system/commands';
-import { pluralize } from '../../../../../system/string';
-import type { GlButton } from '../../../shared/components/button';
-import type { PromosContext } from '../../../shared/contexts/promos';
-import { promosContext } from '../../../shared/contexts/promos';
-import { linkStyles } from './vscode.css';
-import '../../../shared/components/button';
-import '../../../shared/components/promo';
+} from '../../../../../constants.subscription.js';
+import type { Source } from '../../../../../constants.telemetry.js';
+import type { FeaturePreview } from '../../../../../features.js';
+import { getFeaturePreviewStatus } from '../../../../../features.js';
+import type { SubscriptionUpgradeCommandArgs } from '../../../../../plus/gk/models/subscription.js';
+import { createCommandLink } from '../../../../../system/commands.js';
+import type { GlButton } from '../../../shared/components/button.js';
+import { featureGateCompactThreshold } from '../../../shared/components/feature-gate.css.js';
+import type { PromosContext } from '../../../shared/contexts/promos.js';
+import { promosContext } from '../../../shared/contexts/promos.js';
+import { linkStyles } from './vscode.css.js';
+import '../../../shared/components/button.js';
+import '../../../shared/components/code-icon.js';
+import '../../../shared/components/promo.js';
 
 declare global {
 	interface HTMLElementTagNameMap {
@@ -29,44 +31,98 @@ declare global {
 	// interface GlobalEventHandlersEventMap {}
 }
 
+/**
+ * @tag gl-feature-gate-plus-state
+ *
+ * @slot feature
+ */
 @customElement('gl-feature-gate-plus-state')
 export class GlFeatureGatePlusState extends LitElement {
 	static override styles = [
-		linkStyles,
 		css`
 			:host {
-				--gk-action-radius: 0.3rem;
+				--link-foreground: var(--vscode-textLink-foreground);
+				--link-foreground-active: var(--vscode-textLink-activeForeground);
 			}
 
-			:host([appearance='welcome']) gl-button:only-child {
+			:host([appearance='alert']) {
+				--link-decoration-default: underline;
+				--link-foreground: color-mix(in srgb, var(--section-foreground) 50%, var(--vscode-textLink-foreground));
+				--link-foreground-active: color-mix(
+					in srgb,
+					var(--section-foreground) 50%,
+					var(--vscode-textLink-activeForeground)
+				);
+			}
+
+			:host([appearance='default']) gl-button:only-child {
 				width: 100%;
 				max-width: 300px;
 			}
 
-			@container (max-width: 600px) {
-				:host([appearance='welcome']) gl-button:not(.inline) {
+			/* Collapses the CTA to a block, centered button in narrow default-appearance gates.
+			   A deliberate literal — this threshold is independent of the compact threshold shared
+			   via featureGateCompactThreshold (and of the alert dialog's same-valued width cap). */
+			@container (max-width: 60rem) {
+				:host([appearance='default']) gl-button:not(.inline) {
 					display: block;
-					margin-left: auto;
 					margin-right: auto;
+					margin-left: auto;
 				}
 			}
 
 			:host([appearance='alert']) gl-button:not(.inline) {
 				display: block;
-				margin-left: auto;
 				margin-right: auto;
+				margin-left: auto;
 			}
 
-			:host-context([appearance='alert']) p:first-child {
+			/* .trial's first paragraph is excluded: wrapping the trailing paragraphs made it a
+			   :first-child, which would newly zero its top margin at every size — full-size
+			   spacing must stay as it was before the wrapper existed. */
+			:host([appearance='alert']) p:first-child:not(.trial p) {
 				margin-top: 0;
 			}
 
-			:host-context([appearance='alert']) p:last-child {
+			:host([appearance='alert']) p:last-child {
 				margin-bottom: 0;
 			}
 
-			.actions {
+			.centered {
 				text-align: center;
+			}
+
+			/* Centering lives on the wrapper (not the paragraphs) because the compact mode below
+			   turns the paragraphs inline — text-align only aligns content of block containers. */
+			.trial {
+				text-align: center;
+			}
+
+			/* Vertically constrained alert gates (e.g. the bottom panel): compact the action zone so
+			   it costs less height — tighter paragraph/rule rhythm, and the trial message + promo
+			   collapse onto a single line. The normal-height dialog keeps its default spacing.
+			   Only the TrialExpired branch has a .trial wrapper: it's the sole state that renders
+			   two trailing paragraphs — every other state ends with a single one, so there's
+			   nothing to collapse. */
+			@container (max-height: ${featureGateCompactThreshold}) {
+				:host([appearance='alert']) p,
+				:host([appearance='alert']) hr {
+					margin-block: var(--gl-space-6);
+				}
+
+				:host([appearance='alert']) .trial p {
+					display: inline;
+				}
+
+				:host([appearance='alert']) .trial gl-promo,
+				:host([appearance='alert']) .trial gl-promo::part(text) {
+					display: inline;
+					margin: 0;
+				}
+			}
+
+			.preview-image {
+				width: 100%;
 			}
 
 			.actions-row {
@@ -77,23 +133,45 @@ export class GlFeatureGatePlusState extends LitElement {
 				white-space: nowrap;
 			}
 
+			/* Like .actions-row but center-aligned, for a row that mixes a text button with an
+			   icon-only button: their baselines don't match (a text baseline vs the synthesized
+			   bottom edge of the icon button's flex box), so centering the equal-height button
+			   boxes is what lines them up. */
+			.actions-row-center {
+				display: flex;
+				gap: 0.6em;
+				align-items: center;
+				justify-content: center;
+				white-space: nowrap;
+			}
+
 			.hint {
-				border-bottom: 1px dashed currentColor;
+				border-bottom: var(--gl-border-width) dashed currentcolor;
+			}
+
+			hr {
+				border: none;
+				border-top: var(--gl-border-width) solid
+					color-mix(in srgb, var(--section-border-color) 20%, transparent);
 			}
 		`,
+		linkStyles,
 	];
 
 	@query('gl-button')
-	private readonly button!: GlButton;
+	private readonly button?: GlButton;
+
+	@property()
+	appearance?: 'alert' | 'default';
 
 	@property({ type: Object })
 	featurePreview?: FeaturePreview;
 
-	@property({ type: String })
+	@property()
 	featurePreviewCommandLink?: string;
 
-	@property({ type: String })
-	appearance?: 'alert' | 'welcome';
+	@property()
+	featureRestriction?: 'all' | 'private-repos';
 
 	@property()
 	featureWithArticleIfNeeded?: string;
@@ -107,42 +185,50 @@ export class GlFeatureGatePlusState extends LitElement {
 	@property({ attribute: false, type: Number })
 	state?: SubscriptionState;
 
-	@property({ type: String })
+	@property()
 	webroot?: string;
 
-	protected override firstUpdated(): void {
-		if (this.appearance === 'alert') {
-			queueMicrotask(() => this.button.focus());
-		}
+	private _ctaPrimed = false;
+
+	protected override updated(): void {
+		// Prime the CTA for Enter — once, on the first update that actually renders a button
+		// (`state` can arrive after the first render, which emits nothing until then). Don't
+		// scroll it into view: in constrained placements the button sits far below the fold and
+		// scrolling to it hides the gate's title/context. The latch keeps later reactive updates
+		// (e.g. a subscription refresh) from stealing focus the user has since moved.
+		if (this._ctaPrimed || this.appearance !== 'alert') return;
+
+		const button = this.button;
+		if (button == null) return;
+
+		this._ctaPrimed = true;
+		queueMicrotask(() => button.focus({ preventScroll: true }));
 	}
 
 	override render(): unknown {
 		const hidden = this.state == null;
-		// eslint-disable-next-line lit/no-this-assign-in-render
+		// oxlint-disable-next-line lit/no-this-assign-in-render
 		this.hidden = hidden;
 		if (hidden) return undefined;
-
-		const appearance = (this.appearance ?? 'alert') === 'alert' ? 'alert' : undefined;
 
 		switch (this.state) {
 			case SubscriptionState.VerificationRequired:
 				return html`
 					<slot name="feature"></slot>
-					<p class="actions">
+					<p class="actions-row-center">
 						<gl-button
 							class="inline"
-							appearance="${ifDefined(appearance)}"
 							href="${createCommandLink<Source>('gitlens.plus.resendVerification', this.source)}"
 							>Resend Email</gl-button
 						>
 						<gl-button
 							class="inline"
-							appearance="${ifDefined(appearance)}"
 							href="${createCommandLink<Source>('gitlens.plus.validate', this.source)}"
 							><code-icon icon="refresh"></code-icon
 						></gl-button>
 					</p>
-					<p>You must verify your email before you can continue.</p>
+					<hr />
+					<p class="centered">Check your inbox for a verification link, then refresh once you've verified.</p>
 				`;
 
 			case SubscriptionState.Community:
@@ -151,14 +237,16 @@ export class GlFeatureGatePlusState extends LitElement {
 				}
 
 				return html`<slot name="feature"></slot>
-					<p>
-						Use on privately-hosted repos requires
-						<a href="${urls.communityVsPro}">GitLens Pro</a>.
+					<p class="centered">
+						${
+							this.featureRestriction === 'private-repos'
+								? 'Unlock this feature for privately hosted repos with '
+								: 'Unlock this feature with '
+						} <a href="${urls.communityVsPro}">GitLens Pro</a>.
 					</p>
 					<p class="actions-row">
 						<gl-button
 							class="inline"
-							appearance="${ifDefined(appearance)}"
 							href="${createCommandLink<Source>('gitlens.plus.signUp', this.source)}"
 							>&nbsp;Try GitLens Pro&nbsp;</gl-button
 						><span
@@ -168,18 +256,26 @@ export class GlFeatureGatePlusState extends LitElement {
 							></span
 						>
 					</p>
-					<p>
-						Get ${pluralize('day', proTrialLengthInDays)} of
-						<a href="${urls.communityVsPro}">GitLens Pro</a> for free — no credit card required.
+					<hr />
+					<p class="centered">
+						<a href="${urls.communityVsPro}"
+							>Get ${pluralize('day', proTrialLengthInDays)} of GitLens Pro free</a
+						>
+						— no credit card required.
 					</p>`;
 
 			case SubscriptionState.TrialExpired:
 				return html`<slot name="feature"></slot>
-					<p>Use on privately-hosted repos requires <a href="${urls.communityVsPro}">GitLens Pro</a>.</p>
+					<p class="centered">
+						${
+							this.featureRestriction === 'private-repos'
+								? 'Unlock this feature for privately hosted repos with '
+								: 'Unlock this feature with '
+						} <a href="${urls.communityVsPro}">GitLens Pro</a>.
+					</p>
 					<p class="actions-row">
 						<gl-button
 							class="inline"
-							appearance="${ifDefined(appearance)}"
 							href="${createCommandLink<SubscriptionUpgradeCommandArgs>('gitlens.plus.upgrade', {
 								plan: 'pro',
 								...(this.source ?? { source: 'feature-gate' }),
@@ -187,22 +283,29 @@ export class GlFeatureGatePlusState extends LitElement {
 							>Upgrade to Pro</gl-button
 						>
 					</p>
-					<p>${this.renderPromo()}</p>`;
+					<hr />
+					<div class="trial">
+						<p>
+							Your trial has ended — upgrade to keep
+							${this.featureWithArticleIfNeeded ?? 'all Pro features'} unlocked.
+						</p>
+						<p>${this.renderPromo()}</p>
+					</div>`;
 
 			case SubscriptionState.TrialReactivationEligible:
 				return html`<slot name="feature"></slot>
 					<p class="actions-row">
 						<gl-button
 							class="inline"
-							appearance="${ifDefined(appearance)}"
 							href="${createCommandLink<Source>('gitlens.plus.reactivateProTrial', this.source)}"
 							>Continue</gl-button
 						>
 					</p>
-					<p>
-						Reactivate your GitLens Pro trial and experience
+					<hr />
+					<p class="centered">
+						Reactivate your Pro trial to experience
 						${this.featureWithArticleIfNeeded ? `${this.featureWithArticleIfNeeded} and ` : ''}all the new
-						Pro features — free for another ${pluralize('day', proTrialLengthInDays)}!
+						Pro features — free for another ${pluralize('day', proTrialLengthInDays)}.
 					</p> `;
 		}
 
@@ -215,18 +318,17 @@ export class GlFeatureGatePlusState extends LitElement {
 
 		if (used === 0) {
 			return html`<slot name="feature"></slot>
-				<gl-button appearance="${ifDefined(appearance)}" href="${ifDefined(this.featurePreviewCommandLink)}"
-					>Continue</gl-button
-				>
-				<p>
-					Continue to preview
-					${this.featureWithArticleIfNeeded ? `${this.featureWithArticleIfNeeded} on` : ''} privately-hosted
-					repos, or
+				<p class="actions-row">
+					<gl-button href="${ifDefined(this.featurePreviewCommandLink)}">Continue</gl-button>
+				</p>
+				<hr />
+				<p class="centered">
+					Already have an account?
 					<a href="${createCommandLink<Source>('gitlens.plus.login', this.source)}" title="Sign In">sign in</a
-					>.<br />
-					${appearance !== 'alert' ? html`<br />` : ''} For full access to all GitLens Pro features,
+					><br />
+					${appearance !== 'alert' ? html`<br />` : ''}
 					<a href="${createCommandLink<Source>('gitlens.plus.signUp', this.source)}"
-						>start your free ${proTrialLengthInDays}-day Pro trial</a
+						>Want full access to all Pro features? Start your free ${proTrialLengthInDays}-day Pro trial</a
 					>
 					— no credit card required.
 				</p> `;
@@ -237,10 +339,7 @@ export class GlFeatureGatePlusState extends LitElement {
 		return html`
 			${this.renderFeaturePreviewStep(featurePreview, used)}
 			<p class="actions-row">
-				<gl-button
-					class="inline"
-					appearance="${ifDefined(appearance)}"
-					href="${ifDefined(this.featurePreviewCommandLink)}"
+				<gl-button class="inline" href="${ifDefined(this.featurePreviewCommandLink)}"
 					>Continue Preview</gl-button
 				><span
 					>or
@@ -249,13 +348,14 @@ export class GlFeatureGatePlusState extends LitElement {
 					></span
 				>
 			</p>
-			<p>
-				After continuing, you will have ${pluralize('day', left, { infix: ' more ' })} to preview
-				${this.featureWithArticleIfNeeded ? `${this.featureWithArticleIfNeeded} on` : ''} privately-hosted
+			<hr />
+			<p class="centered">
+				${pluralize('day', left, { infix: ' more ' })} to preview
+				${this.featureWithArticleIfNeeded ? `${this.featureWithArticleIfNeeded} on ` : ''}privately hosted
 				repos.<br />
-				${appearance !== 'alert' ? html`<br />` : ''} For full access to all GitLens Pro features,
+				${appearance !== 'alert' ? html`<br />` : ''}
 				<a href="${createCommandLink<Source>('gitlens.plus.signUp', this.source)}"
-					>start your free ${proTrialLengthInDays}-day Pro trial</a
+					>Want full access to all Pro features? Start your free ${proTrialLengthInDays}-day Pro trial</a
 				>
 				— no credit card required.
 			</p>
@@ -274,8 +374,8 @@ export class GlFeatureGatePlusState extends LitElement {
 							</p>
 							<p>
 								<img
+									class="preview-image"
 									src="${this.webroot ?? ''}/media/graph-commit-search.webp"
-									style="width:100%"
 									alt="Graph Commit Search"
 								/>
 							</p> `;
@@ -289,8 +389,8 @@ export class GlFeatureGatePlusState extends LitElement {
 							</p>
 							<p>
 								<img
+									class="preview-image"
 									src="${this.webroot ?? ''}/media/graph-minimap.webp"
-									style="width:100%"
 									alt="Graph Minimap"
 								/>
 							</p>

@@ -1,0 +1,439 @@
+import type { TemplateResult } from 'lit';
+import { css, html, LitElement, nothing } from 'lit';
+import { customElement, property, state } from 'lit/decorators.js';
+import { repeat } from 'lit/directives/repeat.js';
+import type { FuzzyMatchResult } from '@gitlens/utils/fuzzy.js';
+import { scrollableBase } from '../styles/lit/base.css.js';
+import { elevatedSurface } from '../styles/lit/elevation.css.js';
+import '../code-icon.js';
+
+export interface CompletionItem<T = any> {
+	label: string;
+	description?: string;
+	detail?: string;
+	icon?: string;
+	item: T;
+	score?: number;
+	match?: FuzzyMatchResult;
+	alwaysVisible?: boolean;
+}
+
+/**
+ * Event fired when a completion item is selected
+ */
+export interface CompletionSelectEvent {
+	index: number;
+	item: CompletionItem;
+}
+
+/**
+ * Generic autocomplete/completion dropdown component
+ */
+@customElement('gl-autocomplete')
+export class GlAutocomplete extends LitElement {
+	static override styles = [
+		scrollableBase,
+		css`
+			:host {
+				display: contents;
+			}
+
+			:host(:not([open])) {
+				display: none;
+			}
+
+			.scrollable {
+				--gl-elevation: var(--gl-shadow-popover);
+				--gl-elevation-border-color: var(--vscode-widget-border);
+
+				position: absolute;
+				top: 100%;
+				left: 0;
+				z-index: var(--gl-z-popover);
+				min-width: min(max(100%, 30rem), var(--_max-width, 100%));
+				max-width: var(--_max-width, none);
+				max-height: 20rem;
+				margin-top: var(--gl-space-2);
+				overflow-y: auto;
+				color: var(--vscode-quickInput-foreground);
+				background-color: var(--vscode-quickInput-background);
+				border-radius: var(--gl-radius-sm);
+
+				${elevatedSurface}
+			}
+
+			/* Override scrollbar thumb to not inherit the visible border-color */
+			.scrollable::-webkit-scrollbar-thumb {
+				border-color: transparent;
+			}
+
+			:host(:hover) .scrollable::-webkit-scrollbar-thumb,
+			:host(:focus-within) .scrollable::-webkit-scrollbar-thumb {
+				border-color: var(--vscode-scrollbarSlider-background);
+			}
+
+			.autocomplete-item {
+				display: flex;
+				flex-direction: row;
+				gap: var(--gl-space-8);
+				align-items: center;
+				padding: var(--gl-space-2) var(--gl-space-8);
+				cursor: pointer;
+			}
+
+			.autocomplete-item:hover,
+			.autocomplete-item.selected {
+				color: var(--vscode-list-activeSelectionForeground);
+				background-color: var(--vscode-list-activeSelectionBackground);
+
+				.autocomplete-item__icon {
+					color: var(--vscode-list-activeSelectionIconForeground);
+					opacity: 1;
+				}
+			}
+
+			.autocomplete-item__icon {
+				display: flex;
+				flex-shrink: 0;
+				align-items: center;
+				justify-content: center;
+				width: 1.6rem;
+				height: 1.6rem;
+				opacity: 0.8;
+			}
+
+			.autocomplete-item__content {
+				display: flex;
+				flex: 1;
+				flex-direction: column;
+				gap: 0.1rem;
+				min-width: 0;
+			}
+
+			.autocomplete-item__header {
+				display: flex;
+				gap: var(--gl-space-10);
+				align-items: center;
+				justify-content: space-between;
+			}
+
+			.autocomplete-item__primary {
+				font-family: var(--vscode-editor-font-family);
+				font-size: 0.9em;
+				font-weight: 600;
+			}
+
+			.autocomplete-item.selected .autocomplete-item__primary {
+				color: inherit;
+			}
+
+			.autocomplete-item__secondary {
+				overflow: hidden;
+				text-overflow: ellipsis;
+				font-size: 0.85em;
+				white-space: nowrap;
+				opacity: 0.7;
+			}
+
+			.autocomplete-item.selected .autocomplete-item__secondary {
+				opacity: 0.9;
+			}
+
+			.autocomplete-item__highlight {
+				font-weight: 700;
+				color: var(--vscode-list-focusHighlightForeground, var(--vscode-textLink-foreground));
+			}
+
+			.autocomplete-item.selected .autocomplete-item__highlight {
+				color: inherit;
+				text-decoration: underline;
+			}
+
+			.autocomplete-item.help {
+				gap: 0.5rem;
+				padding: var(--gl-space-2) var(--gl-space-8);
+				color: var(--vscode-list-inactiveSelectionForeground);
+				cursor: default;
+				background-color: var(--vscode-list-inactiveSelectionBackground) !important;
+				opacity: 1;
+			}
+
+			.autocomplete-item.help .autocomplete-item__content {
+				flex-direction: column;
+				gap: 0.1rem;
+				align-items: flex-start;
+			}
+
+			.autocomplete-description {
+				padding: var(--gl-space-6) var(--gl-space-8);
+				font-size: 0.85em;
+				line-height: 1.4;
+				color: var(--vscode-foreground);
+				background-color: var(--vscode-list-inactiveSelectionBackground);
+				border-bottom: var(--gl-border-width) solid var(--vscode-widget-border);
+			}
+
+			.autocomplete-description:empty {
+				display: none;
+			}
+
+			.autocomplete-description__example {
+				display: block;
+				margin-top: var(--gl-space-4);
+				font-size: 0.95em;
+				color: var(--vscode-descriptionForeground);
+			}
+
+			.autocomplete-item.help .autocomplete-item__primary {
+				font-weight: normal;
+				color: var(--vscode-descriptionForeground);
+			}
+
+			.autocomplete-item.help .autocomplete-item__secondary {
+				color: var(--vscode-descriptionForeground);
+				opacity: 0.8;
+			}
+		`,
+	];
+
+	@property({ type: Array })
+	items: CompletionItem[] = [];
+
+	@property({ type: Boolean, reflect: true })
+	open = false;
+
+	@state()
+	private _selectedIndex = -1;
+
+	private _resizeObserver?: ResizeObserver;
+
+	/**
+	 * Gets the currently selected index (readonly from outside)
+	 */
+	get selectedIndex(): number {
+		return this._selectedIndex;
+	}
+
+	override disconnectedCallback(): void {
+		super.disconnectedCallback?.();
+		this._resizeObserver?.disconnect();
+		this._resizeObserver = undefined;
+	}
+
+	override updated(changedProperties: Map<string | number | symbol, unknown>) {
+		super.updated(changedProperties);
+
+		// Clamp selection to valid range when items change
+		if (changedProperties.has('items')) {
+			if (this._selectedIndex >= this.items.length) {
+				this._selectedIndex = this.items.length > 0 ? this.items.length - 1 : -1;
+			}
+		}
+
+		if (changedProperties.has('open') || changedProperties.has('items')) {
+			if (this.open) {
+				this.constrainToViewport();
+				this._resizeObserver ??= new ResizeObserver(() => this.constrainToViewport());
+				this._resizeObserver.observe(document.documentElement);
+			} else if (changedProperties.has('open')) {
+				this._resizeObserver?.disconnect();
+			}
+		}
+
+		if (changedProperties.has('_selectedIndex') && this._selectedIndex >= 0) {
+			this.scrollToSelected();
+		}
+	}
+
+	private constrainToViewport() {
+		const containerLeft = this.parentElement?.getBoundingClientRect().left ?? 0;
+		const maxWidth = document.documentElement.clientWidth - containerLeft - 8;
+		if (maxWidth > 0) {
+			this.style.setProperty('--_max-width', `${maxWidth}px`);
+		}
+	}
+
+	/**
+	 * Gets the ID of the currently selected item for aria-activedescendant
+	 */
+	public getActiveDescendant(): string | undefined {
+		if (!this.open || !this.items.length || this.selectedIndex < 0) {
+			return undefined;
+		}
+		return `autocomplete-item-${this.selectedIndex}`;
+	}
+
+	/**
+	 * Calculates how many items are visible in the scrollable area
+	 */
+	private getVisibleItemCount(): number {
+		const scrollable = this.shadowRoot?.querySelector('.scrollable');
+		const firstItem = this.shadowRoot?.querySelector('.autocomplete-item') as HTMLElement;
+
+		if (!scrollable || !firstItem) {
+			return 5; // Default fallback
+		}
+
+		const scrollableHeight = scrollable.clientHeight;
+		const itemHeight = firstItem.offsetHeight;
+
+		// Account for description height if present
+		const description = this.shadowRoot?.querySelector('.autocomplete-description') as HTMLElement;
+		const descriptionHeight = description?.offsetHeight ?? 0;
+
+		const availableHeight = scrollableHeight - descriptionHeight;
+		return Math.floor(availableHeight / itemHeight);
+	}
+
+	/** Resets selection to no selection */
+	public resetSelection(): void {
+		this._selectedIndex = -1;
+	}
+
+	/** Sets selection to a specific index */
+	public setSelection(index: number): void {
+		this._selectedIndex = Math.max(-1, Math.min(this.items.length - 1, index));
+	}
+
+	/** Moves selection up by one item */
+	public selectPrevious(): void {
+		this._selectedIndex = Math.max(-1, this._selectedIndex - 1);
+	}
+
+	/** Moves selection down by one item */
+	public selectNext(): void {
+		this._selectedIndex = Math.min(this.items.length - 1, this._selectedIndex + 1);
+	}
+
+	/** Jumps selection up by a page (visible items) */
+	public pageUp(): void {
+		const pageSize = this.getVisibleItemCount();
+		this._selectedIndex = Math.max(0, this._selectedIndex - pageSize);
+	}
+
+	/** Jumps selection down by a page (visible items) */
+	public pageDown(): void {
+		const pageSize = this.getVisibleItemCount();
+		this._selectedIndex = Math.min(this.items.length - 1, this._selectedIndex + pageSize);
+	}
+
+	private selectItem(index: number) {
+		const item = this.items[index];
+		if (!item) return;
+
+		this.dispatchEvent(
+			new CustomEvent<CompletionSelectEvent>('gl-autocomplete-select', {
+				detail: { index: index, item: item },
+				bubbles: true,
+				composed: true,
+			}),
+		);
+	}
+
+	/**
+	 * Highlights matched characters in a string based on fuzzy match indices
+	 */
+	private highlightMatches(text: string, matchedIndices: number[]): TemplateResult | TemplateResult[] {
+		if (!matchedIndices.length) return html`${text}`;
+
+		const parts: TemplateResult[] = [];
+		let lastIndex = 0;
+
+		for (const index of matchedIndices) {
+			// Add unmatched text before this match
+			if (index > lastIndex) {
+				parts.push(html`${text.substring(lastIndex, index)}`);
+			}
+			// Add matched character with highlight
+			parts.push(html`<span class="autocomplete-item__highlight">${text[index]}</span>`);
+			lastIndex = index + 1;
+		}
+
+		// Add remaining unmatched text
+		if (lastIndex < text.length) {
+			parts.push(html`${text.substring(lastIndex)}`);
+		}
+
+		return parts;
+	}
+
+	private handleItemMouseDown(e: MouseEvent, index: number, _item: CompletionItem) {
+		// Prevent blur on the input element
+		e.preventDefault();
+		this.selectItem(index);
+	}
+
+	private scrollToSelected() {
+		const scrollable = this.shadowRoot?.querySelector('.scrollable');
+		const selectedEl = this.shadowRoot?.querySelector('.autocomplete-item.selected') as HTMLElement;
+
+		if (scrollable && selectedEl) {
+			// If the first item is selected, scroll to the very top to ensure description is visible
+			if (this.selectedIndex <= 0) {
+				scrollable.scrollTop = 0;
+				return;
+			}
+
+			const scrollableRect = scrollable.getBoundingClientRect();
+			const selectedRect = selectedEl.getBoundingClientRect();
+
+			if (selectedRect.bottom > scrollableRect.bottom) {
+				scrollable.scrollTop += selectedRect.bottom - scrollableRect.bottom;
+			} else if (selectedRect.top < scrollableRect.top) {
+				scrollable.scrollTop -= scrollableRect.top - selectedRect.top;
+			}
+		}
+	}
+
+	override render() {
+		return html`<div class="scrollable" role="listbox" tabindex="-1">
+			<div class="autocomplete-description">
+				<slot name="description"></slot>
+			</div>
+			${repeat(
+				this.items,
+				(item, index) => `${item.label}-${index}`,
+				(item, index) => {
+					const isSelected = index === this.selectedIndex;
+
+					return html`<div
+						id="autocomplete-item-${index}"
+						class="autocomplete-item ${isSelected ? 'selected' : ''}"
+						role="option"
+						aria-selected="${isSelected}"
+						@mousedown="${(e: MouseEvent) => this.handleItemMouseDown(e, index, item)}"
+					>
+						${
+							item.icon
+								? html`<div class="autocomplete-item__icon">
+										<code-icon icon="${item.icon}"></code-icon>
+									</div>`
+								: nothing
+						}
+						<div class="autocomplete-item__content">
+							<div class="autocomplete-item__header">
+								<div class="autocomplete-item__primary">
+									${
+										item.match
+											? this.highlightMatches(item.label, item.match.matchedIndices)
+											: item.label
+									}
+								</div>
+								${
+									item.description
+										? html`<div class="autocomplete-item__secondary">${item.description}</div>`
+										: nothing
+								}
+							</div>
+							${
+								item.detail
+									? html`<div class="autocomplete-item__secondary">${item.detail}</div>`
+									: nothing
+							}
+						</div>
+					</div>`;
+				},
+			)}
+		</div>`;
+	}
+}

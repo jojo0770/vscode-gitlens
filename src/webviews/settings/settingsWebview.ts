@@ -1,48 +1,52 @@
 import type { ConfigurationChangeEvent, ViewColumn } from 'vscode';
-import { ConfigurationTarget, Disposable, workspace } from 'vscode';
-import { extensionPrefix } from '../../constants';
-import { IssuesCloudHostIntegrationId } from '../../constants.integrations';
-import type { WebviewTelemetryContext } from '../../constants.telemetry';
-import type { Container } from '../../container';
-import { CommitFormatter } from '../../git/formatters/commitFormatter';
-import { GitCommit, GitCommitIdentity } from '../../git/models/commit';
-import { GitFileChange } from '../../git/models/fileChange';
-import { GitFileIndexStatus } from '../../git/models/fileStatus';
-import { PullRequest } from '../../git/models/pullRequest';
-import type { SubscriptionChangeEvent } from '../../plus/gk/subscriptionService';
-import type { ConnectionStateChangeEvent } from '../../plus/integrations/integrationService';
-import type { ConfigPath, CoreConfigPath } from '../../system/-webview/configuration';
-import { configuration } from '../../system/-webview/configuration';
-import { map } from '../../system/iterable';
-import type { CustomConfigPath, IpcMessage } from '../protocol';
-import {
-	assertsConfigKeyValue,
-	DidChangeConfigurationNotification,
-	isCustomConfigKey,
-	UpdateConfigurationCommand,
-} from '../protocol';
-import type { WebviewHost, WebviewProvider } from '../webviewProvider';
-import type { State } from './protocol';
-import {
-	DidChangeAccountNotification,
-	DidChangeConnectedJiraNotification,
-	DidOpenAnchorNotification,
-	GenerateConfigurationPreviewRequest,
-} from './protocol';
-import type { SettingsWebviewShowingArgs } from './registration';
+import { ConfigurationTarget, Disposable, EventEmitter, workspace } from 'vscode';
+import { GitCommit, GitCommitIdentity } from '@gitlens/git/models/commit.js';
+import { GitFileChange } from '@gitlens/git/models/fileChange.js';
+import { GitFileIndexStatus } from '@gitlens/git/models/fileStatus.js';
+import { PullRequest } from '@gitlens/git/models/pullRequest.js';
+import { map } from '@gitlens/utils/iterable.js';
+import { fileUri, joinUriPath } from '@gitlens/utils/uri.js';
+import { extensionPrefix } from '../../constants.js';
+import type { WebviewTelemetryContext } from '../../constants.telemetry.js';
+import type { Container } from '../../container.js';
+import { CommitFormatter } from '../../git/formatters/commitFormatter.js';
+import type { ConfigPath, CoreConfigPath } from '../../system/-webview/configuration.js';
+import { configuration } from '../../system/-webview/configuration.js';
+import type { CustomConfigPath } from '../protocol.js';
+import { assertsConfigKeyValue, isCustomConfigKey } from '../protocol.js';
+import type { EventVisibilityBuffer, SubscriptionTracker } from '../rpc/eventVisibilityBuffer.js';
+import { createRpcEventSubscription } from '../rpc/eventVisibilityBuffer.js';
+import { createSharedServices } from '../rpc/services/common.js';
+import { proxyServices } from '../rpc/services/proxy.js';
+import type { WebviewHost, WebviewProvider } from '../webviewProvider.js';
+import type { State } from './protocol.js';
+import type { SettingsWebviewShowingArgs } from './registration.js';
+import type {
+	AnchorRequestedEvent,
+	GenerateFormatPreviewParams,
+	SettingsConfigSnapshot,
+	SettingsInitialContext,
+	SettingsScope,
+	SettingsServices,
+	SettingsUpdateParams,
+} from './settingsService.js';
 
 export class SettingsWebviewProvider implements WebviewProvider<State, State, SettingsWebviewShowingArgs> {
 	private readonly _disposable: Disposable;
-	private _pendingJumpToAnchor: string | undefined;
+	private _pendingAnchor: string | undefined;
+	private _telemetryContext: Record<`context.${string}`, string | number | boolean | undefined> | undefined;
+
+	private readonly _onAnchorRequested = new EventEmitter<AnchorRequestedEvent>();
+	private readonly _onDidChangeConfig = new EventEmitter<SettingsConfigSnapshot>();
 
 	constructor(
 		protected readonly container: Container,
 		protected readonly host: WebviewHost<'gitlens.settings'>,
 	) {
 		this._disposable = Disposable.from(
+			this._onAnchorRequested,
+			this._onDidChangeConfig,
 			configuration.onDidChangeAny(this.onAnyConfigurationChanged, this),
-			container.subscription.onDidChange(this.onSubscriptionChanged, this),
-			container.integrations.onDidChangeConnectionState(this.onIntegrationConnectionStateChanged, this),
 		);
 	}
 
@@ -53,222 +57,226 @@ export class SettingsWebviewProvider implements WebviewProvider<State, State, Se
 	getTelemetryContext(): WebviewTelemetryContext {
 		return {
 			...this.host.getTelemetryContext(),
+			...this._telemetryContext,
 		};
 	}
 
-	private onSubscriptionChanged(e: SubscriptionChangeEvent) {
-		void this.host.notify(DidChangeAccountNotification, { hasAccount: e.current.account != null });
+	includeBootstrap(): State {
+		// Webview fetches all data via RPC — bootstrap only provides metadata
+		return this.host.baseWebviewState;
 	}
 
-	private onIntegrationConnectionStateChanged(e: ConnectionStateChangeEvent) {
-		if (e.key === 'jira') {
-			void this.host.notify(DidChangeConnectedJiraNotification, { hasConnectedJira: e.reason === 'connected' });
-		}
-	}
-
-	async getAccountState(): Promise<boolean> {
-		return (await this.container.subscription.getSubscription()).account != null;
-	}
-
-	async getJiraConnected(): Promise<boolean> {
-		const jira = await this.container.integrations.get(IssuesCloudHostIntegrationId.Jira);
-		if (jira == null) return false;
-		return jira.maybeConnected ?? jira.isConnected();
-	}
-
-	async includeBootstrap(): Promise<State> {
-		const scopes: ['user' | 'workspace', string][] = [['user', 'User']];
-		if (workspace.workspaceFolders?.length) {
-			scopes.push(['workspace', 'Workspace']);
-		}
-
-		return {
-			...this.host.baseWebviewState,
-			version: this.container.version,
-			// Make sure to get the raw config, not from the container which has the modes mixed in
-			config: configuration.getAll(true),
-			customSettings: this.getCustomSettings(),
-			scope: 'user',
-			scopes: scopes,
-			hasAccount: await this.getAccountState(),
-			hasConnectedJira: await this.getJiraConnected(),
-		};
-	}
-
-	onReloaded(): void {
-		void this.notifyDidChangeConfiguration();
-	}
-
-	onShowing?(
+	onShowing(
 		loading: boolean,
 		_options: { column?: ViewColumn; preserveFocus?: boolean },
 		...args: SettingsWebviewShowingArgs
-	): [boolean, Record<`context.${string}`, string | number | boolean> | undefined] {
+	): [boolean, Record<`context.${string}`, string | number | boolean | undefined> | undefined] {
 		const anchor = args[0];
 		if (anchor && typeof anchor === 'string') {
 			if (!loading && this.host.ready && this.host.visible) {
-				queueMicrotask(
-					() =>
-						void this.host.notify(DidOpenAnchorNotification, {
-							anchor: anchor,
-							scrollBehavior: 'smooth',
-						}),
-				);
-				return [true, undefined];
+				this._onAnchorRequested.fire({ anchor: anchor });
+			} else {
+				this._pendingAnchor = anchor;
 			}
-
-			this._pendingJumpToAnchor = anchor;
 		}
 
 		return [true, undefined];
 	}
 
-	onActiveChanged(active: boolean): void {
-		// Anytime the webview becomes active, make sure it has the most up-to-date config
-		if (active) {
-			void this.notifyDidChangeConfiguration();
-		}
+	getRpcServices(buffer?: EventVisibilityBuffer, tracker?: SubscriptionTracker): SettingsServices {
+		const shared = createSharedServices(
+			this.container,
+			this.host,
+			context => {
+				this._telemetryContext = context;
+			},
+			buffer,
+			tracker,
+		);
+
+		return proxyServices({
+			...shared,
+
+			settings: {
+				// ── Events ──
+
+				onAnchorRequested: createRpcEventSubscription<AnchorRequestedEvent>(
+					buffer,
+					'anchorRequested',
+					'save-last',
+					buffered => this._onAnchorRequested.event(buffered),
+					undefined,
+					tracker,
+				),
+
+				onConfigChanged: createRpcEventSubscription<SettingsConfigSnapshot>(
+					buffer,
+					'configChanged',
+					'save-last',
+					buffered => this._onDidChangeConfig.event(buffered),
+					undefined,
+					tracker,
+				),
+
+				// ── Initialization ──
+
+				getInitialContext: () => Promise.resolve(this.getInitialContext()),
+
+				// ── Mutations ──
+
+				update: params => this.updateConfiguration(params),
+
+				// ── Queries ──
+
+				generateFormatPreview: params => Promise.resolve(this.generateFormatPreview(params)),
+			},
+		} satisfies SettingsServices);
 	}
 
-	onReady(): void {
-		if (this._pendingJumpToAnchor != null) {
-			const anchor = this._pendingJumpToAnchor;
-			this._pendingJumpToAnchor = undefined;
-
-			void this.host.notify(DidOpenAnchorNotification, { anchor: anchor, scrollBehavior: 'auto' });
+	private getInitialContext(): SettingsInitialContext {
+		const scopes: SettingsScope[] = [['user', 'User']];
+		if (workspace.workspaceFolders?.length) {
+			scopes.push(['workspace', 'Workspace']);
 		}
+
+		const anchor = this._pendingAnchor;
+		this._pendingAnchor = undefined;
+
+		return {
+			...this.getConfigSnapshot(),
+			version: this.container.version,
+			scopes: scopes,
+			anchor: anchor,
+		};
 	}
 
-	async onMessageReceived(e: IpcMessage): Promise<void> {
-		if (e == null) return;
+	private getConfigSnapshot(): SettingsConfigSnapshot {
+		return {
+			// Make sure to get the raw config, not from the container which has the modes mixed in
+			config: configuration.getAll(true),
+			customSettings: this.getCustomSettings(),
+		};
+	}
 
-		switch (true) {
-			case UpdateConfigurationCommand.is(e): {
-				const { params } = e;
-				const target =
-					params.scope === 'workspace' ? ConfigurationTarget.Workspace : ConfigurationTarget.Global;
+	private async updateConfiguration(params: SettingsUpdateParams): Promise<void> {
+		const target = params.scope === 'workspace' ? ConfigurationTarget.Workspace : ConfigurationTarget.Global;
 
-				let key: keyof typeof params.changes;
-				for (key in params.changes) {
-					let value = params.changes[key];
-
-					if (isCustomConfigKey(key)) {
-						const customSetting = this.customSettings.get(key);
-						if (customSetting != null) {
-							if (typeof value === 'boolean') {
-								await customSetting.update(value);
-							} else {
-								debugger;
-							}
-						}
-
-						continue;
-					}
-
-					assertsConfigKeyValue(key, value);
-
-					const inspect = configuration.inspect(key)!;
-
-					if (value != null) {
-						if (params.scope === 'workspace') {
-							if (value === inspect.workspaceValue) continue;
-						} else {
-							if (value === inspect.globalValue && value !== inspect.defaultValue) continue;
-
-							if (value === inspect.defaultValue) {
-								value = undefined;
-							}
-						}
-					}
-
-					await configuration.update(key, value, target);
+		for (const key of Object.keys(params.changes) as (ConfigPath | CustomConfigPath)[]) {
+			if (isCustomConfigKey(key)) {
+				const value = params.changes[key];
+				const customSetting = this.customSettings.get(key);
+				if (customSetting != null && typeof value === 'boolean') {
+					await customSetting.update(value);
 				}
 
-				for (const key of params.removes) {
-					await configuration.update(key as ConfigPath, undefined, target);
-				}
-				break;
+				continue;
 			}
 
-			case GenerateConfigurationPreviewRequest.is(e):
-				switch (e.params.type) {
-					case 'commit':
-					case 'commit-uncommitted': {
-						const commit = new GitCommit(
-							this.container,
-							'~/code/eamodio/vscode-gitlens-demo',
-							'fe26af408293cba5b4bfd77306e1ac9ff7ccaef8',
-							new GitCommitIdentity('You', 'eamodio@gmail.com', new Date('2016-11-12T20:41:00.000Z')),
-							new GitCommitIdentity('You', 'eamodio@gmail.com', new Date('2020-11-01T06:57:21.000Z')),
-							e.params.type === 'commit-uncommitted' ? 'Uncommitted changes' : 'Supercharged',
-							['3ac1d3f51d7cf5f438cc69f25f6740536ad80fef'],
-							e.params.type === 'commit-uncommitted' ? 'Uncommitted changes' : 'Supercharged',
-							{
-								files: undefined,
-								filtered: {
-									files: [
-										new GitFileChange(
-											this.container,
-											'~/code/eamodio/vscode-gitlens-demo',
-											'code.ts',
-											GitFileIndexStatus.Modified,
-										),
-									],
-									pathspec: 'code.ts',
-								},
-							},
-							undefined,
-							[],
-						);
+			let value = params.changes[key];
+			assertsConfigKeyValue(key, value);
 
-						let includePullRequest = false;
-						switch (e.params.key) {
-							case configuration.name('currentLine.format'):
-								includePullRequest = configuration.get('currentLine.pullRequests.enabled');
-								break;
-							case configuration.name('statusBar.format'):
-								includePullRequest = configuration.get('statusBar.pullRequests.enabled');
-								break;
-						}
+			const inspect = configuration.inspect(key)!;
 
-						let pr: PullRequest | undefined;
-						if (includePullRequest) {
-							pr = new PullRequest(
-								{ id: 'github', name: 'GitHub', domain: 'github.com', icon: 'github' },
-								{
-									id: 'eamodio',
-									name: 'Eric Amodio',
-									avatarUrl: 'https://avatars1.githubusercontent.com/u/641685?s=32&v=4',
-									url: 'https://github.com/eamodio',
-								},
-								'1',
-								undefined,
-								'Supercharged',
-								'https://github.com/gitkraken/vscode-gitlens/pulls/1',
-								{ owner: 'gitkraken', repo: 'vscode-gitlens' },
-								'merged',
-								new Date('Sat, 12 Nov 2016 19:41:00 GMT'),
-								new Date('Sat, 12 Nov 2016 19:41:00 GMT'),
-								undefined,
-								new Date('Sat, 12 Nov 2016 20:41:00 GMT'),
-							);
-						}
+			if (value != null) {
+				if (params.scope === 'workspace') {
+					if (value === inspect.workspaceValue) continue;
+				} else {
+					if (value === inspect.globalValue && value !== inspect.defaultValue) continue;
 
-						let preview;
-						try {
-							preview = CommitFormatter.fromTemplate(e.params.format, commit, {
-								dateFormat: configuration.get('defaultDateFormat'),
-								pullRequest: pr,
-								messageTruncateAtNewLine: true,
-							});
-						} catch {
-							preview = 'Invalid format';
-						}
-
-						await this.host.respond(GenerateConfigurationPreviewRequest, e, { preview: preview });
+					if (value === inspect.defaultValue) {
+						value = undefined;
 					}
 				}
+			}
+
+			await configuration.update(key, value, target);
+		}
+
+		for (const key of params.removes) {
+			await configuration.update(key as ConfigPath, undefined, target);
+		}
+	}
+
+	private generateFormatPreview(params: GenerateFormatPreviewParams): string {
+		const commit = new GitCommit(
+			'~/code/eamodio/vscode-gitlens-demo',
+			'fe26af408293cba5b4bfd77306e1ac9ff7ccaef8',
+			new GitCommitIdentity(
+				'Eric Amodio',
+				'eamodio@gmail.com',
+				new Date('2016-11-12T20:41:00.000Z'),
+				undefined,
+				true,
+			),
+			new GitCommitIdentity(
+				'Eric Amodio',
+				'eamodio@gmail.com',
+				new Date('2020-11-01T06:57:21.000Z'),
+				undefined,
+				true,
+			),
+			params.type === 'commit-uncommitted' ? 'Uncommitted changes' : 'Supercharged',
+			['3ac1d3f51d7cf5f438cc69f25f6740536ad80fef'],
+			params.type === 'commit-uncommitted' ? 'Uncommitted changes' : 'Supercharged',
+			{
+				files: undefined,
+				filtered: {
+					files: [
+						new GitFileChange(
+							'~/code/eamodio/vscode-gitlens-demo',
+							'code.ts',
+							GitFileIndexStatus.Modified,
+							joinUriPath(fileUri('/code/eamodio/vscode-gitlens-demo'), 'code.ts'),
+						),
+					],
+					pathspec: 'code.ts',
+				},
+			},
+			undefined,
+			[],
+		);
+
+		let includePullRequest = false;
+		switch (params.key) {
+			case configuration.name('currentLine.format'):
+				includePullRequest = configuration.get('currentLine.pullRequests.enabled');
 				break;
+			case configuration.name('statusBar.format'):
+				includePullRequest = configuration.get('statusBar.pullRequests.enabled');
+				break;
+		}
+
+		let pr: PullRequest | undefined;
+		if (includePullRequest) {
+			pr = new PullRequest(
+				{ id: 'github', name: 'GitHub', domain: 'github.com', icon: 'github' },
+				{
+					id: 'eamodio',
+					name: 'Eric Amodio',
+					avatarUrl: 'https://avatars1.githubusercontent.com/u/641685?s=32&v=4',
+					url: 'https://github.com/eamodio',
+				},
+				'1',
+				undefined,
+				'Supercharged',
+				'https://github.com/gitkraken/vscode-gitlens/pulls/1',
+				{ owner: 'gitkraken', repo: 'vscode-gitlens' },
+				'merged',
+				new Date('Sat, 12 Nov 2016 19:41:00 GMT'),
+				new Date('Sat, 12 Nov 2016 19:41:00 GMT'),
+				undefined,
+				new Date('Sat, 12 Nov 2016 20:41:00 GMT'),
+			);
+		}
+
+		try {
+			return CommitFormatter.fromTemplate(params.format, commit, {
+				dateFormat: configuration.get('defaultDateFormat'),
+				pullRequest: pr,
+				messageTruncateAtNewLine: true,
+			});
+		} catch {
+			return 'Invalid format';
 		}
 	}
 
@@ -280,53 +288,43 @@ export class SettingsWebviewProvider implements WebviewProvider<State, State, Se
 			if (!notify) return;
 		}
 
-		void this.notifyDidChangeConfiguration();
+		this._onDidChangeConfig.fire(this.getConfigSnapshot());
 	}
 
 	private _customSettings: Map<CustomConfigPath, CustomSetting> | undefined;
 	private get customSettings() {
-		if (this._customSettings == null) {
-			this._customSettings = new Map<CustomConfigPath, CustomSetting>([
-				[
-					'rebaseEditor.enabled',
-					{
-						name: 'workbench.editorAssociations',
-						enabled: () => this.container.rebaseEditor.enabled,
-						update: this.container.rebaseEditor.setEnabled,
-					},
-				],
-				[
-					'currentLine.useUncommittedChangesFormat',
-					{
-						name: 'currentLine.uncommittedChangesFormat',
-						enabled: () => configuration.get('currentLine.uncommittedChangesFormat') != null,
-						update: async enabled =>
-							configuration.updateEffective(
-								'currentLine.uncommittedChangesFormat',
-								// eslint-disable-next-line no-template-curly-in-string
-								enabled ? '✏️ ${ago}' : null,
-							),
-					},
-				],
-			]);
-		}
+		this._customSettings ??= new Map<CustomConfigPath, CustomSetting>([
+			[
+				'rebaseEditor.enabled',
+				{
+					name: 'workbench.editorAssociations',
+					enabled: () => this.container.rebaseEditor.enabled,
+					update: enabled => this.container.rebaseEditor.setEnabled(enabled),
+				},
+			],
+			[
+				'currentLine.useUncommittedChangesFormat',
+				{
+					name: 'currentLine.uncommittedChangesFormat',
+					enabled: () => configuration.get('currentLine.uncommittedChangesFormat') != null,
+					update: async enabled =>
+						configuration.updateEffective(
+							'currentLine.uncommittedChangesFormat',
+							// oxlint-disable-next-line no-template-curly-in-string
+							enabled ? '\u270F\ufe0f ${ago}' : null,
+						),
+				},
+			],
+		]);
 		return this._customSettings;
 	}
 
-	protected getCustomSettings(): Record<string, boolean> {
+	private getCustomSettings(): Record<string, boolean> {
 		const customSettings: Record<string, boolean> = Object.create(null);
 		for (const [key, setting] of this.customSettings) {
 			customSettings[key] = setting.enabled();
 		}
 		return customSettings;
-	}
-
-	private notifyDidChangeConfiguration() {
-		// Make sure to get the raw config, not from the container which has the modes mixed in
-		return this.host.notify(DidChangeConfigurationNotification, {
-			config: configuration.getAll(true),
-			customSettings: this.getCustomSettings(),
-		});
 	}
 }
 

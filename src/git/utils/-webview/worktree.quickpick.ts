@@ -1,13 +1,11 @@
 import type { QuickInputButton } from 'vscode';
 import { ThemeIcon } from 'vscode';
-import { GlyphChars } from '../../../constants';
-import { Container } from '../../../container';
-import type { QuickPickItemOfT } from '../../../quickpicks/items/common';
-import { pad } from '../../../system/string';
-import type { GitStatus } from '../../models/status';
-import type { GitWorktree } from '../../models/worktree';
-import { shortenRevision } from '../revision.utils';
-import { getBranchIconPath } from './icons';
+import { GitWorktree } from '@gitlens/git/models/worktree.js';
+import { pad } from '@gitlens/utils/string.js';
+import { GlyphChars } from '../../../constants.js';
+import { Container } from '../../../container.js';
+import type { QuickPickItemOfT } from '../../../quickpicks/items/common.js';
+import { getBranchIconPath } from './icons.js';
 
 export interface WorktreeQuickPickItem extends QuickPickItemOfT<GitWorktree> {
 	readonly opened: boolean;
@@ -22,11 +20,11 @@ export function createWorktreeQuickPickItem(
 		alwaysShow?: boolean;
 		buttons?: QuickInputButton[];
 		checked?: boolean;
+		hasChanges?: boolean | undefined;
 		includeStatus?: boolean;
 		message?: boolean;
 		path?: boolean;
 		type?: boolean;
-		status?: GitStatus;
 	},
 ): WorktreeQuickPickItem {
 	let description = '';
@@ -38,41 +36,37 @@ export function createWorktreeQuickPickItem(
 	if (options?.includeStatus) {
 		let status = '';
 		let blank = 0;
-		if (options?.status != null) {
-			if (options.status.upstream?.missing) {
-				status += GlyphChars.Warning;
-				blank += 3;
-			} else {
-				if (options.status.upstream?.state.behind) {
-					status += GlyphChars.ArrowDown;
-				} else {
-					blank += 2;
-				}
-
-				if (options.status.upstream?.state.ahead) {
-					status += GlyphChars.ArrowUp;
-				} else {
-					blank += 2;
-				}
-
-				if (options.status.hasChanges) {
-					status += '\u00B1';
-				} else {
-					blank += 2;
-				}
-			}
+		if (worktree.branch?.upstream?.missing) {
+			status += GlyphChars.Warning;
+			blank += 3;
 		} else {
-			blank += 6;
+			if (worktree.branch?.upstream?.state.behind) {
+				status += GlyphChars.ArrowDown;
+			} else {
+				blank += 2;
+			}
+
+			if (worktree.branch?.upstream?.state.ahead) {
+				status += GlyphChars.ArrowUp;
+			} else {
+				blank += 2;
+			}
+
+			if (options?.hasChanges) {
+				status += '\u00B1';
+			} else {
+				blank += 2;
+			}
 		}
 
 		if (blank > 0) {
 			status += ' '.repeat(blank);
 		}
 
-		const formattedDate = worktree.formattedDate;
+		const formattedDate = GitWorktree.formatDateWithStyle(worktree, Container.instance.BranchDateFormatting);
 		if (formattedDate) {
 			if (description) {
-				description += `  ${GlyphChars.Dot}  ${worktree.formattedDate}`;
+				description += `  ${GlyphChars.Dot}  ${formattedDate}`;
 			} else {
 				description = formattedDate;
 			}
@@ -95,7 +89,7 @@ export function createWorktreeQuickPickItem(
 			iconPath = getBranchIconPath(Container.instance, worktree.branch);
 			break;
 		case 'detached':
-			label = shortenRevision(worktree.sha);
+			label = worktree.name;
 			iconPath = new ThemeIcon('git-commit');
 			break;
 	}
@@ -112,8 +106,8 @@ export function createWorktreeQuickPickItem(
 		buttons: options?.buttons,
 		picked: picked,
 		item: worktree,
+		hasChanges: options?.hasChanges,
 		opened: worktree.opened,
-		hasChanges: options?.status?.hasChanges,
 		iconPath: iconPath,
 	};
 

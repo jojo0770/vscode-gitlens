@@ -1,19 +1,21 @@
 import { TreeItem, TreeItemCollapsibleState } from 'vscode';
-import type { FilesComparison } from '../../git/actions/commit';
-import { GitUri } from '../../git/gitUri';
-import type { GitBranch } from '../../git/models/branch';
-import type { GitFileWithCommit } from '../../git/models/file';
-import { createRevisionRange } from '../../git/utils/revision.utils';
-import { makeHierarchical } from '../../system/array';
-import { filter, flatMap, groupByMap, map } from '../../system/iterable';
-import { joinPaths, normalizePath } from '../../system/path';
-import { pluralize, sortCompare } from '../../system/string';
-import type { ViewsWithCommits } from '../viewBase';
-import { ContextValues, getViewNodeId, ViewNode } from './abstract/viewNode';
-import type { BranchTrackingStatus } from './branchTrackingStatusNode';
-import type { FileNode } from './folderNode';
-import { FolderNode } from './folderNode';
-import { StatusFileNode } from './statusFileNode';
+import type { GitBranch } from '@gitlens/git/models/branch.js';
+import { GitCommit } from '@gitlens/git/models/commit.js';
+import type { GitFileWithCommit } from '@gitlens/git/models/file.js';
+import { createRevisionRange } from '@gitlens/git/utils/revision.utils.js';
+import { makeHierarchical } from '@gitlens/utils/array.js';
+import { filter, flatMap, groupByMap, map } from '@gitlens/utils/iterable.js';
+import { joinPaths, normalizePath } from '@gitlens/utils/path.js';
+import { pluralize, sortCompare } from '@gitlens/utils/string.js';
+import type { FilesComparison } from '../../git/actions/commit.js';
+import { GitUri } from '../../git/gitUri.js';
+import { getCommitDate } from '../../git/utils/-webview/commit.utils.js';
+import type { ViewsWithCommits } from '../viewBase.js';
+import { ContextValues, getViewNodeId, ViewNode } from './abstract/viewNode.js';
+import type { BranchTrackingStatus } from './branchTrackingStatusNode.js';
+import type { FileNode } from './folderNode.js';
+import { FolderNode } from './folderNode.js';
+import { StatusFileNode } from './statusFileNode.js';
 
 export class BranchTrackingStatusFilesNode extends ViewNode<'tracking-status-files', ViewsWithCommits> {
 	constructor(
@@ -44,7 +46,7 @@ export class BranchTrackingStatusFilesNode extends ViewNode<'tracking-status-fil
 	async getFilesComparison(): Promise<FilesComparison> {
 		const grouped = await this.getGroupedFiles();
 		return {
-			files: [...map(grouped, ([, files]) => files[files.length - 1])],
+			files: [...map(grouped, ([, files]) => files.at(-1)!)],
 			repoPath: this.repoPath,
 			ref1: this.ref1,
 			ref2: this.ref2,
@@ -66,7 +68,8 @@ export class BranchTrackingStatusFilesNode extends ViewNode<'tracking-status-fil
 		await Promise.allSettled(
 			map(
 				filter(log.commits.values(), c => c.fileset?.files == null),
-				c => c.ensureFullDetails(),
+
+				c => GitCommit.ensureFullDetails(c),
 			),
 		);
 
@@ -74,7 +77,7 @@ export class BranchTrackingStatusFilesNode extends ViewNode<'tracking-status-fil
 			...flatMap(log.commits.values(), c => c.anyFiles?.map<GitFileWithCommit>(f => ({ ...f, commit: c })) ?? []),
 		];
 
-		files.sort((a, b) => b.commit.date.getTime() - a.commit.date.getTime());
+		files.sort((a, b) => getCommitDate(b.commit).getTime() - getCommitDate(a.commit).getTime());
 
 		const groups = groupByMap(files, s => s.path);
 		return groups;

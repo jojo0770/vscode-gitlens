@@ -11,8 +11,7 @@ import {
 	ATTR_DEVICE_ID,
 	ATTR_OS_TYPE,
 } from '@opentelemetry/semantic-conventions/incubating';
-import type { HttpsProxyAgent } from 'https-proxy-agent';
-import type { TelemetryContext, TelemetryProvider } from './telemetry';
+import type { TelemetryContext, TelemetryProvider } from './telemetry.js';
 
 enum CompressionAlgorithm {
 	NONE = 'none',
@@ -25,11 +24,10 @@ export class OpenTelemetryProvider implements TelemetryProvider {
 	private readonly provider: BasicTracerProvider;
 	private readonly tracer: Tracer;
 
-	constructor(context: TelemetryContext, agent?: HttpsProxyAgent, debugging?: boolean) {
+	constructor(context: TelemetryContext, debugging?: boolean) {
 		const exporter = new OTLPTraceExporter({
 			url: debugging ? 'https://otel-dev.gitkraken.com/v1/traces' : 'https://otel.gitkraken.com/v1/traces',
 			compression: CompressionAlgorithm.GZIP,
-			httpAgentOptions: agent?.options,
 		});
 
 		const spanProcessors: SpanProcessor[] = [];
@@ -46,6 +44,7 @@ export class OpenTelemetryProvider implements TelemetryProvider {
 			resource: resourceFromAttributes({
 				[ATTR_SERVICE_NAME]: 'gitlens',
 				[ATTR_SERVICE_VERSION]: context.extensionVersion,
+				// oxlint-disable-next-line typescript/no-deprecated -- intentional dual-write with the current attr below for backend compatibility
 				[ATTR_DEPLOYMENT_ENVIRONMENT]: context.env,
 				[ATTR_DEPLOYMENT_ENVIRONMENT_NAME]: context.env,
 				[ATTR_DEVICE_ID]: context.machineId,

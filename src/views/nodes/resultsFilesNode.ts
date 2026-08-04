@@ -1,19 +1,19 @@
 import { ThemeIcon, TreeItem, TreeItemCollapsibleState } from 'vscode';
-import type { FilesComparison } from '../../git/actions/commit';
-import { GitUri } from '../../git/gitUri';
-import type { GitFile } from '../../git/models/file';
-import type { FilesQueryResults } from '../../git/queryResults';
-import { makeHierarchical } from '../../system/array';
-import { debug } from '../../system/decorators/log';
-import { map } from '../../system/iterable';
-import { joinPaths, normalizePath } from '../../system/path';
-import { cancellable, PromiseCancelledError } from '../../system/promise';
-import { pluralize, sortCompare } from '../../system/string';
-import type { ViewsWithCommits } from '../viewBase';
-import { ContextValues, getViewNodeId, ViewNode } from './abstract/viewNode';
-import type { FileNode } from './folderNode';
-import { FolderNode } from './folderNode';
-import { ResultsFileNode } from './resultsFileNode';
+import type { GitFile } from '@gitlens/git/models/file.js';
+import { makeHierarchical } from '@gitlens/utils/array.js';
+import { trace } from '@gitlens/utils/decorators/log.js';
+import { map } from '@gitlens/utils/iterable.js';
+import { joinPaths, normalizePath } from '@gitlens/utils/path.js';
+import { cancellable, PromiseCancelledError } from '@gitlens/utils/promise.js';
+import { pluralize, sortCompare } from '@gitlens/utils/string.js';
+import type { FilesComparison } from '../../git/actions/commit.js';
+import { GitUri } from '../../git/gitUri.js';
+import type { FilesQueryResults } from '../../git/queryResults.js';
+import type { ViewsWithCommits } from '../viewBase.js';
+import { ContextValues, getViewNodeId, ViewNode } from './abstract/viewNode.js';
+import type { FileNode } from './folderNode.js';
+import { FolderNode } from './folderNode.js';
+import { ResultsFileNode } from './resultsFileNode.js';
 
 type State = {
 	filter: FilesQueryFilter | undefined;
@@ -196,7 +196,7 @@ export class ResultsFilesNode extends ViewNode<'results-files', ViewsWithCommits
 		return item;
 	}
 
-	@debug()
+	@trace()
 	override refresh(reset: boolean = false): void {
 		if (!reset) return;
 
@@ -248,9 +248,7 @@ export class ResultsFilesNode extends ViewNode<'results-files', ViewsWithCommits
 			}
 		}
 
-		if (results.filtered == null) {
-			results.filtered = new Map();
-		}
+		results.filtered ??= new Map();
 		results.filtered.set(filter, filterTo == null ? [] : results.files!.filter(f => filterTo.has(f.path)));
 	}
 }

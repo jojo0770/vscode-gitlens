@@ -1,14 +1,15 @@
 import type { TextDocumentShowOptions, TextEditor, Uri } from 'vscode';
-import type { FileAnnotationType } from '../config';
-import type { Container } from '../container';
-import { openFileAtRevision } from '../git/actions/commit';
-import { GitUri } from '../git/gitUri';
-import { deletedOrMissing } from '../git/models/revision';
-import { showGenericErrorMessage } from '../messages';
-import { command } from '../system/-webview/command';
-import { Logger } from '../system/logger';
-import { ActiveEditorCommand } from './commandBase';
-import { getCommandUri } from './commandBase.utils';
+import { GitCommit } from '@gitlens/git/models/commit.js';
+import { deletedOrMissing } from '@gitlens/git/models/revision.js';
+import { Logger } from '@gitlens/utils/logger.js';
+import type { FileAnnotationType } from '../config.js';
+import type { Container } from '../container.js';
+import { openFileAtRevision } from '../git/actions/commit.js';
+import { GitUri } from '../git/gitUri.js';
+import { showGenericErrorMessage } from '../messages.js';
+import { command } from '../system/-webview/command.js';
+import { ActiveEditorCommand } from './commandBase.js';
+import { getCommandUri } from './commandBase.utils.js';
 
 export interface OpenRevisionFileCommandArgs {
 	revisionUri?: Uri;
@@ -21,7 +22,7 @@ export interface OpenRevisionFileCommandArgs {
 @command()
 export class OpenRevisionFileCommand extends ActiveEditorCommand {
 	constructor(private readonly container: Container) {
-		super('gitlens.openRevisionFile');
+		super(['gitlens.openRevisionFile', 'gitlens.openRevisionFile:editor/title']);
 	}
 
 	async execute(editor?: TextEditor, uri?: Uri, args?: OpenRevisionFileCommandArgs): Promise<void> {
@@ -31,9 +32,7 @@ export class OpenRevisionFileCommand extends ActiveEditorCommand {
 		const gitUri = await GitUri.fromUri(uri);
 
 		args = { ...args };
-		if (args.line == null) {
-			args.line = editor?.selection.active.line ?? 0;
-		}
+		args.line ??= editor?.selection.active.line ?? 0;
 
 		try {
 			if (args.revisionUri == null) {
@@ -43,7 +42,10 @@ export class OpenRevisionFileCommand extends ActiveEditorCommand {
 
 					args.revisionUri =
 						commit?.file?.status === 'D'
-							? svc.getRevisionUri((await commit.getPreviousSha()) ?? deletedOrMissing, commit.file)
+							? svc.getRevisionUri(
+									(await GitCommit.getPreviousSha(commit)) ?? deletedOrMissing,
+									commit.file,
+								)
 							: this.container.git.getRevisionUriFromGitUri(gitUri);
 				} else {
 					args.revisionUri = this.container.git.getRevisionUriFromGitUri(gitUri);

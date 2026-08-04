@@ -1,13 +1,13 @@
 import { Disposable } from 'vscode';
-import type { RepositoriesChangeEvent } from '../../../git/gitProviderService';
-import { unknownGitUri } from '../../../git/gitUri';
-import type { SubscriptionChangeEvent } from '../../../plus/gk/subscriptionService';
-import { debug } from '../../../system/decorators/log';
-import { weakEvent } from '../../../system/event';
-import { szudzikPairing } from '../../../system/function';
-import type { View } from '../../viewBase';
-import { SubscribeableViewNode } from './subscribeableViewNode';
-import type { ViewNode } from './viewNode';
+import { trace } from '@gitlens/utils/decorators/log.js';
+import { weakEvent } from '@gitlens/utils/event.js';
+import { szudzikPairing } from '@gitlens/utils/function.js';
+import type { RepositoriesChangeEvent } from '../../../git/gitProviderService.js';
+import { unknownGitUri } from '../../../git/gitUri.js';
+import type { SubscriptionChangeEvent } from '../../../plus/gk/subscriptionService.js';
+import type { View } from '../../viewBase.js';
+import { SubscribeableViewNode } from './subscribeableViewNode.js';
+import type { ViewNode } from './viewNode.js';
 
 export abstract class RepositoriesSubscribeableNode<
 	TView extends View = View,
@@ -29,11 +29,12 @@ export abstract class RepositoriesSubscribeableNode<
 		return szudzikPairing(this.view.container.git.etag, this.view.container.subscription.etag);
 	}
 
-	@debug()
+	@trace()
 	protected subscribe(): Disposable | Promise<Disposable> {
 		return Disposable.from(
 			weakEvent(this.view.container.git.onDidChangeRepositories, this.onRepositoriesChanged, this),
 			weakEvent(this.view.container.subscription.onDidChange, this.onSubscriptionChanged, this),
+			weakEvent(this.view.onDidChangeRepositoryFilter, this.onViewRepositoryFilterChanged, this),
 		);
 	}
 
@@ -45,5 +46,9 @@ export abstract class RepositoriesSubscribeableNode<
 		if (e.current.plan !== e.previous.plan) {
 			void this.triggerChange(true);
 		}
+	}
+
+	private onViewRepositoryFilterChanged() {
+		void this.triggerChange(true);
 	}
 }

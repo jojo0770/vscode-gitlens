@@ -1,6 +1,12 @@
 export type CustomEditorTypes = 'rebase';
 export type CustomEditorIds = `gitlens.${CustomEditorTypes}`;
 
+export type CustomEditorTypeFromId<T extends CustomEditorIds> = T extends `gitlens.${infer U}`
+	? U extends CustomEditorTypes
+		? U
+		: never
+	: never;
+
 export type TreeViewTypes =
 	| 'branches'
 	| 'commits'
@@ -37,11 +43,36 @@ export type GroupableTreeViewTypes = Extract<
 >;
 export type GroupableTreeViewIds<T extends GroupableTreeViewTypes = GroupableTreeViewTypes> = TreeViewIds<T>;
 
-export type WebviewTypes = 'graph' | 'patchDetails' | 'settings' | 'timeline';
-export type WebviewIds = `gitlens.${WebviewTypes}`;
+/** Grouped views that require a local repository and are unavailable for virtual repositories */
+export const localOnlyGroupedViews: ReadonlySet<GroupableTreeViewTypes> = new Set(['worktrees', 'stashes']);
 
-export type WebviewViewTypes = 'commitDetails' | 'graph' | 'graphDetails' | 'home' | 'patchDetails' | 'timeline';
+export type WebviewPanelTypes = 'allowedSigners' | 'graph' | 'patchDetails' | 'settings' | 'timeline';
+export type WebviewPanelIds = `gitlens.${WebviewPanelTypes}`;
+
+export type WebviewViewTypes = 'commitDetails' | 'graph' | 'home' | 'patchDetails' | 'timeline' | 'welcome';
 export type WebviewViewIds<T extends WebviewViewTypes = WebviewViewTypes> = `gitlens.views.${T}`;
+
+export type WebviewTypes = CustomEditorTypes | WebviewPanelTypes | WebviewViewTypes;
+export type WebviewIds = CustomEditorIds | WebviewPanelIds | WebviewViewIds;
+
+export type WebviewPanelTypeFromId<T extends WebviewPanelIds> = T extends `gitlens.${infer U}`
+	? U extends WebviewPanelTypes
+		? U
+		: never
+	: never;
+export type WebviewViewTypeFromId<T extends WebviewViewIds> = T extends `gitlens.views.${infer U}`
+	? U extends WebviewViewTypes
+		? U
+		: never
+	: never;
+
+export type WebviewTypeFromId<T extends WebviewIds | CustomEditorIds> = T extends CustomEditorIds
+	? CustomEditorTypeFromId<T>
+	: T extends WebviewPanelIds
+		? WebviewPanelTypeFromId<T>
+		: T extends WebviewViewIds
+			? WebviewViewTypeFromId<T>
+			: never;
 
 export type ViewTypes = TreeViewTypes | WebviewViewTypes;
 export type ViewIds = TreeViewIds | WebviewViewIds;
@@ -60,7 +91,6 @@ export type CoreViewContainerIds = `workbench.view.${CoreViewContainerTypes}`;
 // 	'contributors',
 // 	'fileHistory',
 // 	'graph',
-// 	'graphDetails',
 // 	'home',
 // 	'lineHistory',
 // 	'remotes',
@@ -78,36 +108,33 @@ export const viewIdsByDefaultContainerId = new Map<ViewContainerIds | CoreViewCo
 		'workbench.view.scm',
 		['branches', 'commits', 'remotes', 'repositories', 'stashes', 'tags', 'worktrees', 'contributors'],
 	],
-	['workbench.view.extension.gitlensPanel', ['graph', 'graphDetails']],
+	['workbench.view.extension.gitlensPanel', ['graph']],
 	[
 		'workbench.view.extension.gitlensInspect',
 		['commitDetails', 'fileHistory', 'lineHistory', 'timeline', 'searchAndCompare'],
 	],
-	['workbench.view.extension.gitlens', ['home', 'workspaces']],
+	['workbench.view.extension.gitlens', ['welcome', 'home', 'workspaces']],
 ]);
 
 export type TreeViewRefNodeTypes = 'branch' | 'commit' | 'stash' | 'tag';
 export const treeViewRefNodeTypes: TreeViewRefNodeTypes[] = ['branch', 'commit', 'stash', 'tag'];
-export type TreeViewRefFileNodeTypes = 'commit-file' | 'file-commit' | 'results-file' | 'stash-file';
+export type TreeViewRefFileNodeTypes =
+	| 'commit-file'
+	| 'file-commit'
+	| 'results-file'
+	| 'stash-file'
+	| 'status-file'
+	| 'uncommitted-file';
 export const treeViewRefFileNodeTypes: TreeViewRefFileNodeTypes[] = [
 	'commit-file',
 	'file-commit',
 	'results-file',
 	'stash-file',
-];
-export type TreeViewFileNodeTypes =
-	| TreeViewRefFileNodeTypes
-	| 'conflict-file'
-	// | 'folder'
-	| 'status-file'
-	| 'uncommitted-file';
-export const treeViewFileNodeTypes: TreeViewFileNodeTypes[] = [
-	...treeViewRefFileNodeTypes,
-	'conflict-file',
-	// 'folder',
 	'status-file',
 	'uncommitted-file',
 ];
+export type TreeViewFileNodeTypes = TreeViewRefFileNodeTypes | 'conflict-file';
+export const treeViewFileNodeTypes: TreeViewFileNodeTypes[] = [...treeViewRefFileNodeTypes, 'conflict-file'];
 export type TreeViewSubscribableNodeTypes =
 	| 'autolinks'
 	| 'commits-current-branch'
@@ -129,7 +156,6 @@ export type TreeViewNodeTypes =
 	| 'autolink'
 	| 'branch-tag-folder'
 	| 'branches'
-	| 'compare-picker'
 	| 'contributor'
 	| 'contributors'
 	| 'conflict-files'

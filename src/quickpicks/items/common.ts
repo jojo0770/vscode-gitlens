@@ -1,13 +1,15 @@
 import type { QuickPickItem, ThemeIcon, Uri } from 'vscode';
 import { commands, QuickPickItemKind } from 'vscode';
-import type { Keys } from '../../constants';
-import type { GlCommands } from '../../constants.commands';
-import type { Directive } from './directive';
+import type { GlCommands } from '../../constants.commands.js';
+import type { Keys } from '../../constants.js';
+import type { Directive } from './directive.js';
 
 declare module 'vscode' {
 	interface QuickPickItem {
-		onDidSelect?(): void;
+		onDidSelect?(quickpick: QuickPick<QuickPickItem>): void | Promise<void>;
 		onDidPressKey?(key: Keys): Promise<void>;
+		/** Available in VS Code >= 1.108. When set with `iconPath: ThemeIcon.File`, derives file icons from the icon theme. */
+		resourceUri?: Uri;
 	}
 }
 

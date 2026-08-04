@@ -1,12 +1,11 @@
 import { authentication, extensions } from 'vscode';
-import { wrapForForcedInsecureSSL } from '@env/fetch';
-import type { IntegrationIds } from '../../../../constants.integrations';
-import type { Container } from '../../../../container';
-import { sequentialize } from '../../../../system/function';
-import { Logger } from '../../../../system/logger';
-import { getLogScope } from '../../../../system/logger.scope';
-import type { IntegrationAuthenticationSessionDescriptor } from '../../../integrations/authentication/integrationAuthenticationProvider';
-import type { ProviderAuthenticationSession } from '../../../integrations/authentication/models';
+import { wrapForForcedInsecureSSL } from '@env/fetch.js';
+import type { IntegrationAuthenticationSessionDescriptor } from '@gitlens/integrations/authentication/integrationAuthenticationProvider.js';
+import type { ProviderAuthenticationSession } from '@gitlens/integrations/authentication/models.js';
+import type { IntegrationIds } from '@gitlens/integrations/constants.js';
+import { sequentialize } from '@gitlens/utils/function.js';
+import { getScopedLogger, maybeStartScopedLogger } from '@gitlens/utils/logger.scoped.js';
+import type { Container } from '../../../../container.js';
 
 const failedAuthProviderIds = new Set<string>();
 
@@ -25,13 +24,13 @@ export const getBuiltInIntegrationSession = sequentialize(
 			async () => {
 				if (failedAuthProviderIds.has(id)) return undefined;
 
-				const scope = getLogScope();
+				using scope = getScopedLogger() ?? maybeStartScopedLogger(`getBuiltInIntegrationSession(${id})`);
 
 				if (id === 'github') {
 					const extension = extensions.getExtension('vscode.github-authentication');
 					if (extension == null) {
 						failedAuthProviderIds.add(id);
-						Logger.warn(scope, `Authentication provider '${id}' is not registered; User has disabled it`);
+						scope?.warn(`Authentication provider '${id}' is not registered; User has disabled it`);
 						return undefined;
 					}
 				}
@@ -47,19 +46,17 @@ export const getBuiltInIntegrationSession = sequentialize(
 					return {
 						...session,
 						cloud: false,
+						type: undefined,
 						domain: descriptor.domain,
 					};
 				} catch (ex) {
 					if (typeof ex === 'string' && ex === 'Timed out waiting for authentication provider to register') {
 						failedAuthProviderIds.add(id);
-						Logger.warn(
-							scope,
-							`Authentication provider '${id}' is not registered; User likely has disabled it`,
-						);
+						scope?.warn(`Authentication provider '${id}' is not registered; User likely has disabled it`);
 						return undefined;
 					}
 
-					Logger.error(ex, scope, 'getBuiltInIntegrationSession');
+					scope?.error(ex);
 					throw ex;
 				}
 			},

@@ -1,14 +1,15 @@
 import type { ConfigurationChangeEvent } from 'vscode';
 import { Disposable, languages } from 'vscode';
-import type { Container } from '../container';
-import { configuration } from '../system/-webview/configuration';
-import { setContext } from '../system/-webview/context';
-import { log } from '../system/decorators/log';
-import { once } from '../system/event';
-import { getLoggableName, Logger } from '../system/logger';
-import { getLogScope, setLogScopeExit, startLogScope } from '../system/logger.scope';
-import type { DocumentBlameStateChangeEvent, DocumentDirtyIdleTriggerEvent } from '../trackers/documentTracker';
-import type { GitCodeLensProvider } from './codeLensProvider';
+import { debug } from '@gitlens/utils/decorators/log.js';
+import { once } from '@gitlens/utils/event.js';
+import { getLoggableName } from '@gitlens/utils/logger.js';
+import { getScopedLogger, maybeStartScopedLogger } from '@gitlens/utils/logger.scoped.js';
+import type { Container } from '../container.js';
+import { configuration } from '../system/-webview/configuration.js';
+import { setContext } from '../system/-webview/context.js';
+import { loadChunk } from '../system/-webview/loadChunk.js';
+import type { DocumentBlameStateChangeEvent, DocumentDirtyIdleTriggerEvent } from '../trackers/documentTracker.js';
+import type { GitCodeLensProvider } from './codeLensProvider.js';
 
 export class GitCodeLensController implements Disposable {
 	private _canToggle: boolean = false;
@@ -33,11 +34,19 @@ export class GitCodeLensController implements Disposable {
 	}
 
 	private onConfigurationChanged(e?: ConfigurationChangeEvent) {
-		using scope = startLogScope(`${getLoggableName(this)}.onConfigurationChanged`, false);
+		using scope = maybeStartScopedLogger(`${getLoggableName(this)}.onConfigurationChanged`);
 
-		if (configuration.changed(e, ['codeLens', 'defaultDateFormat', 'defaultDateSource', 'defaultDateStyle'])) {
+		if (
+			configuration.changed(e, [
+				'codeLens',
+				'defaultCurrentUserNameStyle',
+				'defaultDateFormat',
+				'defaultDateSource',
+				'defaultDateStyle',
+			])
+		) {
 			if (e != null) {
-				Logger.log(scope, 'resetting CodeLens provider');
+				scope?.debug('resetting CodeLens provider');
 			}
 
 			const cfg = configuration.get('codeLens');
@@ -57,31 +66,31 @@ export class GitCodeLensController implements Disposable {
 		// Only reset if we have saved, since the CodeLens won't naturally be re-rendered
 		if (this._provider == null || !e.blameable) return;
 
-		using scope = startLogScope(`${getLoggableName(this)}.onBlameStateChanged`, false);
+		using scope = maybeStartScopedLogger(`${getLoggableName(this)}.onBlameStateChanged`);
 
-		Logger.log(scope, 'resetting CodeLens provider');
+		scope?.debug('resetting CodeLens provider');
 		this._provider.reset();
 	}
 
 	private async onDirtyIdleTriggered(e: DocumentDirtyIdleTriggerEvent) {
 		if (this._provider == null) return;
 
-		using scope = startLogScope(`${getLoggableName(this)}.onDirtyIdleTriggered`, false);
+		using scope = maybeStartScopedLogger(`${getLoggableName(this)}.onDirtyIdleTriggered`);
 
 		const status = await e.document.getStatus();
 		if (!status.blameable) return;
 
-		Logger.log(scope, 'resetting CodeLens provider');
+		scope?.debug('resetting CodeLens provider');
 		this._provider.reset();
 	}
 
-	@log()
+	@debug()
 	toggleCodeLens(): void {
-		const scope = getLogScope();
+		const scope = getScopedLogger();
 
 		if (!this._canToggle) {
 			if (scope != null) {
-				setLogScopeExit(scope, ' \u2022 skipped, disabled');
+				scope?.addExitInfo('skipped, disabled');
 			}
 			return;
 		}
@@ -105,7 +114,9 @@ export class GitCodeLensController implements Disposable {
 
 		this._providerDisposable?.dispose();
 
-		const { GitCodeLensProvider } = await import(/* webpackChunkName: "codelens" */ './codeLensProvider');
+		const { GitCodeLensProvider } = await loadChunk(
+			() => import(/* webpackChunkName: "codelens" */ './codeLensProvider.js'),
+		);
 
 		this._provider = new GitCodeLensProvider(this.container);
 		this._providerDisposable = Disposable.from(

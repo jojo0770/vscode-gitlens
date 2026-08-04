@@ -1,12 +1,18 @@
-import { Container } from '../../container';
-import type { ViewNode } from '../../views/nodes/abstract/viewNode';
-import type { RevealOptions, ViewsWithRepositoryFolders } from '../../views/viewBase';
-import { executeGitCommand } from '../actions';
-import type { GitBranchReference, GitReference, GitRevisionReference, GitTagReference } from '../models/reference';
-import type { Repository } from '../models/repository';
+import { window } from 'vscode';
+import type {
+	GitBranchReference,
+	GitReference,
+	GitRevisionReference,
+	GitTagReference,
+} from '@gitlens/git/models/reference.js';
+import { Container } from '../../container.js';
+import type { ViewNode } from '../../views/nodes/abstract/viewNode.js';
+import type { RevealOptions, ViewsWithRepositoryFolders } from '../../views/viewBase.js';
+import { executeGitCommand } from '../actions.js';
+import type { GlRepository } from '../models/repository.js';
 
 export function cherryPick(
-	repo?: string | Repository,
+	repo?: string | GlRepository,
 	refs?: GitRevisionReference | GitRevisionReference[],
 ): Promise<void> {
 	return executeGitCommand({
@@ -15,20 +21,26 @@ export function cherryPick(
 	});
 }
 
-export function fetch(repos?: string | string[] | Repository | Repository[], ref?: GitBranchReference): Promise<void> {
+export function fetch(
+	repos?: string | string[] | GlRepository | GlRepository[],
+	ref?: GitBranchReference,
+): Promise<void> {
 	return executeGitCommand({ command: 'fetch', state: { repos: repos, reference: ref } });
 }
 
-export function merge(repo?: string | Repository, ref?: GitReference): Promise<void> {
+export function merge(repo?: string | GlRepository, ref?: GitReference): Promise<void> {
 	return executeGitCommand({ command: 'merge', state: { repo: repo, reference: ref } });
 }
 
-export function pull(repos?: string | string[] | Repository | Repository[], ref?: GitBranchReference): Promise<void> {
+export function pull(
+	repos?: string | string[] | GlRepository | GlRepository[],
+	ref?: GitBranchReference,
+): Promise<void> {
 	return executeGitCommand({ command: 'pull', state: { repos: repos, reference: ref } });
 }
 
 export function push(
-	repos?: string | string[] | Repository | Repository[],
+	repos?: string | string[] | GlRepository | GlRepository[],
 	force?: boolean,
 	ref?: GitReference,
 ): Promise<void> {
@@ -38,7 +50,20 @@ export function push(
 	});
 }
 
-export function rebase(repo?: string | Repository, ref?: GitReference, interactive: boolean = true): Promise<void> {
+// Resolves a sha to a commit reference then pushes up to it. Centralizes the "push-to-commit"
+// flow so the Graph IPC (which only carries a sha string from row events) and any other
+// sha-only entry point dispatch through the same place as the tree-view `pushToCommit`.
+export async function pushToCommit(repoPath: string, sha: string): Promise<void> {
+	const commit = await Container.instance.git.getRepositoryService(repoPath).commits.getCommit(sha);
+	if (commit == null) {
+		void window.showWarningMessage(`Unable to push to commit — ${sha.slice(0, 7)} could not be found.`);
+		return;
+	}
+
+	return push(repoPath, false, commit);
+}
+
+export function rebase(repo?: string | GlRepository, ref?: GitReference, interactive: boolean = true): Promise<void> {
 	return executeGitCommand({
 		command: 'rebase',
 		state: { repo: repo, destination: ref, flags: interactive ? ['--interactive'] : [] },
@@ -46,7 +71,7 @@ export function rebase(repo?: string | Repository, ref?: GitReference, interacti
 }
 
 export function reset(
-	repo?: string | Repository,
+	repo?: string | GlRepository,
 	ref?: GitRevisionReference | GitTagReference,
 	options?: { hard?: boolean; soft?: never } | { hard?: never; soft?: boolean },
 ): Promise<void> {
@@ -59,13 +84,13 @@ export function reset(
 
 	return executeGitCommand({
 		command: 'reset',
-		confirm: options == null || options.hard,
+		confirm: options == null ? true : options.hard,
 		state: { repo: repo, reference: ref, flags: flags },
 	});
 }
 
 export function revert(
-	repo?: string | Repository,
+	repo?: string | GlRepository,
 	refs?: GitRevisionReference | GitRevisionReference[],
 ): Promise<void> {
 	return executeGitCommand({
@@ -75,7 +100,7 @@ export function revert(
 }
 
 export function switchTo(
-	repos?: string | string[] | Repository | Repository[],
+	repos?: string | string[] | GlRepository | GlRepository[],
 	ref?: GitReference,
 	confirm?: boolean,
 ): Promise<void> {

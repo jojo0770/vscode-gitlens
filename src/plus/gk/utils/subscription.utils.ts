@@ -1,22 +1,23 @@
-import { SubscriptionState } from '../../../constants.subscription';
-import { getTimeRemaining } from '../../../system/date';
+import { getTimeRemaining } from '@gitlens/utils/date.js';
+import { SubscriptionState } from '../../../constants.subscription.js';
 import type {
 	PaidSubscriptionPlanIds,
 	Subscription,
 	SubscriptionPlan,
 	SubscriptionPlanIds,
 	SubscriptionStateString,
-} from '../models/subscription';
+} from '../models/subscription.js';
 
 const orderedPlans: SubscriptionPlanIds[] = [
 	'community',
 	'community-with-account',
+	'student',
 	'pro',
 	'advanced',
 	'teams',
 	'enterprise',
 ];
-const orderedPaidPlans: PaidSubscriptionPlanIds[] = ['pro', 'advanced', 'teams', 'enterprise'];
+const orderedPaidPlans: PaidSubscriptionPlanIds[] = ['student', 'pro', 'advanced', 'teams', 'enterprise'];
 export const SubscriptionUpdatedUriPathPrefix = 'did-update-subscription';
 export const AiAllAccessOptInPathPrefix = 'ai-all-access-opt-in';
 
@@ -47,7 +48,7 @@ export function computeSubscriptionState(subscription: Optional<Subscription, 's
 
 				return SubscriptionState.TrialExpired;
 			}
-
+			case 'student':
 			case 'pro':
 			case 'advanced':
 			case 'teams':
@@ -60,6 +61,7 @@ export function computeSubscriptionState(subscription: Optional<Subscription, 's
 	if (compareSubscriptionPlans(actual.id, 'community-with-account') > 0) {
 		return SubscriptionState.Paid;
 	}
+
 	switch (effective.id) {
 		case 'community':
 			return SubscriptionState.Community;
@@ -72,6 +74,7 @@ export function computeSubscriptionState(subscription: Optional<Subscription, 's
 			return SubscriptionState.TrialExpired;
 		}
 
+		case 'student':
 		case 'pro':
 		case 'advanced':
 		case 'teams':
@@ -81,7 +84,12 @@ export function computeSubscriptionState(subscription: Optional<Subscription, 's
 }
 
 export function getSubscriptionNextPaidPlanId(subscription: Optional<Subscription, 'state'>): PaidSubscriptionPlanIds {
-	const next = orderedPaidPlans.indexOf(subscription.plan.actual.id as PaidSubscriptionPlanIds) + 1;
+	let next = orderedPaidPlans.indexOf(subscription.plan.actual.id as PaidSubscriptionPlanIds) + 1;
+	// Skip the student plan since we cannot determine if the user is student-eligible or not
+	if (next === 0) {
+		next++;
+	}
+
 	if (next >= orderedPaidPlans.length) return 'enterprise'; // Not sure what to do here
 
 	return orderedPaidPlans[next] ?? 'pro';
@@ -113,8 +121,10 @@ export function getSubscriptionPlan(
 /** Gets the plan name for the given plan id */
 export function getSubscriptionPlanName(
 	id: SubscriptionPlanIds,
-): 'Community' | 'Pro' | 'Advanced' | 'Business' | 'Enterprise' {
+): 'Community' | 'Student' | 'Pro' | 'Advanced' | 'Business' | 'Enterprise' {
 	switch (id) {
+		case 'student':
+			return 'Student';
 		case 'pro':
 			return 'Pro';
 		case 'advanced':
@@ -133,8 +143,12 @@ export function getSubscriptionPlanOrder(id: SubscriptionPlanIds | undefined): n
 }
 
 /** Only for gk.dev `planType` query param */
-export function getSubscriptionPlanType(id: SubscriptionPlanIds): 'PRO' | 'ADVANCED' | 'BUSINESS' | 'ENTERPRISE' {
+export function getSubscriptionPlanType(
+	id: SubscriptionPlanIds,
+): 'STUDENT' | 'PRO' | 'ADVANCED' | 'BUSINESS' | 'ENTERPRISE' {
 	switch (id) {
+		case 'student':
+			return 'STUDENT';
 		case 'advanced':
 			return 'ADVANCED';
 		case 'teams':
@@ -155,12 +169,12 @@ export function getSubscriptionProductPlanName(id: SubscriptionPlanIds): string 
 export function getSubscriptionProductPlanNameFromState(
 	state: SubscriptionState,
 	planId?: SubscriptionPlanIds,
-	_effectivePlanId?: SubscriptionPlanIds,
+	effectivePlanId?: SubscriptionPlanIds,
 ): string {
 	switch (state) {
 		case SubscriptionState.Community:
 		case SubscriptionState.Trial:
-			return `${getSubscriptionProductPlanName('pro')} Trial`;
+			return `${effectivePlanId === 'student' ? getSubscriptionProductPlanName('student') : getSubscriptionProductPlanName('pro')} Trial`;
 		// return `${getSubscriptionProductPlanName(
 		// 	_effectivePlanId != null &&
 		// 		compareSubscriptionPlans(_effectivePlanId, planId ?? 'pro') > 0
@@ -197,6 +211,26 @@ export function getSubscriptionStateString(state: SubscriptionState | undefined)
 	}
 }
 
+/**
+ * Which entitlement is currently active, collapsing the finer states: unverified, expired, and
+ * reactivation-eligible all mean Pro isn't active. `undefined` when the state isn't known yet — callers
+ * should treat that as "don't assert anything" rather than as unpaid.
+ */
+export function getSubscriptionEntitlement(
+	state: SubscriptionState | undefined,
+): 'unpaid' | 'trial' | 'paid' | undefined {
+	switch (getSubscriptionStateString(state)) {
+		case 'paid':
+			return 'paid';
+		case 'trial':
+			return 'trial';
+		case 'unknown':
+			return undefined;
+		default:
+			return 'unpaid';
+	}
+}
+
 export function getSubscriptionTimeRemaining(
 	subscription: Optional<Subscription, 'state'>,
 	unit?: 'days' | 'hours' | 'minutes' | 'seconds',
@@ -230,8 +264,8 @@ export function isSubscriptionTrialOrPaidFromState(state: SubscriptionState | un
 }
 
 export function assertSubscriptionState(
-	subscription: Optional<Subscription, 'state'>,
-): asserts subscription is Subscription {}
+	_subscription: Optional<Subscription, 'state'>,
+): asserts _subscription is Subscription {}
 
 export function getCommunitySubscription(subscription?: Subscription): Subscription {
 	return {

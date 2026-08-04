@@ -1,11 +1,10 @@
 import { Disposable } from 'vscode';
-import type { Keys } from '../../constants';
-import { extensionPrefix, keys } from '../../constants';
-import { log } from '../decorators/log';
-import { Logger } from '../logger';
-import { getLogScope, setLogScopeExit } from '../logger.scope';
-import { registerCommand } from './command';
-import { setContext } from './context';
+import { debug } from '@gitlens/utils/decorators/log.js';
+import { getScopedLogger } from '@gitlens/utils/logger.scoped.js';
+import type { Keys } from '../../constants.js';
+import { extensionPrefix, keys } from '../../constants.js';
+import { registerCommand } from './command.js';
+import { setContext } from './context.js';
 
 export declare interface KeyCommand {
 	onDidPressKey?(key: Keys): void | Promise<void>;
@@ -30,19 +29,19 @@ export class KeyboardScope implements Disposable {
 		mappings.push(this._mapping);
 	}
 
-	@log({
+	@debug({
 		args: false,
 		prefix: context => `${context.prefix}[${mappings.length}]`,
 	})
 	async dispose(): Promise<void> {
 		const index = mappings.indexOf(this._mapping);
 
-		const scope = getLogScope();
-		setLogScopeExit(scope, ` \u2022 index=${index}`);
+		const scope = getScopedLogger();
+		scope?.addExitInfo(`index=${index}`);
 
 		if (index === mappings.length - 1) {
 			mappings.pop();
-			await this.updateKeyCommandsContext(mappings[mappings.length - 1]);
+			await this.updateKeyCommandsContext(mappings.at(-1)!);
 		} else {
 			mappings.splice(index, 1);
 		}
@@ -53,16 +52,16 @@ export class KeyboardScope implements Disposable {
 		return this._paused;
 	}
 
-	@log<KeyboardScope['clearKeyCommand']>({
+	@debug({
 		args: false,
 		prefix: (context, key) => `${context.prefix}[${mappings.length}](${key})`,
 	})
 	async clearKeyCommand(key: Keys): Promise<void> {
-		const scope = getLogScope();
+		const scope = getScopedLogger();
 
-		const mapping = mappings[mappings.length - 1];
+		const mapping = mappings.at(-1);
 		if (mapping !== this._mapping || mapping[key] == null) {
-			setLogScopeExit(scope, ' \u2022 skipped');
+			scope?.addExitInfo('skipped');
 
 			return;
 		}
@@ -71,7 +70,7 @@ export class KeyboardScope implements Disposable {
 		await setContext(`${extensionPrefix}:key:${key}`, false);
 	}
 
-	@log({
+	@debug({
 		args: false,
 		prefix: context => `${context.prefix}(paused=${context.instance._paused})`,
 	})
@@ -87,7 +86,7 @@ export class KeyboardScope implements Disposable {
 		await this.updateKeyCommandsContext(mapping);
 	}
 
-	@log({
+	@debug({
 		args: false,
 		prefix: context => `${context.prefix}(paused=${context.instance._paused})`,
 	})
@@ -102,16 +101,16 @@ export class KeyboardScope implements Disposable {
 		await this.resume();
 	}
 
-	@log<KeyboardScope['setKeyCommand']>({
+	@debug({
 		args: false,
 		prefix: (context, key) => `${context.prefix}[${mappings.length}](${key})`,
 	})
 	async setKeyCommand(key: Keys, command: KeyCommand | (() => Promise<KeyCommand>)): Promise<void> {
-		const scope = getLogScope();
+		const scope = getScopedLogger();
 
-		const mapping = mappings[mappings.length - 1];
+		const mapping = mappings.at(-1);
 		if (mapping !== this._mapping) {
-			setLogScopeExit(scope, ' \u2022 skipped');
+			scope?.addExitInfo('skipped');
 
 			return;
 		}
@@ -143,7 +142,7 @@ export class Keyboard implements Disposable {
 		this._disposable.dispose();
 	}
 
-	@log<Keyboard['createScope']>({
+	@debug({
 		args: false,
 		prefix: (context, mapping) =>
 			`${context.prefix}[${mappings.length}](${mapping === undefined ? '' : Object.keys(mapping).join(',')})`,
@@ -152,7 +151,7 @@ export class Keyboard implements Disposable {
 		return new KeyboardScope({ ...mapping });
 	}
 
-	@log<Keyboard['beginScope']>({
+	@debug({
 		args: false,
 		prefix: (context, mapping) =>
 			`${context.prefix}[${mappings.length}](${mapping === undefined ? '' : Object.keys(mapping).join(',')})`,
@@ -163,32 +162,32 @@ export class Keyboard implements Disposable {
 		return scope;
 	}
 
-	@log()
+	@debug()
 	async execute(key: Keys): Promise<void> {
-		const scope = getLogScope();
+		const scope = getScopedLogger();
 
 		if (!mappings.length) {
-			setLogScopeExit(scope, ' \u2022 skipped, no mappings');
+			scope?.addExitInfo('skipped, no mappings');
 
 			return;
 		}
 
 		try {
-			const mapping = mappings[mappings.length - 1];
+			const mapping = mappings.at(-1)!;
 
 			let command = mapping[key] as KeyCommand | (() => Promise<KeyCommand>);
 			if (typeof command === 'function') {
 				command = await command();
 			}
 			if (typeof command?.onDidPressKey !== 'function') {
-				setLogScopeExit(scope, ' \u2022 skipped, no callback');
+				scope?.addExitInfo('skipped, no callback');
 
 				return;
 			}
 
 			await command.onDidPressKey(key);
 		} catch (ex) {
-			Logger.error(ex, scope);
+			scope?.error(ex);
 		}
 	}
 }

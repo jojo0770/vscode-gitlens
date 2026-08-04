@@ -1,17 +1,17 @@
 import { ThemeIcon, TreeItem, TreeItemCollapsibleState } from 'vscode';
-import { GitUri } from '../../git/gitUri';
-import type { HierarchicalItem } from '../../system/array';
-import { first } from '../../system/iterable';
+import type { HierarchicalItem } from '@gitlens/utils/array.js';
+import { first } from '@gitlens/utils/iterable.js';
+import { GitUri } from '../../git/gitUri.js';
 import type {
 	ViewsWithBranchesNode,
 	ViewsWithRemotesNode,
 	ViewsWithTagsNode,
 	ViewsWithWorktreesNode,
-} from '../viewBase';
-import { ContextValues, getViewNodeId, ViewNode } from './abstract/viewNode';
-import type { BranchNode } from './branchNode';
-import type { TagNode } from './tagNode';
-import type { WorktreeNode } from './worktreeNode';
+} from '../viewBase.js';
+import { ContextValues, getViewNodeId, ViewNode } from './abstract/viewNode.js';
+import type { BranchNode } from './branchNode.js';
+import type { TagNode } from './tagNode.js';
+import type { WorktreeNode } from './worktreeNode.js';
 
 export class BranchOrTagFolderNode extends ViewNode<
 	'branch-tag-folder',
@@ -54,6 +54,7 @@ export class BranchOrTagFolderNode extends ViewNode<
 			}
 
 			if (!folder.children?.size) continue;
+
 			if (folder.children.size === 1 && compact) {
 				const child = first(folder.children.values());
 				if (child?.value != null) {

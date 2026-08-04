@@ -1,27 +1,30 @@
 import type { TextDocumentShowOptions, TextEditor } from 'vscode';
 import { Uri } from 'vscode';
-import type { FileAnnotationType } from '../config';
-import { GlyphChars, quickPickTitleMaxChars } from '../constants';
-import type { Container } from '../container';
-import { openFileAtRevision } from '../git/actions/commit';
-import type { DiffRange } from '../git/gitProvider';
-import { GitUri } from '../git/gitUri';
-import { shortenRevision } from '../git/utils/revision.utils';
-import { showCommitHasNoPreviousCommitWarningMessage, showGenericErrorMessage } from '../messages';
-import { showCommitPicker } from '../quickpicks/commitPicker';
-import { CommandQuickPickItem } from '../quickpicks/items/common';
-import type { DirectiveQuickPickItem } from '../quickpicks/items/directive';
-import { createDirectiveQuickPickItem, Directive } from '../quickpicks/items/directive';
-import { command } from '../system/-webview/command';
-import { splitPath } from '../system/-webview/path';
-import { diffRangeToEditorLine, selectionToDiffRange } from '../system/-webview/vscode/editors';
-import { createMarkdownCommandLink } from '../system/commands';
-import { Logger } from '../system/logger';
-import { pad } from '../system/string';
-import { ActiveEditorCommand } from './commandBase';
-import { getCommandUri } from './commandBase.utils';
-import type { CommandContext } from './commandContext';
-import type { OpenFileAtRevisionFromCommandArgs } from './openFileAtRevisionFrom';
+import { GitCommit } from '@gitlens/git/models/commit.js';
+import type { DiffRange } from '@gitlens/git/providers/types.js';
+import { shortenRevision } from '@gitlens/git/utils/revision.utils.js';
+import { Logger } from '@gitlens/utils/logger.js';
+import { pad } from '@gitlens/utils/string.js';
+import type { FileAnnotationType } from '../config.js';
+import { GlyphChars, quickPickTitleMaxChars } from '../constants.js';
+import type { Source } from '../constants.telemetry.js';
+import type { Container } from '../container.js';
+import { openFileAtRevision } from '../git/actions/commit.js';
+import { GitUri } from '../git/gitUri.js';
+import { getCommitGitUri, getCommitPreviousComparisonUrisForRange } from '../git/utils/-webview/commit.utils.js';
+import { showCommitHasNoPreviousCommitWarningMessage, showGenericErrorMessage } from '../messages.js';
+import { showCommitPicker } from '../quickpicks/commitPicker.js';
+import { CommandQuickPickItem } from '../quickpicks/items/common.js';
+import type { DirectiveQuickPickItem } from '../quickpicks/items/directive.js';
+import { createDirectiveQuickPickItem, Directive } from '../quickpicks/items/directive.js';
+import { command } from '../system/-webview/command.js';
+import { splitPath } from '../system/-webview/path.js';
+import { diffRangeToEditorLine, selectionToDiffRange } from '../system/-webview/vscode/range.js';
+import { createMarkdownCommandLink } from '../system/commands.js';
+import { ActiveEditorCommand } from './commandBase.js';
+import { getCommandUri } from './commandBase.utils.js';
+import type { CommandContext } from './commandContext.js';
+import type { OpenFileAtRevisionFromCommandArgs } from './openFileAtRevisionFrom.js';
 
 export interface OpenFileAtRevisionCommandArgs {
 	revisionUri?: Uri;
@@ -29,22 +32,29 @@ export interface OpenFileAtRevisionCommandArgs {
 	range?: DiffRange;
 	showOptions?: TextDocumentShowOptions;
 	annotationType?: FileAnnotationType;
+	source?: Source;
 }
 
 @command()
 export class OpenFileAtRevisionCommand extends ActiveEditorCommand {
 	static createMarkdownCommandLink(args: OpenFileAtRevisionCommandArgs): string;
-	static createMarkdownCommandLink(revisionUri: Uri, annotationType?: FileAnnotationType, range?: DiffRange): string;
+	static createMarkdownCommandLink(
+		revisionUri: Uri,
+		annotationType?: FileAnnotationType,
+		range?: DiffRange,
+		source?: Source,
+	): string;
 	static createMarkdownCommandLink(
 		argsOrUri: OpenFileAtRevisionCommandArgs | Uri,
 		annotationType?: FileAnnotationType,
 		range?: DiffRange,
+		source?: Source,
 	): string {
 		let args: OpenFileAtRevisionCommandArgs | Uri;
 		if (argsOrUri instanceof Uri) {
 			const revisionUri = argsOrUri;
 
-			args = { revisionUri: revisionUri, range: range, annotationType: annotationType };
+			args = { revisionUri: revisionUri, range: range, annotationType: annotationType, source: source };
 		} else {
 			args = argsOrUri;
 		}
@@ -68,20 +78,22 @@ export class OpenFileAtRevisionCommand extends ActiveEditorCommand {
 						const blame = await this.container.git.getBlameForLine(gitUri, editorLine);
 						if (blame != null) {
 							if (blame.commit.isUncommitted) {
-								const comparisonUris = await blame.commit.getPreviousComparisonUrisForRange(range);
+								const comparisonUris = await getCommitPreviousComparisonUrisForRange(
+									blame.commit,
+									range,
+								);
 								if (comparisonUris?.previous != null) {
-									args.revisionUri = this.container.git.getRevisionUriFromGitUri(
-										comparisonUris.previous,
-									);
+									args.revisionUri = comparisonUris.previous.uri;
 								} else {
 									void showCommitHasNoPreviousCommitWarningMessage(blame.commit);
 									return undefined;
 								}
 							} else {
-								const previousSha = blame != null ? await blame?.commit.getPreviousSha() : undefined;
+								const previousSha =
+									blame != null ? await GitCommit.getPreviousSha(blame.commit) : undefined;
 								if (previousSha != null) {
 									args.revisionUri = this.container.git.getRevisionUriFromGitUri(
-										blame.commit.getGitUri(true),
+										getCommitGitUri(blame.commit, true),
 									);
 								} else {
 									void showCommitHasNoPreviousCommitWarningMessage(blame.commit);

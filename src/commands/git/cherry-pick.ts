@@ -1,34 +1,54 @@
-import { window } from 'vscode';
-import type { Container } from '../../container';
-import { skipPausedOperation } from '../../git/actions/pausedOperation';
-import { CherryPickError, CherryPickErrorReason } from '../../git/errors';
-import type { GitBranch } from '../../git/models/branch';
-import type { GitLog } from '../../git/models/log';
-import type { GitPausedOperationStatus } from '../../git/models/pausedOperationStatus';
-import type { GitReference } from '../../git/models/reference';
-import type { Repository } from '../../git/models/repository';
-import { getReferenceLabel, isRevisionReference } from '../../git/utils/reference.utils';
-import { createRevisionRange } from '../../git/utils/revision.utils';
-import { showGenericErrorMessage } from '../../messages';
-import type { FlagsQuickPickItem } from '../../quickpicks/items/flags';
-import { createFlagsQuickPickItem } from '../../quickpicks/items/flags';
-import { executeCommand } from '../../system/-webview/command';
-import { Logger } from '../../system/logger';
-import type { ViewsWithRepositoryFolders } from '../../views/viewBase';
+import { ThemeIcon, window } from 'vscode';
+import { CherryPickError, SigningError } from '@gitlens/git/errors.js';
+import type { GitBranch } from '@gitlens/git/models/branch.js';
+import type { GitLog } from '@gitlens/git/models/log.js';
+import type { ConflictDetectionResult } from '@gitlens/git/models/mergeConflicts.js';
+import type { GitPausedOperationStatus } from '@gitlens/git/models/pausedOperationStatus.js';
+import type { GitReference } from '@gitlens/git/models/reference.js';
+import { getReferenceLabel, isRevisionReference } from '@gitlens/git/utils/reference.utils.js';
+import { createRevisionRange } from '@gitlens/git/utils/revision.utils.js';
+import { ensureArray } from '@gitlens/utils/array.js';
+import { Logger } from '@gitlens/utils/logger.js';
+import { pluralize } from '@gitlens/utils/string.js';
+import type { Container } from '../../container.js';
+import { showPausedOperationStatus, skipPausedOperation } from '../../git/actions/pausedOperation.js';
+import type { GlRepository } from '../../git/models/repository.js';
+import { showGitErrorMessage } from '../../messages.js';
+import { isSubscriptionTrialOrPaidFromState } from '../../plus/gk/utils/subscription.utils.js';
+import { createQuickPickSeparator } from '../../quickpicks/items/common.js';
+import type { DirectiveQuickPickItem } from '../../quickpicks/items/directive.js';
+import { createDirectiveQuickPickItem, Directive } from '../../quickpicks/items/directive.js';
+import type { FlagsQuickPickItem } from '../../quickpicks/items/flags.js';
+import { createFlagsQuickPickItem } from '../../quickpicks/items/flags.js';
+import type { ViewsWithRepositoryFolders } from '../../views/viewBase.js';
 import type {
+	AsyncStepResultGenerator,
 	PartialStepState,
-	QuickPickStep,
 	StepGenerator,
 	StepResult,
-	StepResultGenerator,
+	StepsContext,
 	StepSelection,
 	StepState,
-} from '../quickCommand';
-import { canPickStepContinue, createConfirmStep, endSteps, QuickCommand, StepResultBreak } from '../quickCommand';
-import { appendReposToTitle, pickBranchOrTagStep, pickCommitsStep, pickRepositoryStep } from '../quickCommand.steps';
+} from '../quick-wizard/models/steps.js';
+import { StepResultBreak } from '../quick-wizard/models/steps.js';
+import type { QuickPickStep } from '../quick-wizard/models/steps.quickpick.js';
+import { QuickCommand } from '../quick-wizard/quickCommand.js';
+import { pickCommitsStep } from '../quick-wizard/steps/commits.js';
+import { pickBranchOrTagStep } from '../quick-wizard/steps/references.js';
+import { canSkipRepositoryPick, pickRepositoryStep } from '../quick-wizard/steps/repositories.js';
+import { StepsController } from '../quick-wizard/stepsController.js';
+import { appendReposToTitle, assertStepState, canPickStepContinue } from '../quick-wizard/utils/steps.utils.js';
 
-interface Context {
-	repos: Repository[];
+const Steps = {
+	PickRepo: 'cherry-pick-pick-repo',
+	PickBranchOrTag: 'cherry-pick-pick-branch-or-tag',
+	PickCommits: 'cherry-pick-pick-commits',
+	Confirm: 'cherry-pick-confirm',
+} as const;
+type StepNames = (typeof Steps)[keyof typeof Steps];
+
+interface Context extends StepsContext<StepNames> {
+	repos: GlRepository[];
 	associatedView: ViewsWithRepositoryFolders;
 	cache: Map<string, Promise<GitLog | undefined>>;
 	destination: GitBranch;
@@ -38,9 +58,8 @@ interface Context {
 }
 
 type Flags = '--edit' | '--no-commit';
-
-interface State<Refs = GitReference | GitReference[]> {
-	repo: string | Repository;
+interface State<Repo = string | GlRepository, Refs = GitReference | GitReference[]> {
+	repo: Repo;
 	references: Refs;
 	flags: Flags[];
 }
@@ -50,62 +69,67 @@ export interface CherryPickGitCommandArgs {
 	state?: Partial<State>;
 }
 
-type CherryPickStepState<T extends State = State> = ExcludeSome<StepState<T>, 'repo', string>;
-
 export class CherryPickGitCommand extends QuickCommand<State> {
 	constructor(container: Container, args?: CherryPickGitCommandArgs) {
 		super(container, 'cherry-pick', 'cherry-pick', 'Cherry Pick', {
 			description: 'integrates changes from specified commits into the current branch',
 		});
 
-		let counter = 0;
-		if (args?.state?.repo != null) {
-			counter++;
-		}
-
-		if (args?.state?.references != null) {
-			if (Array.isArray(args.state.references)) {
-				if (args.state.references.length > 0) {
-					if (isRevisionReference(args.state.references[0])) {
-						counter += 2;
-					} else {
-						counter++;
-					}
-				}
-			} else {
-				counter++;
-			}
-		}
-
-		this.initialState = {
-			counter: counter,
-			confirm: true,
-			...args?.state,
-		};
+		this.initialState = { confirm: true, ...args?.state };
 	}
 
 	override get canSkipConfirm(): boolean {
 		return false;
 	}
 
-	private async execute(state: CherryPickStepState<State<GitReference[]>>) {
+	private async execute(state: StepState<State<GlRepository, GitReference[]>>) {
+		this.container.telemetry.sendEvent('gitCommand/run', { command: 'cherry-pick' });
+
 		try {
-			await state.repo.git.commits.cherryPick?.(
+			const result = await state.repo.git.ops?.cherryPick?.(
 				state.references.map(c => c.ref),
 				{
 					edit: state.flags.includes('--edit'),
 					noCommit: state.flags.includes('--no-commit'),
 				},
 			);
+			if (result?.conflicted) {
+				void window.showWarningMessage(
+					'Unable to cherry-pick due to conflicts. Resolve the conflicts before continuing, or abort the cherry-pick.',
+				);
+				void showPausedOperationStatus(this.container, state.repo.path, { source: { source: 'quick-wizard' } });
+			}
 		} catch (ex) {
+			// Don't show an error message if the user intentionally aborted the cherry-pick
+			if (CherryPickError.is(ex, 'aborted')) {
+				Logger.debug(ex.message, this.title);
+				return;
+			}
+
 			Logger.error(ex, this.title);
-			if (ex instanceof CherryPickError && ex.reason === CherryPickErrorReason.EmptyCommit) {
+
+			if (CherryPickError.is(ex, 'wouldOverwriteChanges')) {
+				void window.showWarningMessage(
+					'Unable to cherry-pick. Your local changes would be overwritten. Please commit or stash your changes before trying again.',
+				);
+				return;
+			}
+
+			if (CherryPickError.is(ex, 'alreadyInProgress')) {
+				void window.showWarningMessage(
+					'Unable to cherry-pick. A cherry-pick is already in progress. Continue or abort the current cherry-pick first.',
+				);
+				void showPausedOperationStatus(this.container, state.repo.path, { source: { source: 'quick-wizard' } });
+				return;
+			}
+
+			if (CherryPickError.is(ex, 'emptyCommit')) {
 				let pausedOperation: GitPausedOperationStatus | undefined;
 				try {
-					pausedOperation = await state.repo.git.status.getPausedOperationStatus?.();
+					pausedOperation = await state.repo.git.pausedOps?.getPausedOperationStatus?.();
 					pausedOperation ??= await state.repo
 						.waitForRepoChange(500)
-						.then(() => state.repo.git.status.getPausedOperationStatus?.());
+						.then(() => state.repo.git.pausedOps?.getPausedOperationStatus?.());
 				} catch {}
 
 				const pausedAt = pausedOperation
@@ -115,22 +139,23 @@ export class CherryPickGitCommand extends QuickCommand<State> {
 				const skip = { title: 'Skip' };
 				const cancel = { title: 'Cancel', isCloseAffordance: true };
 				const result = await window.showInformationMessage(
-					`The cherry-pick operation cannot be completed because ${
-						pausedAt ?? 'it'
-					} resulted in an empty commit.\n\nDo you want to skip ${pausedAt ?? 'this commit'}?`,
+					`Unable to complete the cherry-pick operation because ${pausedAt ?? 'it'} resulted in an empty commit.\n\nDo you want to skip ${pausedAt ?? 'this commit'}?`,
 					{ modal: true },
 					skip,
 					cancel,
 				);
 				if (result === skip) {
-					return void skipPausedOperation(state.repo.git);
+					return void skipPausedOperation(this.container, state.repo.git, { source: 'quick-wizard' });
 				}
 
-				void executeCommand('gitlens.showCommitsView');
+				void showPausedOperationStatus(this.container, state.repo.path, { source: { source: 'quick-wizard' } });
 				return;
 			}
 
-			void showGenericErrorMessage(ex.message);
+			void showGitErrorMessage(
+				ex,
+				CherryPickError.is(ex) || SigningError.is(ex) ? undefined : 'Unable to cherry-pick',
+			);
 		}
 	}
 
@@ -138,8 +163,10 @@ export class CherryPickGitCommand extends QuickCommand<State> {
 		return super.isFuzzyMatch(name) || name === 'cherry';
 	}
 
-	protected async *steps(state: PartialStepState<State>): StepGenerator {
-		const context: Context = {
+	protected createContext(context?: StepsContext<any>): Context {
+		return {
+			...context,
+			container: this.container,
 			repos: this.container.git.openRepositories,
 			associatedView: this.container.views.commits,
 			cache: new Map<string, Promise<GitLog | undefined>>(),
@@ -148,37 +175,40 @@ export class CherryPickGitCommand extends QuickCommand<State> {
 			showTags: true,
 			title: this.title,
 		};
+	}
 
-		if (state.flags == null) {
-			state.flags = [];
-		}
+	protected async *steps(state: PartialStepState<State>, context?: Context): StepGenerator {
+		context = this.createContext();
+		using steps = new StepsController<StepNames>(context, this);
+
+		state.flags ??= [];
 
 		if (state.references != null && !Array.isArray(state.references)) {
 			state.references = [state.references];
 		}
 
-		let skippedStepOne = false;
-
-		while (this.canStepsContinue(state)) {
+		while (!steps.isComplete) {
 			context.title = this.title;
 
-			if (state.counter < 1 || state.repo == null || typeof state.repo === 'string') {
-				skippedStepOne = false;
-				if (context.repos.length === 1) {
-					skippedStepOne = true;
-					if (state.repo == null) {
-						state.counter++;
-					}
-
-					state.repo = context.repos[0];
+			if (steps.isAtStep(Steps.PickRepo) || state.repo == null || typeof state.repo === 'string') {
+				// Skip the picker only when the sole available repo is the one requested
+				if (canSkipRepositoryPick(context.repos, state.repo)) {
+					[state.repo] = context.repos;
 				} else {
-					const result = yield* pickRepositoryStep(state, context);
-					// Always break on the first step (so we will go back)
-					if (result === StepResultBreak) break;
+					using step = steps.enterStep(Steps.PickRepo);
+
+					const result = yield* pickRepositoryStep(state, context, step);
+					if (result === StepResultBreak) {
+						state.repo = undefined!;
+						if (step.goBack() == null) break;
+						continue;
+					}
 
 					state.repo = result;
 				}
 			}
+
+			assertStepState<State<GlRepository>>(state);
 
 			if (context.destination == null) {
 				const branch = await state.repo.git.branches.getBranch();
@@ -192,24 +222,18 @@ export class CherryPickGitCommand extends QuickCommand<State> {
 				label: false,
 			})}`;
 
-			if (state.counter < 2 || !state.references?.length) {
-				const result: StepResult<GitReference> = yield* pickBranchOrTagStep(
-					state as CherryPickStepState,
-					context,
-					{
-						filter: { branches: b => b.id !== context.destination.id },
-						placeholder: context =>
-							`Choose a branch${context.showTags ? ' or tag' : ''} to cherry-pick from`,
-						picked: context.selectedBranchOrTag?.ref,
-						value: context.selectedBranchOrTag == null ? state.references?.[0]?.ref : undefined,
-					},
-				);
-				if (result === StepResultBreak) {
-					// If we skipped the previous step, make sure we back up past it
-					if (skippedStepOne) {
-						state.counter--;
-					}
+			if (steps.isAtStep(Steps.PickBranchOrTag) || !state.references?.length) {
+				using step = steps.enterStep(Steps.PickBranchOrTag);
 
+				const result: StepResult<GitReference> = yield* pickBranchOrTagStep(state, context, {
+					filter: { branches: b => b.id !== context.destination.id },
+					placeholder: context => `Choose a branch${context.showTags ? ' or tag' : ''} to cherry-pick from`,
+					picked: context.selectedBranchOrTag?.ref,
+					value: context.selectedBranchOrTag == null ? state.references?.[0]?.ref : undefined,
+				});
+				if (result === StepResultBreak) {
+					state.references = undefined!;
+					if (step.goBack() == null) break;
 					continue;
 				}
 
@@ -222,7 +246,7 @@ export class CherryPickGitCommand extends QuickCommand<State> {
 			}
 
 			if (context.selectedBranchOrTag == null && state.references?.length) {
-				const branches = await state.repo.git.branches.getBranchesWithCommits(
+				const branches: string[] = await state.repo.git.branches.getBranchesWithCommits(
 					state.references.map(r => r.ref),
 					undefined,
 					{ mode: 'contains' },
@@ -235,7 +259,12 @@ export class CherryPickGitCommand extends QuickCommand<State> {
 				}
 			}
 
-			if (state.counter < 3 && context.selectedBranchOrTag != null) {
+			if (
+				context.selectedBranchOrTag != null &&
+				(steps.isAtStep(Steps.PickCommits) || !state.references?.length)
+			) {
+				using step = steps.enterStep(Steps.PickCommits);
+
 				const rev = createRevisionRange(context.destination.ref, context.selectedBranchOrTag.ref, '..');
 
 				let log = context.cache.get(rev);
@@ -244,71 +273,162 @@ export class CherryPickGitCommand extends QuickCommand<State> {
 					context.cache.set(rev, log);
 				}
 
-				const result: StepResult<GitReference[]> = yield* pickCommitsStep(
-					state as CherryPickStepState,
-					context,
-					{
-						log: await log,
-						onDidLoadMore: log => context.cache.set(rev, Promise.resolve(log)),
-						picked: state.references?.map(r => r.ref),
-						placeholder: (context, log) =>
-							log == null
-								? `No pickable commits found on ${getReferenceLabel(context.selectedBranchOrTag, {
-										icon: false,
-									})}`
-								: `Choose commits to cherry-pick into ${getReferenceLabel(context.destination, {
-										icon: false,
-									})}`,
-					},
-				);
-				if (result === StepResultBreak) continue;
+				const result: StepResult<GitReference[]> = yield* pickCommitsStep(state, context, {
+					emptyItems: [
+						createDirectiveQuickPickItem(Directive.Cancel, true, {
+							label: 'OK',
+							detail: `No pickable commits found on ${getReferenceLabel(context.selectedBranchOrTag, { icon: false })}`,
+						}),
+					],
+					log: await log,
+					onDidLoadMore: log => context.cache.set(rev, Promise.resolve(log)),
+					picked: state.references?.map(r => r.ref),
+					placeholder: (context, log) =>
+						!log?.commits.size
+							? `No pickable commits found on ${getReferenceLabel(context.selectedBranchOrTag, { icon: false })}`
+							: `Choose commits to cherry-pick into ${getReferenceLabel(context.destination, { icon: false })}`,
+				});
+				if (result === StepResultBreak) {
+					state.references = undefined!;
+					if (step.goBack() == null) break;
+					continue;
+				}
 
 				state.references = result;
 			}
 
+			assertStepState<State<GlRepository, GitReference[]>>(state);
+
 			if (this.confirm(state.confirm)) {
-				const result = yield* this.confirmStep(state as CherryPickStepState, context);
-				if (result === StepResultBreak) continue;
+				using step = steps.enterStep(Steps.Confirm);
+
+				const result = yield* this.confirmStep(state, context);
+				if (result === StepResultBreak) {
+					state.flags = [];
+					if (step.goBack() == null) break;
+					continue;
+				}
 
 				state.flags = result;
 			}
 
-			endSteps(state);
-			void this.execute(state as CherryPickStepState<State<GitReference[]>>);
+			steps.markStepsComplete();
+			void this.execute(state);
 		}
 
-		return state.counter < 0 ? StepResultBreak : undefined;
+		return steps.isComplete ? undefined : StepResultBreak;
 	}
 
-	private *confirmStep(state: CherryPickStepState, context: Context): StepResultGenerator<Flags[]> {
-		const step: QuickPickStep<FlagsQuickPickItem<Flags>> = createConfirmStep(
-			appendReposToTitle(`Confirm ${context.title}`, state, context),
-			[
-				createFlagsQuickPickItem<Flags>(state.flags, [], {
-					label: this.title,
-					detail: `Will apply ${getReferenceLabel(state.references, { label: false })} to ${getReferenceLabel(
-						context.destination,
-						{ label: false },
-					)}`,
+	private async *confirmStep(
+		state: StepState<State<GlRepository, GitReference[]>>,
+		context: Context,
+	): AsyncStepResultGenerator<Flags[]> {
+		const items: FlagsQuickPickItem<Flags>[] = [
+			createFlagsQuickPickItem<Flags>(state.flags, [], {
+				label: this.title,
+				detail: `Will apply ${getReferenceLabel(state.references, { label: false })} to ${getReferenceLabel(
+					context.destination,
+					{ label: false },
+				)}`,
+			}),
+			createFlagsQuickPickItem<Flags>(state.flags, ['--edit'], {
+				label: `${this.title} & Edit`,
+				description: '--edit',
+				detail: `Will edit and apply ${getReferenceLabel(state.references, {
+					label: false,
+				})} to ${getReferenceLabel(context.destination, {
+					label: false,
+				})}`,
+			}),
+			createFlagsQuickPickItem<Flags>(state.flags, ['--no-commit'], {
+				label: `${this.title} without Committing`,
+				description: '--no-commit',
+				detail: `Will apply ${getReferenceLabel(state.references, { label: false })} to ${getReferenceLabel(
+					context.destination,
+					{ label: false },
+				)} without Committing`,
+			}),
+		];
+
+		let potentialConflict: Promise<ConflictDetectionResult | undefined> | undefined;
+		const subscription = await this.container.subscription.getSubscription();
+		if (isSubscriptionTrialOrPaidFromState(subscription?.state)) {
+			// Reverse the commits since they're typically in newest-to-oldest order (from git log),
+			// but conflict detection needs oldest-to-newest order to properly simulate cherry-pick
+			potentialConflict = state.repo.git.branches.getPotentialApplyConflicts?.(
+				context.destination.name,
+				ensureArray(state.references)
+					.map(r => r.ref)
+					.reverse(),
+				{ stopOnFirstConflict: true },
+			);
+		}
+
+		let step: QuickPickStep<DirectiveQuickPickItem | FlagsQuickPickItem<Flags>>;
+
+		const notices: DirectiveQuickPickItem[] = [];
+		if (potentialConflict) {
+			void potentialConflict?.then(result => {
+				if (result == null || result.status === 'clean') {
+					notices.splice(
+						0,
+						1,
+						createDirectiveQuickPickItem(Directive.Noop, false, {
+							label: 'No Conflicts Detected',
+							iconPath: new ThemeIcon('check'),
+						}),
+					);
+				} else if (result.status === 'error') {
+					notices.splice(
+						0,
+						1,
+						createDirectiveQuickPickItem(Directive.Noop, false, {
+							label: 'Unable to Detect Conflicts',
+							detail: result.message,
+							iconPath: new ThemeIcon('error'),
+						}),
+					);
+				} else {
+					notices.splice(
+						0,
+						1,
+						createDirectiveQuickPickItem(Directive.Noop, false, {
+							label: 'Conflicts Detected',
+							detail: `Will result in ${result.stoppedOnFirstConflict ? 'at least ' : ''}${pluralize(
+								'conflicting file',
+								result.conflict.files.length,
+							)} that will need to be resolved`,
+							iconPath: new ThemeIcon('warning'),
+						}),
+					);
+				}
+
+				if (step.quickpick != null) {
+					const active = step.quickpick.activeItems;
+					step.quickpick.items = [
+						...notices,
+						...items,
+						createQuickPickSeparator(),
+						createDirectiveQuickPickItem(Directive.Cancel),
+					];
+					step.quickpick.activeItems = active;
+				}
+			});
+
+			notices.push(
+				createDirectiveQuickPickItem(Directive.Noop, false, {
+					label: `$(loading~spin) \u00a0Detecting Conflicts...`,
+					// Don't use this, because the spin here causes the icon to spin incorrectly
+					//iconPath: new ThemeIcon('loading~spin'),
 				}),
-				createFlagsQuickPickItem<Flags>(state.flags, ['--edit'], {
-					label: `${this.title} & Edit`,
-					description: '--edit',
-					detail: `Will edit and apply ${getReferenceLabel(state.references, {
-						label: false,
-					})} to ${getReferenceLabel(context.destination, { label: false })}`,
-				}),
-				createFlagsQuickPickItem<Flags>(state.flags, ['--no-commit'], {
-					label: `${this.title} without Committing`,
-					description: '--no-commit',
-					detail: `Will apply ${getReferenceLabel(state.references, { label: false })} to ${getReferenceLabel(
-						context.destination,
-						{ label: false },
-					)} without Committing`,
-				}),
-			],
-			context,
-		);
+				createQuickPickSeparator(),
+			);
+		}
+
+		step = this.createConfirmStep(appendReposToTitle(`Confirm ${context.title}`, state, context), [
+			...notices,
+			...items,
+		]);
 		const selection: StepSelection<typeof step> = yield step;
 		return canPickStepContinue(step, state, selection) ? selection[0].item : StepResultBreak;
 	}

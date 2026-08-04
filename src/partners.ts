@@ -1,10 +1,10 @@
 import type { CancellationTokenSource, Extension, ExtensionContext, Uri } from 'vscode';
 import { extensions } from 'vscode';
-import type { ActionContext, HoverCommandsActionContext } from './api/gitlens';
-import type { InviteToLiveShareCommandArgs } from './commands/inviteToLiveShare';
-import { Container } from './container';
-import { executeCommand, executeCoreCommand } from './system/-webview/command';
-import type { ContactPresence } from './vsls/vsls';
+import type { ActionContext, HoverCommandsActionContext } from './api/gitlens.d.js';
+import type { InviteToLiveShareCommandArgs } from './commands/inviteToLiveShare.js';
+import { Container } from './container.js';
+import { executeCommand, executeCoreCommand } from './system/-webview/command.js';
+import type { ContactPresence } from './vsls/vsls.js';
 
 export async function installExtension<T>(
 	extensionId: string,
@@ -62,7 +62,7 @@ function registerLiveShare(context: ExtensionContext) {
 				name: 'Live Share',
 				label: (context: ActionContext) => {
 					if (context.type === 'hover.commands') {
-						if (context.commit.author.name !== 'You') {
+						if (!context.commit.author.current) {
 							return `$(live-share) Invite ${context.commit.author.name}${
 								(context.commit.author.presence as ContactPresence)?.statusText
 									? ` (${(context.commit.author.presence as ContactPresence)?.statusText})`
@@ -74,7 +74,7 @@ function registerLiveShare(context: ExtensionContext) {
 					return '$(live-share) Start a Live Share Session';
 				},
 				run: async (context: ActionContext) => {
-					if (context.type !== 'hover.commands' || context.commit.author.name === 'You') {
+					if (context.type !== 'hover.commands' || context.commit.author.current) {
 						await executeCommand<InviteToLiveShareCommandArgs>('gitlens.inviteToLiveShare', {});
 
 						return;

@@ -1,23 +1,23 @@
 import { ThemeIcon, TreeItem, TreeItemCollapsibleState } from 'vscode';
-import { GlyphChars } from '../../constants';
-import type { GitUri } from '../../git/gitUri';
-import type { Repository } from '../../git/models/repository';
-import { sortWorktrees } from '../../git/utils/-webview/sorting';
-import { makeHierarchical } from '../../system/array';
-import type { ViewsWithWorktreesNode } from '../viewBase';
-import { CacheableChildrenViewNode } from './abstract/cacheableChildrenViewNode';
-import type { ViewNode } from './abstract/viewNode';
-import { ContextValues, getViewNodeId } from './abstract/viewNode';
-import { BranchOrTagFolderNode } from './branchOrTagFolderNode';
-import { MessageNode } from './common';
-import { WorktreeNode } from './worktreeNode';
+import { makeHierarchical } from '@gitlens/utils/array.js';
+import { GlyphChars } from '../../constants.js';
+import type { GitUri } from '../../git/gitUri.js';
+import type { GlRepository } from '../../git/models/repository.js';
+import { sortWorktrees } from '../../git/utils/-webview/sorting.js';
+import type { ViewsWithWorktreesNode } from '../viewBase.js';
+import { CacheableChildrenViewNode } from './abstract/cacheableChildrenViewNode.js';
+import type { ViewNode } from './abstract/viewNode.js';
+import { ContextValues, getViewNodeId } from './abstract/viewNode.js';
+import { BranchOrTagFolderNode } from './branchOrTagFolderNode.js';
+import { MessageNode } from './common.js';
+import { WorktreeNode } from './worktreeNode.js';
 
 export class WorktreesNode extends CacheableChildrenViewNode<'worktrees', ViewsWithWorktreesNode> {
 	constructor(
 		uri: GitUri,
 		view: ViewsWithWorktreesNode,
 		protected override readonly parent: ViewNode,
-		public readonly repo: Repository,
+		public readonly repo: GlRepository,
 	) {
 		super('worktrees', uri, view, parent);
 
@@ -35,7 +35,7 @@ export class WorktreesNode extends CacheableChildrenViewNode<'worktrees', ViewsW
 
 	async getChildren(): Promise<ViewNode[]> {
 		if (this.children == null) {
-			const access = await this.repo.access('worktrees');
+			const access = await this.repo.git.access('worktrees');
 			if (!access.allowed) return [];
 
 			const worktrees = await this.repo.git.worktrees?.getWorktrees();
@@ -75,7 +75,7 @@ export class WorktreesNode extends CacheableChildrenViewNode<'worktrees', ViewsW
 	}
 
 	async getTreeItem(): Promise<TreeItem> {
-		const access = await this.repo.access('worktrees');
+		const access = await this.repo.git.access('worktrees');
 
 		const item = new TreeItem(
 			'Worktrees',
@@ -85,7 +85,7 @@ export class WorktreesNode extends CacheableChildrenViewNode<'worktrees', ViewsW
 		item.contextValue = ContextValues.Worktrees;
 		item.description = access.allowed
 			? undefined
-			: ` ${GlyphChars.Warning}  Use on privately-hosted repos requires GitLens Pro`;
+			: ` ${GlyphChars.Warning}  Unlock this feature for privately hosted repos with GitLens Pro`;
 		// TODO@eamodio `folder` icon won't work here for some reason
 		item.iconPath = new ThemeIcon('folder-opened');
 		return item;

@@ -1,10 +1,11 @@
 // @ts-check
 /** @typedef {{ name: string; result: string; hidden: boolean; index?: number }} Prop */
 
-import * as ts from 'typescript';
 import * as fs from 'fs';
 import * as path from 'path';
 import { fileURLToPath } from 'url';
+// `typescript-6` is an alias for the 6.x JS compiler; 7.x is the native port and exposes no compiler API
+import * as ts from 'typescript-6';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.join(path.dirname(__filename), '..');
@@ -18,7 +19,16 @@ const interfaceCache = new Map();
 const intersectionTypeCache = new Map();
 const unionTypeCache = new Map();
 
-const program = ts.createProgram(filePaths, {});
+/** @type Map<string, string> */
+const remappedTypes = new Map([
+	['GlCommands', 'string /* GlCommands */'],
+	['TrackedUsageKeys', 'string /* TrackedUsageKeys */'],
+]);
+
+const tsconfigPath = path.join(__dirname, 'tsconfig.node.json');
+const tsconfigFile = ts.readConfigFile(tsconfigPath, ts.sys.readFile);
+const parsedConfig = ts.parseJsonConfigFileContent(tsconfigFile.config, ts.sys, __dirname);
+const program = ts.createProgram(filePaths, parsedConfig.options);
 const typeChecker = program.getTypeChecker();
 
 /** @type {{ file: ts.SourceFile, type: ts.Type } | undefined} */
@@ -111,7 +121,10 @@ fs.writeFileSync(outputPath, markdown);
 function expandType(file, type, indent = '', isRoot = true, prefix = '') {
 	let result = '';
 
-	if (type.isClassOrInterface() || (type.symbol && type.symbol.flags & ts.SymbolFlags.TypeLiteral)) {
+	const remapped = remappedTypes.get(typeChecker.typeToString(type));
+	if (remapped) {
+		result = remapped;
+	} else if (type.isClassOrInterface() || (type.symbol && type.symbol.flags & ts.SymbolFlags.TypeLiteral)) {
 		result = interfaceCache.get(type);
 		if (result == null) {
 			const properties = typeChecker.getPropertiesOfType(type);
@@ -125,7 +138,13 @@ function expandType(file, type, indent = '', isRoot = true, prefix = '') {
 
 					const propDocs = prop.getDocumentationComment(typeChecker);
 					if (propDocs.length > 0) {
-						propString += `${indent}  // ${propDocs.map(doc => doc.text).join(' ')}\n`;
+						// Collapse newlines from multi-line doc comments — the text follows a single
+						// `//`, so embedded newlines would leave continuation lines unprefixed
+						const text = propDocs
+							.map(doc => doc.text)
+							.join(' ')
+							.replace(/\s*\n\s*/g, ' ');
+						propString += `${indent}  // ${text}\n`;
 					}
 
 					const jsDocTags = getJSDocTags(prop);
@@ -185,6 +204,7 @@ function expandType(file, type, indent = '', isRoot = true, prefix = '') {
 			result = unionTypeCache.get(type);
 			if (result == null) {
 				const types = type.types
+					.filter(t => !(t.flags & (ts.TypeFlags.Undefined | ts.TypeFlags.Null)))
 					.map(t => expandType(file, t, indent, false, prefix))
 					.filter(t => Boolean(t))
 					.join(' | ')
@@ -225,7 +245,13 @@ function expandType(file, type, indent = '', isRoot = true, prefix = '') {
 
 					const propDocs = prop.getDocumentationComment(typeChecker);
 					if (propDocs.length > 0) {
-						propString += `${indent}  // ${propDocs.map(doc => doc.text).join(' ')}\n`;
+						// Collapse newlines from multi-line doc comments — the text follows a single
+						// `//`, so embedded newlines would leave continuation lines unprefixed
+						const text = propDocs
+							.map(doc => doc.text)
+							.join(' ')
+							.replace(/\s*\n\s*/g, ' ');
+						propString += `${indent}  // ${text}\n`;
 					}
 
 					const jsDocTags = getJSDocTags(prop);
@@ -291,7 +317,7 @@ function expandType(file, type, indent = '', isRoot = true, prefix = '') {
 		}
 	} else if (type.flags & ts.TypeFlags.Boolean) {
 		result = 'boolean';
-	} else if (type.flags & ts.TypeFlags.Never) {
+	} else if (type.flags & (ts.TypeFlags.Never | ts.TypeFlags.Undefined)) {
 		return '';
 	} else {
 		result = typeChecker.typeToString(type);
@@ -303,7 +329,7 @@ function expandType(file, type, indent = '', isRoot = true, prefix = '') {
 	return result;
 }
 
-function getJSDocTags(symbol) {
+function getJSDocTags(/** @type {ts.Symbol } */ symbol) {
 	const tags = {};
 	const jsDocTags = symbol.getJsDocTags();
 	for (const tag of jsDocTags) {

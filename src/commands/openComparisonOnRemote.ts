@@ -1,12 +1,12 @@
-import type { Container } from '../container';
-import { RemoteResourceType } from '../git/models/remoteResource';
-import type { GitRevisionRangeNotation } from '../git/models/revision';
-import { showGenericErrorMessage } from '../messages';
-import { command, executeCommand } from '../system/-webview/command';
-import { Logger } from '../system/logger';
-import { GlCommandBase } from './commandBase';
-import type { CommandContext } from './commandContext';
-import type { OpenOnRemoteCommandArgs } from './openOnRemote';
+import { RemoteResourceType } from '@gitlens/git/models/remoteResource.js';
+import type { GitRevisionRangeNotation } from '@gitlens/git/models/revision.js';
+import { Logger } from '@gitlens/utils/logger.js';
+import type { Container } from '../container.js';
+import { showGenericErrorMessage } from '../messages.js';
+import { command, executeCommand } from '../system/-webview/command.js';
+import { GlCommandBase } from './commandBase.js';
+import type { CommandContext } from './commandContext.js';
+import type { OpenOnRemoteCommandArgs } from './openOnRemote.js';
 
 export interface OpenComparisonOnRemoteCommandArgs {
 	clipboard?: boolean;

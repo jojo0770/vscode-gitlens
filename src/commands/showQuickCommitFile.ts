@@ -1,25 +1,26 @@
 import type { TextEditor } from 'vscode';
 import { Uri } from 'vscode';
-import type { Container } from '../container';
-import { executeGitCommand } from '../git/actions';
-import { GitUri } from '../git/gitUri';
-import type { GitCommit, GitStashCommit } from '../git/models/commit';
-import { isCommit } from '../git/models/commit';
-import type { GitLog } from '../git/models/log';
-import { createReference } from '../git/utils/reference.utils';
+import type { GitStashCommit } from '@gitlens/git/models/commit.js';
+import { GitCommit } from '@gitlens/git/models/commit.js';
+import type { GitLog } from '@gitlens/git/models/log.js';
+import { createReference } from '@gitlens/git/utils/reference.utils.js';
+import { Logger } from '@gitlens/utils/logger.js';
+import type { Source } from '../constants.telemetry.js';
+import type { Container } from '../container.js';
+import { executeGitCommand } from '../git/actions.js';
+import { GitUri } from '../git/gitUri.js';
 import {
 	showCommitNotFoundWarningMessage,
 	showFileNotUnderSourceControlWarningMessage,
 	showGenericErrorMessage,
 	showLineUncommittedWarningMessage,
-} from '../messages';
-import { command } from '../system/-webview/command';
-import { createMarkdownCommandLink } from '../system/commands';
-import { Logger } from '../system/logger';
-import { ActiveEditorCachedCommand } from './commandBase';
-import { getCommandUri } from './commandBase.utils';
-import type { CommandContext } from './commandContext';
-import { isCommandContextViewNodeHasCommit } from './commandContext.utils';
+} from '../messages.js';
+import { command } from '../system/-webview/command.js';
+import { createMarkdownCommandLink } from '../system/commands.js';
+import { ActiveEditorCachedCommand } from './commandBase.js';
+import { getCommandUri } from './commandBase.utils.js';
+import type { CommandContext } from './commandContext.js';
+import { isCommandContextViewNodeHasCommit } from './commandContext.utils.js';
 
 export interface ShowQuickCommitFileCommandArgs {
 	commit?: GitCommit | GitStashCommit;
@@ -27,6 +28,7 @@ export interface ShowQuickCommitFileCommandArgs {
 	fileLog?: GitLog;
 	revisionUri?: string;
 	sha?: string;
+	source?: Source;
 }
 
 @command()
@@ -63,7 +65,7 @@ export class ShowQuickCommitFileCommand extends ActiveEditorCachedCommand {
 
 		let gitUri;
 		if (args.revisionUri != null) {
-			gitUri = GitUri.fromRevisionUri(Uri.parse(args.revisionUri, true));
+			gitUri = new GitUri(Uri.parse(args.revisionUri, true));
 			args.sha = gitUri.sha;
 		} else {
 			gitUri = await GitUri.fromUri(uri);
@@ -129,9 +131,9 @@ export class ShowQuickCommitFileCommand extends ActiveEditorCachedCommand {
 			}
 
 			const path = args.commit?.file?.path ?? gitUri.fsPath;
-			if (isCommit(args.commit)) {
+			if (GitCommit.is(args.commit)) {
 				if (!args.commit.hasFullDetails({ allowFilteredFiles: true })) {
-					await args.commit.ensureFullDetails();
+					await GitCommit.ensureFullDetails(args.commit);
 				}
 			}
 
@@ -153,7 +155,11 @@ export class ShowQuickCommitFileCommand extends ActiveEditorCachedCommand {
 @command()
 export class ShowQuickCommitRevisionCommand extends ActiveEditorCachedCommand {
 	constructor(private readonly container: Container) {
-		super('gitlens.showQuickRevisionDetails');
+		super([
+			'gitlens.showQuickRevisionDetails',
+			'gitlens.showQuickRevisionDetails:editor',
+			'gitlens.showQuickRevisionDetails:editor/title',
+		]);
 	}
 
 	async execute(editor?: TextEditor, uri?: Uri): Promise<void> {

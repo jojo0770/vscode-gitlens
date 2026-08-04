@@ -1,18 +1,19 @@
 import type { Command, Uri } from 'vscode';
 import { ThemeIcon, TreeItem, TreeItemCollapsibleState } from 'vscode';
-import { StatusFileFormatter } from '../../git/formatters/statusFormatter';
-import { GitUri } from '../../git/gitUri';
-import type { GitFile } from '../../git/models/file';
-import type { GitPausedOperationStatus } from '../../git/models/pausedOperationStatus';
-import { createCoreCommand } from '../../system/-webview/command';
-import { relativeDir } from '../../system/-webview/path';
-import type { ViewsWithCommits } from '../viewBase';
-import { getFileTooltipMarkdown, ViewFileNode } from './abstract/viewFileNode';
-import type { ViewNode } from './abstract/viewNode';
-import { ContextValues } from './abstract/viewNode';
-import type { FileNode } from './folderNode';
-import { MergeConflictCurrentChangesNode } from './mergeConflictCurrentChangesNode';
-import { MergeConflictIncomingChangesNode } from './mergeConflictIncomingChangesNode';
+import type { GitFile } from '@gitlens/git/models/file.js';
+import type { GitPausedOperationStatus } from '@gitlens/git/models/pausedOperationStatus.js';
+import { getConflictIncomingRef, resolveConflictFilePaths } from '@gitlens/git/utils/pausedOperationStatus.utils.js';
+import { getSettledValue } from '@gitlens/utils/promise.js';
+import { StatusFileFormatter } from '../../git/formatters/statusFormatter.js';
+import { GitUri } from '../../git/gitUri.js';
+import { createCoreCommand } from '../../system/-webview/command.js';
+import { relativeDir } from '../../system/-webview/path.js';
+import type { ViewsWithCommits } from '../viewBase.js';
+import { getFileTooltipMarkdown, ViewFileNode } from './abstract/viewFileNode.js';
+import type { ViewNode } from './abstract/viewNode.js';
+import { ContextValues } from './abstract/viewNode.js';
+import type { FileNode } from './folderNode.js';
+import { MergeConflictChangesNode } from './mergeConflictChangesNode.js';
 
 export class MergeConflictFileNode extends ViewFileNode<'conflict-file', ViewsWithCommits> implements FileNode {
 	constructor(
@@ -36,11 +37,60 @@ export class MergeConflictFileNode extends ViewFileNode<'conflict-file', ViewsWi
 		return this.file.path;
 	}
 
-	getChildren(): ViewNode[] {
+	async getChildren(): Promise<ViewNode[]> {
+		const incomingRef = getConflictIncomingRef(this.status);
+
+		let currentPaths: { lhsPath: string; rhsPath: string } | undefined;
+		let incomingPaths: { lhsPath: string; rhsPath: string } | undefined;
+
+		if (this.status.mergeBase != null) {
+			const svc = this.view.container.git.getRepositoryService(this.status.repoPath);
+
+			const [currentFilesResult, incomingFilesResult] = await Promise.allSettled([
+				svc.diff.getDiffStatus(this.status.mergeBase, 'HEAD', { renameLimit: 0 }),
+				incomingRef != null
+					? svc.diff.getDiffStatus(this.status.mergeBase, incomingRef, { renameLimit: 0 })
+					: undefined,
+			]);
+
+			const currentFiles = getSettledValue(currentFilesResult);
+			const incomingFiles = getSettledValue(incomingFilesResult);
+
+			currentPaths = resolveConflictFilePaths(currentFiles, incomingFiles, this.file.path);
+			incomingPaths =
+				incomingRef != null ? resolveConflictFilePaths(incomingFiles, currentFiles, this.file.path) : undefined;
+		}
+
+		// Create side-specific file objects with the correct path for each side's ref
+		const currentFile = this.createResolvedFile(currentPaths);
+		const incomingFile = this.createResolvedFile(incomingPaths);
+
 		return [
-			new MergeConflictCurrentChangesNode(this.view, this, this.status, this.file),
-			new MergeConflictIncomingChangesNode(this.view, this, this.status, this.file),
+			new MergeConflictChangesNode(
+				this.view,
+				this,
+				this.status,
+				currentFile,
+				'current',
+				currentPaths?.lhsPath,
+				this.file.path,
+			),
+			new MergeConflictChangesNode(
+				this.view,
+				this,
+				this.status,
+				incomingFile,
+				'incoming',
+				incomingPaths?.lhsPath,
+				this.file.path,
+			),
 		];
+	}
+
+	private createResolvedFile(paths: { lhsPath: string; rhsPath: string } | undefined): GitFile {
+		if (paths == null || paths.rhsPath === this.file.path) return this.file;
+
+		return { ...this.file, path: paths.rhsPath, originalPath: paths.lhsPath };
 	}
 
 	getTreeItem(): TreeItem {
@@ -64,33 +114,23 @@ export class MergeConflictFileNode extends ViewFileNode<'conflict-file', ViewsWi
 
 	private _description: string | undefined;
 	get description(): string {
-		if (this._description == null) {
-			this._description = StatusFileFormatter.fromTemplate(
-				this.view.config.formats.files.description,
-				this.file,
-				{
-					relativePath: this.relativePath,
-				},
-			);
-		}
+		this._description ??= StatusFileFormatter.fromTemplate(this.view.config.formats.files.description, this.file, {
+			relativePath: this.relativePath,
+		});
 		return this._description;
 	}
 
 	private _folderName: string | undefined;
 	get folderName(): string {
-		if (this._folderName == null) {
-			this._folderName = relativeDir(this.uri.relativePath);
-		}
+		this._folderName ??= relativeDir(this.uri.relativePath);
 		return this._folderName;
 	}
 
 	private _label: string | undefined;
 	get label(): string {
-		if (this._label == null) {
-			this._label = StatusFileFormatter.fromTemplate(this.view.config.formats.files.label, this.file, {
-				relativePath: this.relativePath,
-			});
-		}
+		this._label ??= StatusFileFormatter.fromTemplate(this.view.config.formats.files.label, this.file, {
+			relativePath: this.relativePath,
+		});
 		return this._label;
 	}
 

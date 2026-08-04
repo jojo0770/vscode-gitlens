@@ -1,7 +1,7 @@
-import type { GKCheckInResponse, GKLicense, GKLicenseType } from '../models/checkin';
-import type { Organization } from '../models/organization';
-import type { Subscription, SubscriptionPlanIds } from '../models/subscription';
-import { compareSubscriptionPlans, getSubscriptionPlan, getSubscriptionPlanOrder } from './subscription.utils';
+import type { GKCheckInResponse, GKLicense, GKLicenseType } from '../models/checkin.js';
+import type { Organization } from '../models/organization.js';
+import type { Subscription, SubscriptionPlanIds } from '../models/subscription.js';
+import { compareSubscriptionPlans, getSubscriptionPlan, getSubscriptionPlanOrder } from './subscription.utils.js';
 
 export function getSubscriptionFromCheckIn(
 	data: GKCheckInResponse,
@@ -21,6 +21,19 @@ export function getSubscriptionFromCheckIn(
 	paidLicenses = paidLicenses.filter(
 		license => license[1].latestStatus !== 'expired' && license[1].latestStatus !== 'cancelled',
 	);
+
+	// if there are any paid licenses with status of in_trial, move them to effectiveLicenses
+	for (let i = 0; i < paidLicenses.length; i++) {
+		const [, license] = paidLicenses[i];
+		if (
+			(license.latestStatus === 'in_trial' || license.latestStatus === 'trial') &&
+			license.hasPaymentSource !== true
+		) {
+			effectiveLicenses.push(paidLicenses.splice(i, 1)[0]);
+			i--;
+		}
+	}
+
 	if (paidLicenses.length > 1) {
 		paidLicenses.sort(
 			(a, b) =>
@@ -43,6 +56,7 @@ export function getSubscriptionFromCheckIn(
 	for (const licenseData of effectiveLicenses) {
 		const [, license] = licenseData;
 		if (license.organizationId == null) continue;
+
 		const existingLicense = effectiveLicensesByOrganizationId.get(license.organizationId);
 		if (existingLicense == null) {
 			effectiveLicensesByOrganizationId.set(license.organizationId, licenseData);
@@ -52,6 +66,7 @@ export function getSubscriptionFromCheckIn(
 	for (const licenseData of paidLicenses) {
 		const [, license] = licenseData;
 		if (license.organizationId == null) continue;
+
 		const existingLicense = paidLicensesByOrganizationId.get(license.organizationId);
 		if (existingLicense == null) {
 			paidLicensesByOrganizationId.set(license.organizationId, licenseData);
@@ -92,22 +107,20 @@ export function getSubscriptionFromCheckIn(
 		);
 	}
 
-	if (actual == null) {
-		actual = getSubscriptionPlan(
-			'community-with-account',
-			false,
-			0,
-			undefined,
-			data.user.firstGitLensCheckIn != null
-				? new Date(data.user.firstGitLensCheckIn)
-				: data.user.createdDate != null
-					? new Date(data.user.createdDate)
-					: undefined,
-			undefined,
-			undefined,
-			data.nextOptInDate,
-		);
-	}
+	actual ??= getSubscriptionPlan(
+		'community-with-account',
+		false,
+		0,
+		undefined,
+		data.user.firstGitLensCheckIn != null
+			? new Date(data.user.firstGitLensCheckIn)
+			: data.user.createdDate != null
+				? new Date(data.user.createdDate)
+				: undefined,
+		undefined,
+		undefined,
+		data.nextOptInDate,
+	);
 
 	let effective: Subscription['plan']['effective'] | undefined;
 	const chosenEffectiveLicense =
@@ -152,6 +165,11 @@ export function getSubscriptionFromCheckIn(
 }
 function convertLicenseTypeToPlanId(licenseType: GKLicenseType): SubscriptionPlanIds {
 	switch (licenseType) {
+		case 'gitlens-edu':
+		case 'bundle-edu':
+		case 'gitkraken_v1-edu':
+		case 'gitkraken-v1-edu':
+			return 'student';
 		case 'gitlens-pro':
 		case 'bundle-pro':
 		case 'gitkraken_v1-pro':

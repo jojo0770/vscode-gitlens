@@ -1,14 +1,14 @@
 import type { Uri } from 'vscode';
 import { TabInputCustom, TabInputNotebook, TabInputNotebookDiff, TabInputText, TabInputTextDiff, window } from 'vscode';
-import type { Container } from '../container';
-import { showGenericErrorMessage } from '../messages';
-import { getRepositoryOrShowPicker } from '../quickpicks/repositoryPicker';
-import { command } from '../system/-webview/command';
-import { openTextEditors } from '../system/-webview/vscode/editors';
-import { filterMap } from '../system/array';
-import { Logger } from '../system/logger';
-import { areUrisEqual } from '../system/uri';
-import { GlCommandBase } from './commandBase';
+import { filterMap } from '@gitlens/utils/array.js';
+import { Logger } from '@gitlens/utils/logger.js';
+import { areUrisEqual } from '@gitlens/utils/uri.js';
+import type { Container } from '../container.js';
+import { showGenericErrorMessage } from '../messages.js';
+import { getRepositoryOrShowPicker } from '../quickpicks/repositoryPicker.js';
+import { command } from '../system/-webview/command.js';
+import { openTextEditors } from '../system/-webview/vscode/editors.js';
+import { GlCommandBase } from './commandBase.js';
 
 export interface OpenOnlyChangedFilesCommandArgs {
 	uris?: Uri[];
@@ -25,7 +25,7 @@ export class OpenOnlyChangedFilesCommand extends GlCommandBase {
 
 		try {
 			if (args.uris == null) {
-				const repo = await getRepositoryOrShowPicker('Open Changed & Close Unchanged Files');
+				const repo = await getRepositoryOrShowPicker(this.container, 'Open Changed & Close Unchanged Files');
 				if (repo == null) return;
 
 				const status = await repo.git.status.getStatus();
@@ -63,7 +63,8 @@ export class OpenOnlyChangedFilesCommand extends GlCommandBase {
 					}
 
 					if (inputUri == null) continue;
-					// eslint-disable-next-line no-loop-func
+
+					// oxlint-disable-next-line no-loop-func
 					matchingUri = args.uris.find(uri => areUrisEqual(uri, inputUri));
 					if (matchingUri != null) {
 						openUris.delete(matchingUri);

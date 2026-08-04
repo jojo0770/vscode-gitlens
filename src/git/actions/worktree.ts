@@ -1,17 +1,18 @@
 import type { Uri } from 'vscode';
-import type { WorktreeGitCommandArgs } from '../../commands/git/worktree';
-import { Container } from '../../container';
-import type { OpenWorkspaceLocation } from '../../system/-webview/vscode/workspaces';
-import { defer } from '../../system/promise';
-import type { ViewNode } from '../../views/nodes/abstract/viewNode';
-import type { RevealOptions } from '../../views/viewBase';
-import { executeGitCommand } from '../actions';
-import type { GitReference } from '../models/reference';
-import type { Repository } from '../models/repository';
-import type { GitWorktree } from '../models/worktree';
+import type { GitReference } from '@gitlens/git/models/reference.js';
+import type { GitWorktree } from '@gitlens/git/models/worktree.js';
+import { defer } from '@gitlens/utils/promise.js';
+import type { WorktreeOpenState } from '../../commands/git/worktree/open.js';
+import { Container } from '../../container.js';
+import { showGitErrorMessage } from '../../messages.js';
+import type { OpenWorkspaceLocation } from '../../system/-webview/vscode/workspaces.js';
+import type { ViewNode } from '../../views/nodes/abstract/viewNode.js';
+import type { RevealOptions } from '../../views/viewBase.js';
+import { executeGitCommand } from '../actions.js';
+import type { GlRepository } from '../models/repository.js';
 
 export async function create(
-	repo?: string | Repository,
+	repo?: string | GlRepository,
 	uri?: Uri,
 	ref?: GitReference,
 	options?: { addRemote?: { name: string; url: string }; createBranch?: string; reveal?: boolean },
@@ -42,19 +43,13 @@ export async function create(
 
 export function copyChangesToWorktree(
 	type: 'working-tree' | 'index',
-	repo?: string | Repository,
+	repo?: string | GlRepository,
 	target?: GitWorktree,
 	source?: GitWorktree,
 ): Promise<void> {
 	return executeGitCommand({
 		command: 'worktree',
-		state: {
-			subcommand: 'copy-changes',
-			repo: repo,
-			source: source,
-			target: target,
-			changes: { type: type },
-		},
+		state: { subcommand: 'copy-changes', repo: repo, source: source, target: target, changes: { type: type } },
 	});
 }
 
@@ -74,21 +69,26 @@ export function open(
 	});
 }
 
-export function remove(repo?: string | Repository, uris?: Uri[]): Promise<void> {
+export function remove(repo?: string | GlRepository, uris?: Uri[]): Promise<void> {
 	return executeGitCommand({
 		command: 'worktree',
 		state: { subcommand: 'delete', repo: repo, uris: uris },
 	});
 }
 
+export async function unlock(worktree: GitWorktree): Promise<void> {
+	try {
+		await Container.instance.git.getRepositoryService(worktree.repoPath).worktrees?.unlockWorktree(worktree.uri);
+	} catch (ex) {
+		void showGitErrorMessage(ex, `Unable to unlock worktree '${worktree.name}': ${ex.message}`);
+	}
+}
+
 export function revealWorktree(worktree: GitWorktree, options?: RevealOptions): Promise<ViewNode | undefined> {
 	return Container.instance.views.revealWorktree(worktree, options);
 }
 
-type OpenFlags = Extract<
-	NonNullable<Required<WorktreeGitCommandArgs['state']>>,
-	{ subcommand: 'open' }
->['flags'][number];
+type OpenFlags = WorktreeOpenState['flags'][number];
 
 export function convertLocationToOpenFlags(location: OpenWorkspaceLocation): OpenFlags[];
 export function convertLocationToOpenFlags(location: OpenWorkspaceLocation | undefined): OpenFlags[] | undefined;

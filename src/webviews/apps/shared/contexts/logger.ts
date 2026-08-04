@@ -1,11 +1,11 @@
 import { createContext } from '@lit/context';
-import { Logger } from '../../../../system/logger';
-import type { LogScope } from '../../../../system/logger.scope';
-import { getNewLogScope } from '../../../../system/logger.scope';
-import { padOrTruncateEnd } from '../../../../system/string';
+import { Logger } from '@gitlens/utils/logger.js';
+import type { ScopedLogger } from '@gitlens/utils/logger.scoped.js';
+import { getNewLogScope } from '@gitlens/utils/logger.scoped.js';
+import { padOrTruncateEnd } from '@gitlens/utils/string.js';
 
 export class LoggerContext {
-	private readonly scope: LogScope;
+	private readonly scope: ScopedLogger;
 
 	constructor(appName: string) {
 		this.scope = getNewLogScope(appName, undefined);
@@ -13,26 +13,54 @@ export class LoggerContext {
 			{
 				name: appName,
 				createChannel: function (name: string) {
+					const appendLine = Logger.isDebugging
+						? function (_message: string, ..._args: any[]) {} // if debugging, don't log to the console, because the logger already will
+						: function (message: string, ...args: any[]) {
+								console.log(
+									`[${padOrTruncateEnd(name, 13)}]`,
+									Logger.timestamp,
+									message ?? '',
+									...args,
+								);
+							};
+
 					return {
 						name: name,
-						appendLine: Logger.isDebugging
-							? function () {} // if debugging, don't log to the console, because the logger already will
-							: function (value: string) {
-									console.log(`[${padOrTruncateEnd(name, 13)}] ${value}`);
-								},
+						logLevel: DEBUG ? 2 : 0,
+
+						trace: appendLine,
+						debug: appendLine,
+						info: appendLine,
+						warn: appendLine,
+						error: appendLine,
 					};
 				},
 			},
-			DEBUG ? 'debug' : 'off',
 			DEBUG,
 		);
 	}
 
-	log(messageOrScope: string | LogScope | undefined, ...optionalParams: any[]): void {
+	trace(messageOrScope: string | ScopedLogger | undefined, ...optionalParams: any[]): void {
 		if (typeof messageOrScope === 'string') {
-			Logger.log(this.scope, messageOrScope, ...optionalParams);
+			Logger.trace(this.scope, messageOrScope, ...optionalParams);
 		} else {
-			Logger.log(messageOrScope, optionalParams.shift(), ...optionalParams);
+			Logger.trace(messageOrScope, optionalParams.shift(), ...optionalParams);
+		}
+	}
+
+	debug(messageOrScope: string | ScopedLogger | undefined, ...optionalParams: any[]): void {
+		if (typeof messageOrScope === 'string') {
+			Logger.debug(this.scope, messageOrScope, ...optionalParams);
+		} else {
+			Logger.debug(messageOrScope, optionalParams.shift(), ...optionalParams);
+		}
+	}
+
+	info(messageOrScope: string | ScopedLogger | undefined, ...optionalParams: any[]): void {
+		if (typeof messageOrScope === 'string') {
+			Logger.info(this.scope, messageOrScope, ...optionalParams);
+		} else {
+			Logger.info(messageOrScope, optionalParams.shift(), ...optionalParams);
 		}
 	}
 }

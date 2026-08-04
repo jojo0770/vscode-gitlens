@@ -1,18 +1,19 @@
 import type { TextDocumentShowOptions, TextEditor, Uri } from 'vscode';
 import { window } from 'vscode';
-import type { Container } from '../container';
-import type { DiffRange } from '../git/gitProvider';
-import { GitUri } from '../git/gitUri';
-import type { GitCommit } from '../git/models/commit';
-import { uncommittedStaged } from '../git/models/revision';
-import { showFileNotUnderSourceControlWarningMessage, showGenericErrorMessage } from '../messages';
-import { command, executeCommand } from '../system/-webview/command';
-import { diffRangeToEditorLine, selectionToDiffRange } from '../system/-webview/vscode/editors';
-import { Logger } from '../system/logger';
-import { ActiveEditorCommand } from './commandBase';
-import { getCommandUri } from './commandBase.utils';
-import type { CommandContext } from './commandContext';
-import type { DiffWithCommandArgs } from './diffWith';
+import type { GitCommit } from '@gitlens/git/models/commit.js';
+import { uncommittedStaged } from '@gitlens/git/models/revision.js';
+import type { DiffRange } from '@gitlens/git/providers/types.js';
+import { Logger } from '@gitlens/utils/logger.js';
+import type { Container } from '../container.js';
+import { GitUri } from '../git/gitUri.js';
+import { getFileChangeWorkingUri } from '../git/utils/-webview/fileChange.utils.js';
+import { showFileNotUnderSourceControlWarningMessage, showGenericErrorMessage } from '../messages.js';
+import { command, executeCommand } from '../system/-webview/command.js';
+import { diffRangeToEditorLine, selectionToDiffRange } from '../system/-webview/vscode/range.js';
+import { ActiveEditorCommand } from './commandBase.js';
+import { getCommandUri } from './commandBase.utils.js';
+import type { CommandContext } from './commandContext.js';
+import type { DiffWithCommandArgs } from './diffWith.js';
 
 export interface DiffLineWithWorkingCommandArgs {
 	commit?: GitCommit;
@@ -29,7 +30,10 @@ export class DiffLineWithWorkingCommand extends ActiveEditorCommand {
 
 	protected override preExecute(context: CommandContext, args?: DiffLineWithWorkingCommandArgs): Promise<any> {
 		if (context.type === 'editorLine') {
-			args = { ...args, range: { startLine: context.line, endLine: context.line } };
+			args = {
+				...args,
+				range: { startLine: context.line, startCharacter: 1, endLine: context.line, endCharacter: 1 },
+			};
 		}
 
 		return this.execute(context.editor, context.uri, args);
@@ -77,7 +81,12 @@ export class DiffLineWithWorkingCommand extends ActiveEditorCommand {
 					lhsSha = args.commit.sha;
 					lhsUri = args.commit.file!.uri;
 				}
-				args.range = { startLine: blame.line.line, endLine: blame.line.line };
+				args.range = {
+					startLine: blame.line.line,
+					startCharacter: 1,
+					endLine: blame.line.line,
+					endCharacter: 1,
+				};
 			} catch (ex) {
 				Logger.error(ex, 'DiffLineWithWorkingCommand', `getBlameForLine(${blameEditorLine})`);
 				void showGenericErrorMessage('Unable to open compare');
@@ -89,7 +98,7 @@ export class DiffLineWithWorkingCommand extends ActiveEditorCommand {
 			lhsUri = args.commit.file?.uri ?? gitUri;
 		}
 
-		const workingUri = await args.commit.file?.getWorkingUri();
+		const workingUri = args.commit.file != null ? await getFileChangeWorkingUri(args.commit.file) : undefined;
 		if (workingUri == null) {
 			void window.showWarningMessage('Unable to open compare. File has been deleted from the working tree');
 

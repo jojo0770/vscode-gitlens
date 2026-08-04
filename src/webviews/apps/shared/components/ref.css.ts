@@ -5,9 +5,7 @@ export const refButtonBaseStyles = css`
 		box-sizing: border-box;
 		display: flex;
 		align-items: center;
-
 		max-width: 100%;
-		min-width: 4.6rem;
 	}
 
 	* {
@@ -17,9 +15,9 @@ export const refButtonBaseStyles = css`
 
 export const pickerIconStyles = css`
 	code-icon.picker-icon {
-		font-size: 1rem;
 		/* margin-top: 0.4rem; */
 		margin-right: -0.25rem;
+		font-size: var(--gl-font-micro);
 	}
 
 	code-icon.picker-icon::before {
@@ -29,13 +27,15 @@ export const pickerIconStyles = css`
 
 export const truncatedButtonStyles = css`
 	.truncated-button {
+		min-width: 0;
 		max-width: 100%;
-		min-width: 4rem;
 	}
+
 	gl-button[disabled] {
-		opacity: 1;
 		cursor: default;
+		opacity: 1;
 	}
+
 	.truncated-button__label {
 		max-width: 100%;
 		overflow: hidden;

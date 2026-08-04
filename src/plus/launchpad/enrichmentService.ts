@@ -1,19 +1,19 @@
 import type { CancellationToken, Disposable } from 'vscode';
-import type { IntegrationIds } from '../../constants.integrations';
+import type { RemoteProvider, RemoteProviderId } from '@gitlens/git/models/remoteProvider.js';
+import type { IntegrationIds } from '@gitlens/integrations/constants.js';
 import {
 	GitCloudHostIntegrationId,
 	GitSelfManagedHostIntegrationId,
 	IssuesCloudHostIntegrationId,
-} from '../../constants.integrations';
-import type { Container } from '../../container';
-import { AuthenticationRequiredError, CancellationError } from '../../errors';
-import type { RemoteProvider } from '../../git/remotes/remoteProvider';
-import { log } from '../../system/decorators/log';
-import { Logger } from '../../system/logger';
-import { getLogScope } from '../../system/logger.scope';
-import type { ServerConnection } from '../gk/serverConnection';
-import { ensureAccount } from '../gk/utils/-webview/acount.utils';
-import type { EnrichableItem, EnrichedItem, EnrichedItemResponse } from './models/enrichedItem';
+} from '@gitlens/integrations/constants.js';
+import { CancellationError } from '@gitlens/utils/cancellation.js';
+import { debug } from '@gitlens/utils/decorators/log.js';
+import { getScopedLogger } from '@gitlens/utils/logger.scoped.js';
+import type { Container } from '../../container.js';
+import { AuthenticationRequiredError } from '../../errors.js';
+import type { ServerConnection } from '../gk/serverConnection.js';
+import { ensureAccount } from '../gk/utils/-webview/acount.utils.js';
+import type { EnrichableItem, EnrichedItem, EnrichedItemResponse } from './models/enrichedItem.js';
 
 type EnrichedItemRequest = {
 	provider: EnrichedItemResponse['provider'];
@@ -32,22 +32,24 @@ export class EnrichmentService implements Disposable {
 	dispose(): void {}
 
 	private async delete(id: string, context: 'unpin' | 'unsnooze'): Promise<void> {
-		const scope = getLogScope();
+		const scope = getScopedLogger();
 
 		try {
 			const rsp = await this.connection.fetchGkApi(`v1/enrich-items/${id}`, { method: 'DELETE' });
 
 			if (!rsp.ok) throw new Error(`Unable to ${context} item '${id}':  (${rsp.status}) ${rsp.statusText}`);
 		} catch (ex) {
-			Logger.error(ex, scope);
+			if (ex instanceof AuthenticationRequiredError) throw ex;
+
+			scope?.error(ex);
 			debugger;
 			throw ex;
 		}
 	}
 
-	@log()
+	@debug()
 	async get(type?: EnrichedItemResponse['type'], cancellation?: CancellationToken): Promise<EnrichedItem[]> {
-		const scope = getLogScope();
+		const scope = getScopedLogger();
 
 		try {
 			type Result = { data: EnrichedItemResponse[] };
@@ -62,25 +64,25 @@ export class EnrichmentService implements Disposable {
 		} catch (ex) {
 			if (ex instanceof AuthenticationRequiredError) return [];
 
-			Logger.error(ex, scope);
+			scope?.error(ex);
 			debugger;
 			throw ex;
 		}
 	}
 
-	@log()
+	@debug()
 	getPins(cancellation?: CancellationToken): Promise<EnrichedItem[]> {
 		return this.get('pin', cancellation);
 	}
 
-	@log()
+	@debug()
 	getSnoozed(cancellation?: CancellationToken): Promise<EnrichedItem[]> {
 		return this.get('snooze', cancellation);
 	}
 
-	@log<EnrichmentService['pinItem']>({ args: { 0: i => `${i.id} (${i.provider} ${i.type})` } })
+	@debug({ args: item => ({ item: `${item.id} (${item.provider} ${item.type})` }) })
 	async pinItem(item: EnrichableItem): Promise<EnrichedItem> {
-		const scope = getLogScope();
+		const scope = getScopedLogger();
 
 		try {
 			if (
@@ -115,20 +117,22 @@ export class EnrichmentService implements Disposable {
 			const result = (await rsp.json()) as Result;
 			return result.data;
 		} catch (ex) {
-			Logger.error(ex, scope);
+			if (ex instanceof AuthenticationRequiredError) throw ex;
+
+			scope?.error(ex);
 			debugger;
 			throw ex;
 		}
 	}
 
-	@log()
+	@debug()
 	unpinItem(id: string): Promise<void> {
 		return this.delete(id, 'unpin');
 	}
 
-	@log<EnrichmentService['snoozeItem']>({ args: { 0: i => `${i.id} (${i.provider} ${i.type})` } })
+	@debug({ args: item => ({ item: `${item.id} (${item.provider} ${item.type})` }) })
 	async snoozeItem(item: EnrichableItem): Promise<EnrichedItem> {
-		const scope = getLogScope();
+		const scope = getScopedLogger();
 
 		try {
 			if (
@@ -166,19 +170,21 @@ export class EnrichmentService implements Disposable {
 			const result = (await rsp.json()) as Result;
 			return result.data;
 		} catch (ex) {
-			Logger.error(ex, scope);
+			if (ex instanceof AuthenticationRequiredError) throw ex;
+
+			scope?.error(ex);
 			debugger;
 			throw ex;
 		}
 	}
 
-	@log()
+	@debug()
 	unsnoozeItem(id: string): Promise<void> {
 		return this.delete(id, 'unsnooze');
 	}
 }
 
-const supportedRemoteProvidersToEnrich: Record<RemoteProvider['id'], EnrichedItemResponse['provider'] | undefined> = {
+const supportedRemoteProvidersToEnrich: Record<RemoteProviderId, EnrichedItemResponse['provider'] | undefined> = {
 	'azure-devops': 'azure',
 	bitbucket: 'bitbucket',
 	'bitbucket-server': 'bitbucket',
@@ -194,15 +200,15 @@ const supportedRemoteProvidersToEnrich: Record<RemoteProvider['id'], EnrichedIte
 
 const supportedIntegrationIdsToEnrich: Record<IntegrationIds, EnrichedItemResponse['provider'] | undefined> = {
 	[GitCloudHostIntegrationId.AzureDevOps]: 'azure',
+	[GitSelfManagedHostIntegrationId.AzureDevOpsServer]: 'azure',
 	[GitCloudHostIntegrationId.GitLab]: 'gitlab',
 	[GitCloudHostIntegrationId.GitHub]: 'github',
 	[GitCloudHostIntegrationId.Bitbucket]: 'bitbucket',
 	[GitSelfManagedHostIntegrationId.CloudGitHubEnterprise]: 'github',
-	[GitSelfManagedHostIntegrationId.GitHubEnterprise]: 'github',
 	[GitSelfManagedHostIntegrationId.CloudGitLabSelfHosted]: 'gitlab',
-	[GitSelfManagedHostIntegrationId.GitLabSelfHosted]: 'gitlab',
 	[GitSelfManagedHostIntegrationId.BitbucketServer]: 'bitbucket',
 	[IssuesCloudHostIntegrationId.Jira]: 'jira',
+	[IssuesCloudHostIntegrationId.Linear]: 'linear',
 	[IssuesCloudHostIntegrationId.Trello]: 'trello',
 };
 
@@ -210,14 +216,14 @@ export function convertRemoteProviderToEnrichProvider(provider: RemoteProvider):
 	return convertRemoteProviderIdToEnrichProvider(provider.id);
 }
 
-export function convertRemoteProviderIdToEnrichProvider(id: RemoteProvider['id']): EnrichedItemResponse['provider'] {
+export function convertRemoteProviderIdToEnrichProvider(id: RemoteProviderId): EnrichedItemResponse['provider'] {
 	const enrichProvider = supportedRemoteProvidersToEnrich[id];
 	if (enrichProvider == null) throw new Error(`Unknown remote provider '${id}'`);
 	return enrichProvider;
 }
 
-export function isEnrichableRemoteProviderId(id: string): id is RemoteProvider['id'] {
-	return supportedRemoteProvidersToEnrich[id as RemoteProvider['id']] != null;
+export function isEnrichableRemoteProviderId(id: string): id is RemoteProviderId {
+	return supportedRemoteProvidersToEnrich[id as RemoteProviderId] != null;
 }
 
 export function isEnrichableIntegrationId(id: IntegrationIds): boolean {

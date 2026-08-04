@@ -1,14 +1,14 @@
 import type { TextEditor, Uri } from 'vscode';
-import type { Container } from '../container';
-import { GitUri } from '../git/gitUri';
-import { showGenericErrorMessage } from '../messages';
-import { command, executeCoreCommand } from '../system/-webview/command';
-import { openWorkspace } from '../system/-webview/vscode/workspaces';
-import { Logger } from '../system/logger';
-import { basename } from '../system/path';
-import { ActiveEditorCommand } from './commandBase';
-import { getCommandUri } from './commandBase.utils';
-import type { CommandContext } from './commandContext';
+import { Logger } from '@gitlens/utils/logger.js';
+import { basename } from '@gitlens/utils/path.js';
+import type { Container } from '../container.js';
+import { GitUri } from '../git/gitUri.js';
+import { showGenericErrorMessage } from '../messages.js';
+import { command, executeCoreCommand } from '../system/-webview/command.js';
+import { openWorkspace } from '../system/-webview/vscode/workspaces.js';
+import { ActiveEditorCommand } from './commandBase.js';
+import { getCommandUri } from './commandBase.utils.js';
+import type { CommandContext } from './commandContext.js';
 
 export interface BrowseRepoAtRevisionCommandArgs {
 	uri?: Uri;
@@ -62,7 +62,7 @@ export class BrowseRepoAtRevisionCommand extends ActiveEditorCommand {
 
 			const sha = args?.before ? (await svc.revision.resolveRevision(`${gitUri.sha}^`)).sha : gitUri.sha;
 			uri = svc.getRevisionUri(sha, gitUri.repoPath);
-			gitUri = GitUri.fromRevisionUri(uri);
+			gitUri = new GitUri(uri);
 
 			openWorkspace(uri, {
 				location: args.openInNewWindow ? 'newWindow' : 'addToWorkspace',

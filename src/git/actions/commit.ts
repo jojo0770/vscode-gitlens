@@ -1,37 +1,52 @@
 import type { TextDocumentShowOptions, TextEditor, ViewColumn } from 'vscode';
 import { env, Range, Uri, window, workspace } from 'vscode';
-import type { DiffWithCommandArgs } from '../../commands/diffWith';
-import type { DiffWithPreviousCommandArgs } from '../../commands/diffWithPrevious';
-import type { DiffWithWorkingCommandArgs } from '../../commands/diffWithWorking';
-import type { ExplainCommitCommandArgs } from '../../commands/explainCommit';
-import type { OpenFileOnRemoteCommandArgs } from '../../commands/openFileOnRemote';
-import type { OpenOnlyChangedFilesCommandArgs } from '../../commands/openOnlyChangedFiles';
-import type { OpenWorkingFileCommandArgs } from '../../commands/openWorkingFile';
-import type { ShowQuickCommitCommandArgs } from '../../commands/showQuickCommit';
-import type { ShowQuickCommitFileCommandArgs } from '../../commands/showQuickCommitFile';
-import type { FileAnnotationType } from '../../config';
-import { GlyphChars } from '../../constants';
-import type { Source } from '../../constants.telemetry';
-import { Container } from '../../container';
-import { showRevisionFilesPicker } from '../../quickpicks/revisionFilesPicker';
-import { executeCommand, executeCoreGitCommand, executeEditorCommand } from '../../system/-webview/command';
-import { configuration } from '../../system/-webview/configuration';
-import { getOrOpenTextEditor, openChangesEditor, openTextEditors } from '../../system/-webview/vscode/editors';
-import { getSettledValue } from '../../system/promise';
-import type { ViewNode } from '../../views/nodes/abstract/viewNode';
-import type { RevealOptions } from '../../views/viewBase';
-import type { ShowInCommitGraphCommandArgs } from '../../webviews/plus/graph/registration';
-import { GitUri } from '../gitUri';
-import type { GitCommit } from '../models/commit';
-import { isCommit } from '../models/commit';
-import type { GitFile } from '../models/file';
-import { GitFileChange } from '../models/fileChange';
-import type { GitRevisionReference } from '../models/reference';
-import { deletedOrMissing } from '../models/revision';
-import { getAheadBehindFilesQuery } from '../queryResults';
-import { getReferenceFromRevision } from '../utils/-webview/reference.utils';
-import { createReference, getReferenceLabel } from '../utils/reference.utils';
-import { createRevisionRange, isUncommitted, isUncommittedStaged, shortenRevision } from '../utils/revision.utils';
+import { GitCommit } from '@gitlens/git/models/commit.js';
+import type { GitFile } from '@gitlens/git/models/file.js';
+import type { GitFileChangeShape } from '@gitlens/git/models/fileChange.js';
+import { GitFileChange } from '@gitlens/git/models/fileChange.js';
+import type { GitRevisionReference } from '@gitlens/git/models/reference.js';
+import { deletedOrMissing, uncommittedStaged } from '@gitlens/git/models/revision.js';
+import { createReference, getReferenceLabel } from '@gitlens/git/utils/reference.utils.js';
+import {
+	createRevisionRange,
+	isUncommitted,
+	isUncommittedStaged,
+	shortenRevision,
+} from '@gitlens/git/utils/revision.utils.js';
+import { basename } from '@gitlens/utils/path.js';
+import { getSettledValue } from '@gitlens/utils/promise.js';
+import { fileUri, joinUriPath } from '@gitlens/utils/uri.js';
+import type { DiffWithCommandArgs } from '../../commands/diffWith.js';
+import type { DiffWithPreviousCommandArgs } from '../../commands/diffWithPrevious.js';
+import type { DiffWithWorkingCommandArgs } from '../../commands/diffWithWorking.js';
+import type { ExplainCommitCommandArgs } from '../../commands/explainCommit.js';
+import type { OpenFileOnRemoteCommandArgs } from '../../commands/openFileOnRemote.js';
+import type { OpenOnlyChangedFilesCommandArgs } from '../../commands/openOnlyChangedFiles.js';
+import type { OpenWorkingFileCommandArgs } from '../../commands/openWorkingFile.js';
+import type { ShowQuickCommitCommandArgs } from '../../commands/showQuickCommit.js';
+import type { ShowQuickCommitFileCommandArgs } from '../../commands/showQuickCommitFile.js';
+import type { FileAnnotationType } from '../../config.js';
+import { GlyphChars } from '../../constants.js';
+import type { Source } from '../../constants.telemetry.js';
+import { Container } from '../../container.js';
+import { showGitErrorMessage } from '../../messages.js';
+import { showRevisionFilesPicker } from '../../quickpicks/revisionFilesPicker.js';
+import { executeCommand, executeEditorCommand } from '../../system/-webview/command.js';
+import { configuration } from '../../system/-webview/configuration.js';
+import {
+	getOrOpenTextEditor,
+	openChangesEditor,
+	openDiffEditor,
+	openTextEditor,
+	openTextEditors,
+} from '../../system/-webview/vscode/editors.js';
+import type { ViewNode } from '../../views/nodes/abstract/viewNode.js';
+import type { RevealOptions } from '../../views/viewBase.js';
+import type { ShowInCommitGraphCommandArgs } from '../../webviews/plus/graph/registration.js';
+import { GitUri } from '../gitUri.js';
+import { getAheadBehindFilesQuery } from '../queryResults.js';
+import { findCommitFile, getCommitDate, getCommitForFile } from '../utils/-webview/commit.utils.js';
+import { getReferenceFromRevision } from '../utils/-webview/reference.utils.js';
 
 export type Ref = { repoPath: string; ref: string };
 export type RefRange = { repoPath: string; rhs: string; lhs: string };
@@ -96,10 +111,10 @@ export async function copyIdToClipboard(ref: Ref | GitCommit): Promise<void> {
 
 export async function copyMessageToClipboard(ref: Ref | GitCommit): Promise<void> {
 	let commit;
-	if (isCommit(ref)) {
+	if (GitCommit.is(ref)) {
 		commit = ref;
 		if (commit.message == null) {
-			await commit.ensureFullDetails();
+			await GitCommit.ensureFullDetails(commit);
 		}
 	} else {
 		commit = await Container.instance.git.getRepositoryService(ref.repoPath).commits.getCommit(ref.ref);
@@ -214,7 +229,9 @@ export async function openMultipleChanges(
 
 	const resources: Parameters<typeof openChangesEditor>[0] = [];
 	for (const file of files) {
-		let rhs = file.status === 'D' ? undefined : (await svc.getBestRevisionUri(file.path, refs.rhs))!;
+		// Untracked files in a stash live in the `^3` parent (status `?` implies stash, by convention).
+		const rhsRef = file.status === '?' ? `${refs.rhs}^3` : refs.rhs;
+		let rhs = file.status === 'D' ? undefined : (await svc.getBestRevisionUri(file.path, rhsRef))!;
 		if (refs.rhs === '') {
 			if (rhs != null) {
 				rhs = await svc.getWorkingUri(rhs);
@@ -228,7 +245,11 @@ export async function openMultipleChanges(
 		}
 
 		const lhs =
-			file.status === 'A' ? undefined : (await svc.getBestRevisionUri(file.originalPath ?? file.path, refs.lhs))!;
+			file.status === 'A'
+				? undefined
+				: file.status === '?'
+					? svc.getRevisionUri(deletedOrMissing, file.originalPath ?? file.path)
+					: (await svc.getBestRevisionUri(file.originalPath ?? file.path, refs.lhs))!;
 
 		const uri = (file.status === 'D' ? lhs : rhs) ?? svc.getAbsoluteUri(file.path, refs.repoPath);
 		if (rhs?.scheme === 'untitled' && lhs == null) continue;
@@ -255,6 +276,161 @@ export async function openMultipleChangesWithWorking(
 	);
 }
 
+/**
+ * Open working-tree changes in VS Code's multi-diff editor with per-file
+ * staged-vs-unstaged routing.
+ *
+ * For each file, routes based on the `staged` flag:
+ * - `staged: true`  → HEAD  ↔ index  (staged diff)
+ * - `staged: false` → index ↔ working tree (unstaged diff)
+ *
+ * A file that appears twice (once staged, once unstaged) yields two entries
+ * with different diffs instead of two identical HEAD↔working-tree entries.
+ */
+export async function openWipMultipleChanges(
+	container: Container,
+	files: readonly GitFileChangeShape[],
+	repoPath: string,
+	options?: ShowOptions,
+): Promise<void> {
+	if (
+		!(await confirmOpenIfNeeded(files, {
+			message: `Are you sure you want to view the changes for all ${files.length} files?`,
+			confirmButton: 'View Changes',
+			threshold: filesOpenMultiDiffThreshold,
+		}))
+	) {
+		return;
+	}
+
+	let title;
+	if (options != null) {
+		({ title, ...options } = options);
+	}
+	title ??= 'Working Changes';
+
+	const svc = container.git.getRepositoryService(repoPath);
+
+	const resources: Parameters<typeof openChangesEditor>[0] = [];
+	for (const file of files) {
+		const staged = file.staged === true;
+		const lhsRef = staged ? 'HEAD' : uncommittedStaged;
+		const rhsRef = staged ? uncommittedStaged : '';
+
+		let rhs = file.status === 'D' ? undefined : (await svc.getBestRevisionUri(file.path, rhsRef))!;
+		if (rhsRef === '' && rhs != null) {
+			rhs = await svc.getWorkingUri(rhs);
+		} else if (rhsRef === '' && rhs == null) {
+			rhs = Uri.from({
+				scheme: 'untitled',
+				authority: '',
+				path: svc.getAbsoluteUri(file.path, repoPath).fsPath,
+			});
+		}
+
+		const lhs =
+			file.status === 'A'
+				? undefined
+				: file.status === '?'
+					? svc.getRevisionUri(deletedOrMissing, file.originalPath ?? file.path)
+					: (await svc.getBestRevisionUri(file.originalPath ?? file.path, lhsRef))!;
+
+		const uri = (file.status === 'D' ? lhs : rhs) ?? svc.getAbsoluteUri(file.path, repoPath);
+		if (rhs?.scheme === 'untitled' && lhs == null) continue;
+
+		resources.push({ uri: uri, lhs: lhs, rhs: rhs });
+	}
+
+	await openChangesEditor(resources, title, options);
+}
+
+/**
+ * Single-file equivalent of {@link openWipMultipleChanges}. Routes by `file.staged` and matches
+ * SCM-view behavior for the non-diff cases (untracked → open file, staged add → open index blob,
+ * staged delete → open HEAD blob). Revision URI construction delegates to
+ * {@link GitRepositoryService.getBestRevisionUri}, which:
+ *  - returns a `git:` URI (registered with VS Code's git extension) for the index when the SCM
+ *    knows about the repo — gutter Stage/Unstage Hunk + SCM toolbar work in that case
+ *  - falls back to a `gitlens:` URI served by our own FS provider otherwise — diff content is
+ *    correct but the gutter actions won't appear
+ * and crucially handles the canonical-path remapping for symlinked workspaces. Constructing
+ * `git:` URIs directly (without that probe) silently produces broken content for worktrees that
+ * the SCM hasn't registered.
+ *
+ * Routing:
+ * - `staged: true`  → HEAD ↔ index  (the staged-portion diff)
+ * - `staged: false` → index ↔ working tree (the unstaged-portion diff; equals HEAD ↔ working
+ *   when the file has no staged content)
+ *
+ * SCM-style handling for non-modified statuses:
+ *  - Untracked (`?`)                  → open the working file directly. No prior revision exists.
+ *  - Staged addition (`A` && staged)  → open the index blob as a single readonly editor.
+ *  - Staged deletion (`D` && staged)  → open the HEAD blob as a single readonly editor.
+ *  - Unstaged deletion                → diff with an empty rhs placeholder (all deletions).
+ *  - Added & non-staged (rare)        → diff with an empty lhs placeholder (all additions).
+ *  - Renamed/Copied                   → lhs uses `originalPath` so the pre-rename rev compares.
+ */
+export async function openWipChanges(
+	file: GitFileChangeShape,
+	repoPath: string,
+	options?: TextDocumentShowOptions & { sideTitle?: string },
+): Promise<void> {
+	const svc = Container.instance.git.getRepositoryService(repoPath);
+	const fileName = basename(file.path);
+
+	// Untracked: open directly — SCM parity, no diff makes sense.
+	if (file.status === '?') {
+		await openTextEditor(svc.getAbsoluteUri(file.path, repoPath), options);
+		return;
+	}
+
+	const staged = file.staged === true;
+
+	const emptyLhsUri = (): Uri => svc.getRevisionUri(deletedOrMissing, file.originalPath ?? file.path);
+	const emptyRhsUri = (): Uri => svc.getRevisionUri(deletedOrMissing, file.path);
+	// Always delegate to getBestRevisionUri so we get the SCM-aware scheme selection + canonical
+	// remapping for free. For HEAD ref it returns gitlens:; for uncommittedStaged it returns git:
+	// when the SCM knows the repo and gitlens: when not.
+	const revisionUri = async (relPath: string, ref: string, emptyFallback: () => Uri): Promise<Uri> =>
+		(await svc.getBestRevisionUri(relPath, ref)) ?? emptyFallback();
+
+	// Staged deletion: open the HEAD blob as a single readonly editor — SCM does the same because
+	// the rhs (index) has no content to diff against. Use the originalPath when present so a
+	// staged rename-delete still surfaces the right pre-rename content.
+	if (file.status === 'D' && staged) {
+		await openTextEditor(await revisionUri(file.originalPath ?? file.path, 'HEAD', emptyLhsUri), options);
+		return;
+	}
+
+	// Staged addition: open the index blob as a single readonly editor — SCM does the same
+	// because the lhs (HEAD) has no content to diff against.
+	if (file.status === 'A' && staged) {
+		await openTextEditor(await revisionUri(file.path, uncommittedStaged, emptyRhsUri), options);
+		return;
+	}
+
+	const lhsRef = staged ? 'HEAD' : uncommittedStaged;
+	const rhsRef = staged ? uncommittedStaged : '';
+
+	const lhs: Uri =
+		file.status === 'A' ? emptyLhsUri() : await revisionUri(file.originalPath ?? file.path, lhsRef, emptyLhsUri);
+
+	let rhs: Uri;
+	if (file.status === 'D') {
+		// Unstaged delete only at this point (staged delete returned above).
+		rhs = emptyRhsUri();
+	} else if (rhsRef === '') {
+		rhs = svc.getAbsoluteUri(file.path, repoPath);
+	} else {
+		rhs = await revisionUri(file.path, rhsRef, emptyRhsUri);
+	}
+
+	const sideLabel = options?.sideTitle ?? (staged ? 'Index' : 'Working Tree');
+	const title = `${fileName} (${sideLabel})`;
+
+	await openDiffEditor(lhs, rhs, title, options);
+}
+
 export async function openChanges(
 	file: string | Uri | GitFile,
 	commit: GitCommit,
@@ -275,12 +451,12 @@ export async function openChanges(
 	commitOrRefs: GitCommit | RefRange,
 	options?: TextDocumentShowOptions & { lhsTitle?: string; rhsTitle?: string },
 ): Promise<void> {
-	const hasCommit = isCommit(commitOrRefs);
+	const hasCommit = GitCommit.is(commitOrRefs);
 
 	if (typeof file === 'string' || file instanceof Uri) {
 		if (!hasCommit) throw new Error('Invalid arguments');
 
-		const f = await commitOrRefs.findFile(file);
+		const f = await findCommitFile(commitOrRefs, file);
 		if (f == null) throw new Error('Invalid arguments');
 
 		file = f;
@@ -291,8 +467,8 @@ export async function openChanges(
 	options = { preserveFocus: true, preview: false, ...options };
 
 	if (file.status === 'A' && hasCommit) {
-		const commit = await commitOrRefs.getCommitForFile(file);
-		void executeCommand<DiffWithPreviousCommandArgs>('gitlens.diffWithPrevious', {
+		const commit = await getCommitForFile(commitOrRefs, file);
+		void executeCommand<DiffWithPreviousCommandArgs>('gitlens.diffWithPrevious:command', {
 			commit: commit,
 			showOptions: options,
 		});
@@ -300,7 +476,7 @@ export async function openChanges(
 		return;
 	}
 
-	const refs: RefRange = hasCommit
+	let refs: RefRange = hasCommit
 		? {
 				repoPath: commitOrRefs.repoPath,
 				rhs: commitOrRefs.sha,
@@ -308,6 +484,13 @@ export async function openChanges(
 				lhs: commitOrRefs.unresolvedPreviousSha,
 			}
 		: commitOrRefs;
+
+	// For an untracked file in a stash, the content lives in the `^3` parent and there is no
+	// "previous" content to compare against. Build a fresh refs object so we don't mutate a
+	// caller-owned RefRange in the !hasCommit path.
+	if (file.status === '?') {
+		refs = { repoPath: refs.repoPath, lhs: deletedOrMissing, rhs: `${refs.rhs}^3` };
+	}
 
 	const rhsUri = GitUri.fromFile(file, refs.repoPath);
 	const lhsUri =
@@ -329,9 +512,9 @@ export async function openChangesInDiffTool(
 	tool?: string,
 ): Promise<void> {
 	if (typeof file === 'string') {
-		if (!isCommit(commitOrRef)) throw new Error('Invalid arguments');
+		if (!GitCommit.is(commitOrRef)) throw new Error('Invalid arguments');
 
-		const f = await commitOrRef.findFile(file);
+		const f = await findCommitFile(commitOrRef, file);
 		if (f == null) throw new Error('Invalid arguments');
 
 		file = f;
@@ -363,9 +546,9 @@ export async function openChangesWithWorking(
 	options?: TextDocumentShowOptions & { lhsTitle?: string },
 ): Promise<void> {
 	if (typeof file === 'string' || file instanceof Uri) {
-		if (!isCommit(commitOrRef)) throw new Error('Invalid arguments');
+		if (!GitCommit.is(commitOrRef)) throw new Error('Invalid arguments');
 
-		const f = await commitOrRef.findFile(file);
+		const f = await findCommitFile(commitOrRef, file);
 		if (f == null) throw new Error('Invalid arguments');
 
 		file = f;
@@ -374,7 +557,7 @@ export async function openChangesWithWorking(
 	if (file.status === 'D') return;
 
 	let ref;
-	if (isCommit(commitOrRef)) {
+	if (GitCommit.is(commitOrRef)) {
 		ref = {
 			repoPath: commitOrRef.repoPath,
 			ref: commitOrRef.sha,
@@ -385,7 +568,7 @@ export async function openChangesWithWorking(
 
 	options = { preserveFocus: true, preview: false, ...options };
 
-	void (await executeEditorCommand<DiffWithWorkingCommandArgs>('gitlens.diffWithWorking', undefined, {
+	void (await executeEditorCommand<DiffWithWorkingCommandArgs>('gitlens.diffWithWorking:command', undefined, {
 		uri: GitUri.fromFile(file, ref.repoPath, ref.ref),
 		showOptions: options,
 		lhsTitle: options?.lhsTitle,
@@ -484,13 +667,19 @@ export async function openFile(
 		const ref = refOrOptions as GitRevisionReference;
 
 		uri = GitUri.fromFile(fileOrUri, ref.repoPath, ref.ref);
-		// If the file is `?` (untracked), then this must be an untracked file in a stash, so just return
-		if (typeof fileOrUri !== 'string' && fileOrUri.status === '?') return;
+		// An untracked file in a stash typically has no working-tree copy to open. Mirror the
+		// warning surfaced by `gitlens.openWorkingFile:command` for the same case so the click
+		// isn't a silent no-op; users wanting the stashed content can pick "Open File at Revision".
+		// Skip this guard for WIP refs — untracked files in the working tree are real files.
+		if (typeof fileOrUri !== 'string' && fileOrUri.status === '?' && !isUncommitted(ref.ref)) {
+			void window.showWarningMessage('Unable to open working file. File could not be found in the working tree');
+			return;
+		}
 	}
 
 	options = { preserveFocus: true, preview: false, ...options };
 
-	void (await executeEditorCommand<OpenWorkingFileCommandArgs>('gitlens.openWorkingFile', undefined, {
+	void (await executeEditorCommand<OpenWorkingFileCommandArgs>('gitlens.openWorkingFile:command', undefined, {
 		uri: uri,
 		showOptions: options,
 	}));
@@ -512,18 +701,18 @@ export async function openFileAtRevision(
 ): Promise<void> {
 	let uri: Uri;
 	if (fileOrRevisionUri instanceof Uri) {
-		if (isCommit(commitOrOptions)) throw new Error('Invalid arguments');
+		if (GitCommit.is(commitOrOptions)) throw new Error('Invalid arguments');
 
 		uri = fileOrRevisionUri;
 		options = commitOrOptions;
 	} else {
-		if (!isCommit(commitOrOptions)) throw new Error('Invalid arguments');
+		if (!GitCommit.is(commitOrOptions)) throw new Error('Invalid arguments');
 
 		const commit = commitOrOptions;
 
 		let file;
 		if (typeof fileOrRevisionUri === 'string') {
-			const f = await commit.findFile(fileOrRevisionUri);
+			const f = await findCommitFile(commit, fileOrRevisionUri);
 			if (f == null) throw new Error('Invalid arguments');
 
 			file = f;
@@ -534,7 +723,11 @@ export async function openFileAtRevision(
 		uri = Container.instance.git
 			.getRepositoryService(commit.repoPath)
 			.getRevisionUri(
-				file.status === 'D' ? ((await commit.getPreviousSha()) ?? deletedOrMissing) : commit.sha,
+				file.status === 'D'
+					? ((await GitCommit.getPreviousSha(commit)) ?? deletedOrMissing)
+					: file.status === '?'
+						? `${commit.sha}^3`
+						: commit.sha,
 				file,
 			);
 	}
@@ -663,12 +856,16 @@ export async function openFilesAtRevision(
 	);
 }
 
-export async function restoreFile(file: string | GitFile, revision: GitRevisionReference): Promise<void> {
+export async function restoreFile(
+	file: string | GitFile,
+	revision: GitRevisionReference,
+	previous?: boolean,
+): Promise<void> {
 	let path;
-	let ref;
+	let rev;
 	if (typeof file === 'string') {
 		path = file;
-		ref = revision.ref;
+		rev = previous ? `${revision.ref}^` : revision.ref;
 	} else {
 		path = file.path;
 		if (file.status === 'D') {
@@ -676,18 +873,28 @@ export async function restoreFile(file: string | GitFile, revision: GitRevisionR
 			const uri = GitUri.fromFile(file, revision.repoPath);
 			try {
 				await workspace.fs.stat(uri);
-				ref = `${revision.ref}^`;
+				rev = `${revision.ref}^`;
 			} catch {
-				ref = revision.ref;
+				rev = previous ? `${revision.ref}^` : revision.ref;
 			}
 		} else if (file.status === '?') {
-			ref = `${revision.ref}^3`;
+			rev = `${revision.ref}^3`;
 		} else {
-			ref = revision.ref;
+			rev = previous ? `${revision.ref}^` : revision.ref;
 		}
 	}
 
-	await Container.instance.git.getRepositoryService(revision.repoPath).checkout(ref, { path: path });
+	try {
+		await Container.instance.git.getRepositoryService(revision.repoPath).ops?.restore(path, { ref: rev });
+	} catch (ex) {
+		void showGitErrorMessage(
+			ex,
+			`Unable to restore '${path}' from revision '${getReferenceLabel(revision, {
+				icon: false,
+				capitalize: false,
+			})}': ${ex.message}`,
+		);
+	}
 }
 
 export function revealCommit(commit: GitRevisionReference, options?: RevealOptions): Promise<ViewNode | undefined> {
@@ -723,21 +930,14 @@ export function showCommitInDetailsView(
 	return Container.instance.views.commitDetails.show({ preserveFocus: preserveFocus }, opts);
 }
 
-export function showCommitInGraphDetailsView(
-	commit: GitRevisionReference | GitCommit,
-	options?: { pin?: boolean; preserveFocus?: boolean; preserveVisibility?: boolean },
-): Promise<void> {
-	const { preserveFocus, ...opts } = { ...options, commit: commit };
-	return Container.instance.views.graphDetails.show({ preserveFocus: preserveFocus }, opts);
-}
-
 export async function showCommitInGraph(
 	commit: GitRevisionReference | GitCommit,
-	options?: { preserveFocus?: boolean },
+	options?: { preserveFocus?: boolean; source?: Source },
 ): Promise<void> {
 	void (await executeCommand<ShowInCommitGraphCommandArgs>('gitlens.showInCommitGraph', {
 		ref: getReferenceFromRevision(commit),
 		preserveFocus: options?.preserveFocus,
+		source: options?.source,
 	}));
 }
 
@@ -748,22 +948,38 @@ export async function explainCommit(
 	void (await executeCommand<ExplainCommitCommandArgs>('gitlens.ai.explainCommit', {
 		repoPath: commit.repoPath,
 		rev: commit.ref,
-		source: { ...options?.source, type: 'commit' },
+		source: { ...options?.source, context: { type: 'commit' } },
 	}));
 }
 
 export async function openOnlyChangedFiles(container: Container, commit: GitCommit): Promise<void>;
 export async function openOnlyChangedFiles(container: Container, files: GitFile[]): Promise<void>;
-export async function openOnlyChangedFiles(container: Container, commitOrFiles: GitCommit | GitFile[]): Promise<void> {
+export async function openOnlyChangedFiles(_container: Container, commitOrFiles: GitCommit | GitFile[]): Promise<void> {
 	let files;
-	if (isCommit(commitOrFiles)) {
-		if (commitOrFiles.hasFullDetails()) {
-			await commitOrFiles.ensureFullDetails();
+	if (GitCommit.is(commitOrFiles)) {
+		if (!commitOrFiles.hasFullDetails()) {
+			await GitCommit.ensureFullDetails(commitOrFiles);
 		}
 
 		files = commitOrFiles.fileset?.files ?? [];
 	} else {
-		files = commitOrFiles.map(f => new GitFileChange(container, f.repoPath!, f.path, f.status, f.originalPath));
+		files = commitOrFiles.map(
+			f =>
+				new GitFileChange(
+					f.repoPath!,
+					f.path,
+					f.status,
+					joinUriPath(fileUri(f.repoPath!), f.path),
+					f.originalPath,
+					f.originalPath != null ? joinUriPath(fileUri(f.repoPath!), f.originalPath) : undefined,
+					undefined,
+					undefined,
+					undefined,
+					undefined,
+					f.submodule != null ? '160000' : undefined,
+					f.submodule,
+				),
+		);
 	}
 
 	if (
@@ -781,12 +997,17 @@ export async function openOnlyChangedFiles(container: Container, commitOrFiles: 
 	}));
 }
 
-export async function undoCommit(container: Container, commit: GitRevisionReference): Promise<void> {
+export async function undoCommit(
+	container: Container,
+	commit: GitRevisionReference,
+	options?: { onBeforeReset?: (message: string) => void },
+): Promise<string | undefined> {
 	const svc = container.git.getRepositoryService(commit.repoPath);
-	const scmRepo = await svc.getOrOpenScmRepository();
-	const scmCommit = await scmRepo?.getCommit('HEAD');
+	if (svc.ops == null) return undefined;
 
-	if (scmCommit?.hash !== commit.ref) {
+	const headCommit = await svc.commits.getCommit('HEAD');
+
+	if (headCommit?.sha !== commit.ref) {
 		void window.showWarningMessage(
 			`Commit ${getReferenceLabel(commit, {
 				capitalize: true,
@@ -794,16 +1015,24 @@ export async function undoCommit(container: Container, commit: GitRevisionRefere
 			})} cannot be undone, because it is no longer the most recent commit.`,
 		);
 
-		return;
+		return undefined;
 	}
 
-	const status = await svc.status.getStatus();
-	if (status?.files.length) {
+	// Check for uncommitted changes before prompting
+	const hasChanges = await svc.status.hasWorkingChanges();
+	if (hasChanges) {
 		const confirm = { title: 'Undo Commit' };
 		const cancel = { title: 'Cancel', isCloseAffordance: true };
+		// Label from `headCommit` (just confirmed to be HEAD) rather than the passed `commit` ref —
+		// its summary is the exact, un-emojified subject straight from git, so the dialog matches the
+		// commit regardless of how the caller's ref message was formatted (e.g. graph display emoji).
+		const exactRef = createReference(headCommit.ref, headCommit.repoPath, {
+			refType: 'revision',
+			message: headCommit.message ?? headCommit.summary,
+		});
 		const result = await window.showWarningMessage(
 			`You have uncommitted changes in the working tree.\n\nDo you still want to undo ${getReferenceLabel(
-				commit,
+				exactRef,
 				{
 					capitalize: false,
 					icon: false,
@@ -814,10 +1043,24 @@ export async function undoCommit(container: Container, commit: GitRevisionRefere
 			cancel,
 		);
 
-		if (result !== confirm) return;
+		if (result !== confirm) return undefined;
 	}
 
-	await executeCoreGitCommand('git.undoCommit', commit.repoPath);
+	try {
+		await GitCommit.ensureFullDetails(headCommit);
+	} catch {}
+
+	const message = headCommit.message ?? headCommit.summary ?? '';
+	options?.onBeforeReset?.(message);
+
+	await svc.ops.reset('HEAD~1', { mode: 'soft' });
+
+	const scmRepo = await svc.getScmRepository();
+	if (scmRepo != null && message) {
+		scmRepo.inputBox.value = message;
+	}
+
+	return message;
 }
 
 async function confirmOpenIfNeeded(
@@ -842,7 +1085,7 @@ async function getChangesRefArgs(
 	options: TextDocumentShowOptions | undefined;
 	ref: Ref;
 }> {
-	if (!isCommit(commitOrFiles)) {
+	if (!GitCommit.is(commitOrFiles)) {
 		return {
 			files: commitOrFiles,
 			options: options,
@@ -851,7 +1094,7 @@ async function getChangesRefArgs(
 	}
 
 	if (commitOrFiles.fileset?.files == null) {
-		await commitOrFiles.ensureFullDetails();
+		await GitCommit.ensureFullDetails(commitOrFiles);
 	}
 
 	return {
@@ -875,7 +1118,7 @@ async function getChangesRefsArgs(
 	options: TextDocumentShowOptions | undefined;
 	refs: RefRange;
 }> {
-	if (!isCommit(commitOrFiles)) {
+	if (!GitCommit.is(commitOrFiles)) {
 		return {
 			files: commitOrFiles,
 			options: options,
@@ -884,7 +1127,7 @@ async function getChangesRefsArgs(
 	}
 
 	if (commitOrFiles.fileset?.files == null) {
-		await commitOrFiles.ensureFullDetails();
+		await GitCommit.ensureFullDetails(commitOrFiles);
 	}
 
 	return {
@@ -896,7 +1139,7 @@ async function getChangesRefsArgs(
 			rhs: commitOrFiles.sha,
 			lhs:
 				commitOrFiles.resolvedPreviousSha ??
-				(await commitOrFiles.getPreviousSha()) ??
+				(await GitCommit.getPreviousSha(commitOrFiles)) ??
 				commitOrFiles.unresolvedPreviousSha,
 		},
 	};
@@ -907,7 +1150,7 @@ async function getCommitChangesArgs(
 	filter?: (file: GitFileChange) => boolean,
 ): Promise<{ files: readonly GitFile[]; refs: RefRange }> {
 	if (commit.fileset?.files == null) {
-		await commit.ensureFullDetails();
+		await GitCommit.ensureFullDetails(commit);
 	}
 
 	return {
@@ -915,7 +1158,7 @@ async function getCommitChangesArgs(
 		refs: {
 			repoPath: commit.repoPath,
 			rhs: commit.sha,
-			lhs: commit.resolvedPreviousSha ?? (await commit.getPreviousSha()) ?? commit.unresolvedPreviousSha,
+			lhs: commit.resolvedPreviousSha ?? (await GitCommit.getPreviousSha(commit)) ?? commit.unresolvedPreviousSha,
 		},
 	};
 }
@@ -945,7 +1188,7 @@ export async function getOrderedComparisonRefs(
 	const commitRefA = getSettledValue(commitRefAResult);
 	const commitRefB = getSettledValue(commitRefBResult);
 
-	if (commitRefB != null && commitRefA != null && commitRefB.date > commitRefA.date) {
+	if (commitRefB != null && commitRefA != null && getCommitDate(commitRefB) > getCommitDate(commitRefA)) {
 		// If refB is "newer", compare refB to refA
 		return [refB, refA];
 	}

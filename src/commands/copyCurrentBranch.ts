@@ -1,13 +1,13 @@
 import type { TextEditor, Uri } from 'vscode';
 import { env } from 'vscode';
-import type { Container } from '../container';
-import { GitUri } from '../git/gitUri';
-import { showGenericErrorMessage } from '../messages';
-import { getBestRepositoryOrShowPicker } from '../quickpicks/repositoryPicker';
-import { command } from '../system/-webview/command';
-import { Logger } from '../system/logger';
-import { ActiveEditorCommand } from './commandBase';
-import { getCommandUri } from './commandBase.utils';
+import { Logger } from '@gitlens/utils/logger.js';
+import type { Container } from '../container.js';
+import { GitUri } from '../git/gitUri.js';
+import { showGenericErrorMessage } from '../messages.js';
+import { getBestRepositoryOrShowPicker } from '../quickpicks/repositoryPicker.js';
+import { command } from '../system/-webview/command.js';
+import { ActiveEditorCommand } from './commandBase.js';
+import { getCommandUri } from './commandBase.utils.js';
 
 @command()
 export class CopyCurrentBranchCommand extends ActiveEditorCommand {
@@ -20,7 +20,12 @@ export class CopyCurrentBranchCommand extends ActiveEditorCommand {
 
 		const gitUri = uri != null ? await GitUri.fromUri(uri) : undefined;
 
-		const repository = await getBestRepositoryOrShowPicker(gitUri, editor, 'Copy Current Branch Name');
+		const repository = await getBestRepositoryOrShowPicker(
+			this.container,
+			gitUri,
+			editor,
+			'Copy Current Branch Name',
+		);
 		if (repository == null) return;
 
 		try {

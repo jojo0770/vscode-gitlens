@@ -1,5 +1,5 @@
 import type { Disposable } from 'vscode';
-import type { Container } from '../../../container';
+import type { Container } from '../../../container.js';
 import type {
 	GKOrgVelocitySettings,
 	ProjectGoalsSettings,
@@ -8,7 +8,7 @@ import type {
 	WorkspaceRepositoriesByName,
 	WorkspaceRepositoryRelation,
 	WorkspaceType,
-} from './workspaces';
+} from './workspaces.js';
 
 export class CloudWorkspace {
 	readonly type = 'cloud' satisfies WorkspaceType;
@@ -83,7 +83,7 @@ export class CloudWorkspace {
 		if (this._repositoryDescriptors == null) {
 			this._repositoryDescriptors = repositories;
 		} else {
-			this._repositoryDescriptors = this._repositoryDescriptors.concat(repositories);
+			this._repositoryDescriptors = [...this._repositoryDescriptors, ...repositories];
 		}
 
 		this.resetRepositoriesByName();

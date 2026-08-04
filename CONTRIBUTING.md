@@ -73,21 +73,23 @@ This will first do an initial full build and then watch for file changes, compil
 
 ### Formatting
 
-This project uses [prettier](https://prettier.io/) for code formatting. You can run prettier across the code by calling `pnpm run pretty` from a terminal.
+This project uses [oxfmt](https://oxc.rs) for fast, Rust-native code formatting. You can format the code by calling `pnpm run fmt` from a terminal (or `pnpm run fmt:check` to check formatting without writing changes).
 
-To format the code as you make changes you can install the [Prettier - Code formatter](https://marketplace.visualstudio.com/items/esbenp.prettier-vscode) extension.
+To format as you make changes, install the [Oxc](https://marketplace.visualstudio.com/items?itemName=oxc.oxc-vscode) VS Code extension (already enabled via the workspace settings, which set it as the default formatter).
 
-Add the following to your User Settings to run prettier:
+Add the following to your User Settings to format on save:
 
 ```
 "editor.formatOnSave": true,
 ```
 
-### Linting
+### Linting & Type-checking
 
-This project uses [ESLint](https://eslint.org/) for code linting. You can run ESLint across the code by calling `pnpm run lint` from a terminal. Warnings from ESLint show up in the `Errors and Warnings` quick box and you can navigate to them from inside VS Code.
+This project uses [oxlint](https://oxc.rs) for fast, Rust-native linting and type-aware type-checking. You can run both across the codebase by calling `pnpm run check` from a terminal (or `pnpm run check:fix` to apply auto-fixes). Linting and type-checking also run automatically as part of `pnpm run build` and `pnpm run watch`.
 
-To lint the code as you make changes you can install the [ESLint](https://marketplace.visualstudio.com/items?itemName=dbaeumer.vscode-eslint) extension.
+A couple of heavier rules — bidirectional-Unicode/"trojan source" safety and banned-dependency checks — are too slow to run on every edit, so they're enabled only in CI via [`.oxlintrc.ci.json`](.oxlintrc.ci.json) (which extends the base config). To run the full CI lint suite locally, use `pnpm run lint:ci`.
+
+To lint as you make changes, install the [Oxc](https://marketplace.visualstudio.com/items?itemName=oxc.oxc-vscode) VS Code extension (already enabled via the workspace settings). Warnings show up in the `Problems` panel where you can navigate to them from inside VS Code.
 
 ### Bundling
 
@@ -250,4 +252,159 @@ To add new icons to the GL Icons font follow the steps below:
 
   ```
 
-Once you've finshed copy the new `glicons.woff2?<uuid>` URL from `src/webviews/apps/shared/glicons.scss` and search and replace the old references with the new one.
+Once you've finished copy the new `glicons.woff2?<uuid>` URL from `src/webviews/apps/shared/glicons.scss` and search and replace the old references with the new one.
+
+## Testing (Unit and E2E)
+
+GitLens uses VS Code's testing infrastructure for unit and integration tests.
+
+### Building Tests
+
+Unit and E2E tests are built as part of the main build, but can also be built directly.
+
+```bash
+# Build everything (extension, webviews, and tests)
+pnpm run build
+pnpm run build:quick  # Quick build (no type-checking, linting, or codegen)
+
+# Build unit tests only
+pnpm run build:tests
+
+# Build E2E tests
+pnpm run bundle:e2e
+```
+
+### Running Tests
+
+```bash
+# Run unit tests
+pnpm run test
+
+# Run E2E tests
+pnpm run test:e2e
+```
+
+### Watch Mode
+
+```bash
+# Watch mode for everything during development (extension, webviews, and tests)
+pnpm run watch
+```
+
+### Writing Unit Tests
+
+Tests are co-located with source files in `__tests__/` directories:
+
+```
+src/
+  └── system/
+      ├── string.ts
+      └── __tests__/
+          └── string.test.ts  ← Test file
+```
+
+Create test files using the naming pattern `*.test.ts`:
+
+```typescript
+import { describe, it, expect } from 'vitest';
+import { functionToTest } from '../module';
+
+describe('functionToTest', () => {
+	it('should handle basic case', () => {
+		const result = functionToTest('input');
+		expect(result).toBe('expected output');
+	});
+
+	it('should handle edge cases', () => {
+		expect(functionToTest('')).toBe('');
+		expect(functionToTest(null)).toBeUndefined();
+	});
+});
+```
+
+### Test Best Practices
+
+- **Co-locate tests**: Place tests in `__tests__/` directories next to the code they test
+- **Descriptive names**: Use clear test names that describe what is being tested
+- **Test behavior**: Focus on testing behavior and outputs, not implementation details
+- **Edge cases**: Always test edge cases, empty inputs, and error conditions
+- **Mock dependencies**: Use mocks for external dependencies (VS Code API, file system, etc.)
+- **Keep tests fast**: Unit tests should run quickly; use mocks to avoid slow operations
+
+### Debugging Tests
+
+Use VS Code's built-in test runner:
+
+1. Open the Testing view in the sidebar
+2. Click the debug icon next to any test to debug it
+3. Set breakpoints in test files or source code
+4. Use the Debug Console to inspect variables
+
+Alternatively, use the provided launch configurations:
+
+- Open the Run and Debug view
+- Select a test-related launch configuration
+- Press `F5` to start debugging
+
+## Benchmarking
+
+GitLens includes a benchmarking framework for measuring and comparing performance of critical code paths.
+
+### Running Benchmarks
+
+```bash
+# List all available benchmarks
+pnpm run benchmark:list
+
+# Run all benchmarks
+pnpm run benchmark
+
+# Run a specific benchmark by name
+pnpm run benchmark <name>
+```
+
+### Creating New Benchmarks
+
+Benchmarks are automatically discovered when placed in `__tests__/` directories:
+
+1. Create a file named `*.benchmark.ts` in any `__tests__/` directory
+2. Use [tinybench](https://github.com/tinylibs/tinybench) to write your benchmark:
+
+```typescript
+import { Bench } from 'tinybench';
+
+async function runBenchmark() {
+	console.log('MY FEATURE BENCHMARK');
+
+	const bench = new Bench({ time: 100 });
+
+	bench
+		.add('Method A', () => {
+			// Code to benchmark
+		})
+		.add('Method B', () => {
+			// Alternative implementation
+		});
+
+	await bench.run();
+
+	// Display results
+	for (const task of bench.tasks) {
+		console.log(`${task.name}: ${task.result?.hz.toLocaleString()} ops/sec`);
+	}
+}
+
+runBenchmark();
+```
+
+3. Run your benchmark: `pnpm run benchmark <name>`
+
+### Best Practices
+
+- **Use realistic data**: Generate test data matching real-world patterns
+- **Test multiple scenarios**: Benchmark with different data sizes (small, medium, large)
+- **Measure complete operations**: Include all relevant work in benchmarks
+- **Display clear results**: Show ops/sec, average time, and margin of error
+- **Focus on hot paths**: Benchmark performance-critical code
+
+See the full [Benchmarking Guide](docs/benchmarking.md) for detailed information and the `src/system/__tests__/string.benchmark.ts` example.

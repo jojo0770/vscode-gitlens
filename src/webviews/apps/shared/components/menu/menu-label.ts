@@ -1,6 +1,6 @@
 import { css, html, LitElement } from 'lit';
 import { customElement } from 'lit/decorators.js';
-import { elementBase } from '../styles/lit/base.css';
+import { elementBase } from '../styles/lit/base.css.js';
 
 @customElement('menu-label')
 export class MenuLabel extends LitElement {
@@ -9,15 +9,15 @@ export class MenuLabel extends LitElement {
 		css`
 			:host {
 				display: block;
-				text-transform: uppercase;
+				padding-right: var(--gl-space-6);
+				padding-left: var(--gl-space-6);
+				margin: 0;
 				font-size: 0.84em;
 				line-height: 2.2rem;
-				padding-left: 0.6rem;
-				padding-right: 0.6rem;
-				margin: 0px;
 				color: var(--vscode-menu-foreground);
-				opacity: 0.6;
+				text-transform: uppercase;
 				user-select: none;
+				opacity: 0.6;
 				-webkit-font-smoothing: auto;
 			}
 		`,

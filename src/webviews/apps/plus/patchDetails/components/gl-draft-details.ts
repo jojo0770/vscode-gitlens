@@ -1,4 +1,3 @@
-import { Avatar, Button, defineGkElement, Menu, MenuItem, Popover } from '@gitkraken/shared-web-components';
 import { html, nothing } from 'lit';
 import { customElement, property, state } from 'lit/decorators.js';
 import { ifDefined } from 'lit/directives/if-defined.js';
@@ -7,14 +6,15 @@ import { repeat } from 'lit/directives/repeat.js';
 import { unsafeHTML } from 'lit/directives/unsafe-html.js';
 import { when } from 'lit/directives/when.js';
 import type { TextDocumentShowOptions } from 'vscode';
+import { makeHierarchical } from '@gitlens/utils/array.js';
+import { flatCount } from '@gitlens/utils/iterable.js';
+import { trimTrailingSlash } from '@gitlens/utils/path.js';
 import type {
 	DraftArchiveReason,
 	DraftPatchFileChange,
 	DraftRole,
 	DraftVisibility,
-} from '../../../../../plus/drafts/models/drafts';
-import { makeHierarchical } from '../../../../../system/array';
-import { flatCount } from '../../../../../system/iterable';
+} from '../../../../../plus/drafts/models/drafts.js';
 import type {
 	CloudDraftDetails,
 	DraftDetails,
@@ -22,23 +22,28 @@ import type {
 	ExecuteFileActionParams,
 	PatchDetails,
 	State,
-} from '../../../../plus/patchDetails/protocol';
+} from '../../../../plus/patchDetails/protocol.js';
+import type { GlPopover } from '../../../shared/components/overlays/popover.js';
 import type {
 	TreeItemActionDetail,
 	TreeItemBase,
 	TreeItemCheckedDetail,
 	TreeItemSelectionDetail,
 	TreeModel,
-} from '../../../shared/components/tree/base';
-import { GlTreeBase } from './gl-tree-base';
-import '../../../shared/components/actions/action-item';
-import '../../../shared/components/actions/action-nav';
-import '../../../shared/components/badges/badge';
-import '../../../shared/components/button-container';
-import '../../../shared/components/button';
-import '../../../shared/components/code-icon';
-import '../../../shared/components/markdown/markdown';
-import '../../../shared/components/webview-pane';
+} from '../../../shared/components/tree/base.js';
+import { GlTreeBase } from './gl-tree-base.js';
+import '../../../shared/components/chips/action-chip.js';
+import '../../../shared/components/actions/action-nav.js';
+import '../../../shared/components/avatar/avatar.js';
+import '../../../shared/components/badges/badge.js';
+import '../../../shared/components/button-container.js';
+import '../../../shared/components/button.js';
+import '../../../shared/components/code-icon.js';
+import '../../../shared/components/markdown/markdown.js';
+import '../../../shared/components/menu/menu-item.js';
+import '../../../shared/components/menu/menu-list.js';
+import '../../../shared/components/overlays/popover.js';
+import '../../../shared/components/webview-pane.js';
 
 // Can only import types from 'vscode'
 const BesideViewColumn = -2; /*ViewColumn.Beside*/
@@ -124,12 +129,6 @@ export class GlDraftDetails extends GlTreeBase {
 		// return this.state.draft?.repoPath != null && this.state.draft?.baseRef != null;
 	}
 
-	constructor() {
-		super();
-
-		defineGkElement(Avatar, Button, Popover, Menu, MenuItem);
-	}
-
 	override updated(changedProperties: Map<string, any>): void {
 		if (changedProperties.has('explain')) {
 			this.explainBusy = false;
@@ -175,6 +174,7 @@ export class GlDraftDetails extends GlTreeBase {
 
 	private renderPatchMessage() {
 		if (this.state?.draft?.title == null) return undefined;
+
 		let description = this.cloudDraft?.description;
 		if (description == null) return undefined;
 
@@ -200,11 +200,11 @@ export class GlDraftDetails extends GlTreeBase {
 			<webview-pane collapsable data-region="explain-pane">
 				<span slot="title">Explain (AI)</span>
 				<action-nav slot="actions">
-					<action-item
+					<gl-action-chip
 						data-action="switch-ai"
 						label="Switch AI Provider/Model"
 						icon="arrow-swap"
-					></action-item>
+					></gl-action-chip>
 				</action-nav>
 
 				<div class="section">
@@ -223,20 +223,22 @@ export class GlDraftDetails extends GlTreeBase {
 							>
 						</span>
 					</p>
-					${markdown
-						? html`<div class="ai-content" data-region="commit-explanation">
-								<gl-markdown
-									class="ai-content__summary scrollable"
-									markdown="${markdown}"
-								></gl-markdown>
-							</div>`
-						: this.explain?.error
-							? html`<div class="ai-content has-error" data-region="commit-explanation">
-									<p class="ai-content__summary scrollable">
-										${this.explain.error.message ?? 'Error retrieving content'}
-									</p>
+					${
+						markdown
+							? html`<div class="ai-content" data-region="commit-explanation">
+									<gl-markdown
+										class="ai-content__summary scrollable"
+										markdown="${markdown}"
+									></gl-markdown>
 								</div>`
-							: undefined}
+							: this.explain?.error
+								? html`<div class="ai-content has-error" data-region="commit-explanation">
+										<p class="ai-content__summary scrollable">
+											${this.explain.error.message ?? 'Error retrieving content'}
+										</p>
+									</div>`
+								: undefined
+					}
 				</div>
 			</webview-pane>
 		`;
@@ -282,7 +284,7 @@ export class GlDraftDetails extends GlTreeBase {
 					${when(
 						this.state?.draft?.patches == null,
 						() => this.renderLoading(),
-						() => this.renderTreeView(this.treeModel, this.state?.preferences?.indentGuides),
+						() => this.renderTreeView(this.treeModel, this.state?.preferences?.indentGuides, 'No files'),
 					)}
 				</div>
 			</webview-pane>
@@ -331,7 +333,7 @@ export class GlDraftDetails extends GlTreeBase {
 		return html`
 			<div class="user-selection">
 				<div class="user-selection__avatar">
-					<gk-avatar .src=${userSelection.avatarUrl}></gk-avatar>
+					<gl-avatar .src=${userSelection.avatarUrl}></gl-avatar>
 				</div>
 				<div class="user-selection__info">
 					<div class="user-selection__name">
@@ -342,15 +344,15 @@ export class GlDraftDetails extends GlTreeBase {
 					${when(
 						selectionRole !== 'owner' && (role === 'owner' || role === 'admin'),
 						() => html`
-							<gk-popover>
-								<gk-button slot="trigger"
+							<gl-popover trigger="click" appearance="menu" ?arrow=${false}>
+								<gl-button slot="anchor"
 									>${roleLabel} <code-icon icon="chevron-down"></code-icon
-								></gk-button>
-								<gk-menu>
+								></gl-button>
+								<menu-list slot="content">
 									${map(options, ([value, label]) =>
 										value === 'owner'
 											? undefined
-											: html`<gk-menu-item
+											: html`<menu-item
 													@click=${(e: MouseEvent) =>
 														this.onChangeSelectionRole(
 															e,
@@ -360,15 +362,15 @@ export class GlDraftDetails extends GlTreeBase {
 												>
 													<code-icon
 														icon="check"
-														class="user-selection__check ${selectionRole === value
-															? 'is-active'
-															: ''}"
+														class="user-selection__check ${
+															selectionRole === value ? 'is-active' : ''
+														}"
 													></code-icon>
 													${label}
-												</gk-menu-item>`,
+												</menu-item>`,
 									)}
-								</gk-menu>
-							</gk-popover>
+								</menu-list>
+							</gl-popover>
 						`,
 						() => html`${roleLabel}`,
 					)}
@@ -569,19 +571,21 @@ export class GlDraftDetails extends GlTreeBase {
 				<p class="button-container">
 					<span class="button-group button-group--single">
 						<gl-button full @click=${this.onApplyPatch}>Apply Patch</gl-button>
-						<gk-popover placement="top">
+						<gl-popover placement="top" trigger="click" appearance="menu" ?arrow=${false}>
 							<gl-button
-								slot="trigger"
+								slot="anchor"
 								density="compact"
 								aria-label="Apply Patch Options..."
 								title="Apply Patch Options..."
 								><code-icon icon="chevron-down"></code-icon
 							></gl-button>
-							<gk-menu class="mine-menu" @select=${this.onSelectApplyOption}>
-								<gk-menu-item data-value="branch">Apply to a Branch</gk-menu-item>
-								<!-- <gk-menu-item data-value="worktree">Apply to new worktree</gk-menu-item> -->
-							</gk-menu>
-						</gk-popover>
+							<menu-list slot="content" class="mine-menu">
+								<menu-item data-value="branch" @click=${this.onSelectApplyOption}
+									>Apply to a Branch</menu-item
+								>
+								<!-- <menu-item data-value="worktree">Apply to new worktree</menu-item> -->
+							</menu-list>
+						</gl-popover>
 					</span>
 				</p>
 				${this.renderCodeSuggectionActions()}
@@ -680,8 +684,8 @@ export class GlDraftDetails extends GlTreeBase {
 	) {
 		this.emit('gl-patch-details-update-selection', { selection: selection, role: role });
 
-		const popoverEl: Popover | null = (e.target as HTMLElement)?.closest('gk-popover');
-		popoverEl?.hidePopover();
+		const popoverEl: GlPopover | null = (e.target as HTMLElement)?.closest('gl-popover');
+		void popoverEl?.hide();
 	}
 
 	private onVisibilityChange(e: Event) {
@@ -768,6 +772,7 @@ export class GlDraftDetails extends GlTreeBase {
 		const [gkRepositoryId] = e.detail.context;
 		const patch = this.state.draft?.patches?.find(p => p.gkRepositoryId === gkRepositoryId);
 		if (!patch) return;
+
 		const selectedIndex = this.selectedPatches.indexOf(patch?.id);
 		if (e.detail.checked) {
 			if (selectedIndex === -1) {
@@ -814,13 +819,13 @@ export class GlDraftDetails extends GlTreeBase {
 		this.emit('gl-draft-archive', { reason: reason });
 	}
 
-	private onSelectApplyOption(e: CustomEvent<{ target: MenuItem }>) {
+	private onSelectApplyOption(e: Event) {
 		if (this.canSubmit === false) {
 			this.validityMessage = 'Please select changes to apply';
 			return;
 		}
 
-		const target = e.detail?.target;
+		const target = (e.target as HTMLElement)?.closest('menu-item') as HTMLElement | null;
 		if (target?.dataset?.value != null) {
 			this.onApplyPatch(undefined, target.dataset.value as 'current' | 'branch' | 'worktree');
 		}
@@ -877,7 +882,7 @@ export class GlDraftDetails extends GlTreeBase {
 		if (isTree) {
 			const fileTree = makeHierarchical(
 				patch.files,
-				n => n.path.split('/'),
+				n => trimTrailingSlash(n.path).split('/'),
 				(...parts: string[]) => parts.join('/'),
 				compact,
 			);

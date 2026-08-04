@@ -12,20 +12,21 @@ export const baseStyles = css`
 		display: inline-flex;
 		align-items: center;
 		justify-content: center;
-		padding: 0.2rem 0.5rem;
-		border-radius: 0.5rem;
-		font-size: 1rem;
+		min-height: var(--gl-pill-min-height, auto);
+		padding: var(--gl-pill-padding, 0.2rem 0.5rem);
+		font-size: var(--gl-pill-font-size, 1rem);
 		font-weight: 500;
-		line-height: normal;
-		text-transform: uppercase;
+		line-height: var(--gl-pill-line-height, 1);
 		color: var(--gl-pill-foreground, var(--vscode-foreground));
-		background-color: var(--gl-pill-background, var(--vscode-editorWidget-background));
+		text-transform: uppercase;
 		white-space: nowrap;
+		background-color: var(--gl-pill-background, var(--vscode-editorWidget-background));
+		border-radius: var(--gl-pill-border-radius, var(--gl-radius-sm));
 	}
 
 	.pill--outlined {
-		padding: 0.1rem 0.4rem;
+		padding: var(--gl-pill-padding, 0.2rem 0.4rem);
 		background-color: transparent;
-		border: 1px solid var(--gl-pill-border, var(--vscode-foreground));
+		border: var(--gl-border-width) solid var(--gl-pill-border, var(--vscode-foreground));
 	}
 `;

@@ -1,23 +1,24 @@
 import type { TextEditor, Uri } from 'vscode';
-import { Range } from 'vscode';
-import { GlyphChars } from '../constants';
-import type { Container } from '../container';
-import { GitUri } from '../git/gitUri';
-import { RemoteResourceType } from '../git/models/remoteResource';
-import { getBranchNameWithoutRemote, getRemoteNameFromBranchName } from '../git/utils/branch.utils';
-import { isSha } from '../git/utils/revision.utils';
-import { showGenericErrorMessage } from '../messages';
-import { showReferencePicker } from '../quickpicks/referencePicker';
-import { command, executeCommand } from '../system/-webview/command';
-import { Logger } from '../system/logger';
-import { pad, splitSingle } from '../system/string';
-import { areUrisEqual } from '../system/uri';
-import { StatusFileNode } from '../views/nodes/statusFileNode';
-import { ActiveEditorCommand } from './commandBase';
-import { getCommandUri } from './commandBase.utils';
-import type { CommandContext } from './commandContext';
-import { isCommandContextViewNodeHasBranch, isCommandContextViewNodeHasCommit } from './commandContext.utils';
-import type { OpenOnRemoteCommandArgs } from './openOnRemote';
+import type { LineRange } from '@gitlens/git/models/lineRange.js';
+import type { GitRemote } from '@gitlens/git/models/remote.js';
+import { RemoteResourceType } from '@gitlens/git/models/remoteResource.js';
+import { getBranchNameWithoutRemote, getRemoteNameFromBranchName } from '@gitlens/git/utils/branch.utils.js';
+import { isSha } from '@gitlens/git/utils/revision.utils.js';
+import { Logger } from '@gitlens/utils/logger.js';
+import { pad, splitSingle } from '@gitlens/utils/string.js';
+import { areUrisEqual } from '@gitlens/utils/uri.js';
+import { GlyphChars } from '../constants.js';
+import type { Container } from '../container.js';
+import { GitUri } from '../git/gitUri.js';
+import { showGenericErrorMessage } from '../messages.js';
+import { showReferencePicker } from '../quickpicks/referencePicker.js';
+import { command, executeCommand } from '../system/-webview/command.js';
+import { StatusFileNode } from '../views/nodes/statusFileNode.js';
+import { ActiveEditorCommand } from './commandBase.js';
+import { getCommandUri } from './commandBase.utils.js';
+import type { CommandContext } from './commandContext.js';
+import { isCommandContextViewNodeHasBranch, isCommandContextViewNodeHasCommit } from './commandContext.utils.js';
+import type { OpenOnRemoteCommandArgs } from './openOnRemote.js';
 
 export interface OpenFileOnRemoteCommandArgs {
 	branchOrTag?: string;
@@ -122,17 +123,17 @@ export class OpenFileOnRemoteCommand extends ActiveEditorCommand {
 		try {
 			let remotes = await svc.remotes.getRemotesWithProviders({ sort: true });
 
-			let range: Range | undefined;
+			let range: LineRange | undefined;
 			if (args.range) {
 				if (editor != null && areUrisEqual(editor.document.uri, uri)) {
-					range = new Range(
-						editor.selection.start.with({ line: editor.selection.start.line + 1 }),
-						editor.selection.end.with({
-							line: editor.selection.end.line + (editor.selection.end.character === 0 ? 0 : 1),
-						}),
-					);
+					range = {
+						startLine: editor.selection.start.line + 1,
+						startCharacter: editor.selection.start.character + 1,
+						endLine: editor.selection.end.line + (editor.selection.end.character === 0 ? 0 : 1),
+						endCharacter: editor.selection.end.character === 0 ? 1 : editor.selection.end.character + 1,
+					};
 				} else if (args.line != null) {
-					range = new Range(args.line + 1, 0, args.line + 1, 0);
+					range = { startLine: args.line + 1, startCharacter: 1, endLine: args.line + 1, endCharacter: 1 };
 				}
 			}
 
@@ -141,7 +142,7 @@ export class OpenFileOnRemoteCommand extends ActiveEditorCommand {
 			if (args.branchOrTag == null && sha != null && !isSha(sha) && remotes.length !== 0) {
 				const [remoteName, branchName] = splitSingle(sha, '/');
 				if (branchName != null) {
-					const remote = remotes.find(r => r.name === remoteName);
+					const remote = remotes.find((r: GitRemote) => r.name === remoteName);
 					if (remote != null) {
 						args.branchOrTag = branchName;
 						sha = undefined;
@@ -165,7 +166,7 @@ export class OpenFileOnRemoteCommand extends ActiveEditorCommand {
 							: `Open File on Remote From${pad(GlyphChars.Dot, 2, 2)}${gitUri.relativePath}`,
 						`Choose a branch or tag to ${args.clipboard ? 'copy' : 'open'} the file revision from`,
 						{
-							allowRevisions: true,
+							allowedAdditionalInput: { rev: true },
 							autoPick: true,
 							filter: { branches: b => b.remote || b.upstream != null },
 							picked: args.branchOrTag,
@@ -196,7 +197,7 @@ export class OpenFileOnRemoteCommand extends ActiveEditorCommand {
 						args.branchOrTag = getBranchNameWithoutRemote(name);
 
 						const remoteName = getRemoteNameFromBranchName(name);
-						const remote = remotes.find(r => r.name === remoteName);
+						const remote = remotes.find((r: GitRemote) => r.name === remoteName);
 						if (remote != null) {
 							remotes = [remote];
 						}

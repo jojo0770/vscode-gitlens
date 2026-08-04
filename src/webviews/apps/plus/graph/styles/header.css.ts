@@ -1,86 +1,26 @@
 import { css } from 'lit';
 
-export const repoHeaderStyles = css`
-	.jump-to-ref {
-		--button-foreground: var(--color-foreground);
-	}
-
-	.merge-conflict-warning {
-		flex: 0 0 100%;
-		min-width: 0;
-	}
-`;
-
-export const progressStyles = css`
-	.progress-container {
-		position: absolute;
-		left: 0;
-		bottom: 0;
-		z-index: 5;
-		height: 2px;
-		width: 100%;
-		overflow: hidden;
-	}
-	.progress-container .progress-bar {
-		background-color: var(--vscode-progressBar-background);
-		display: none;
-		position: absolute;
-		left: 0;
-		width: 2%;
-		height: 2px;
-	}
-
-	.progress-container.active .progress-bar {
-		display: inherit;
-	}
-
-	.progress-container.discrete .progress-bar {
-		left: 0;
-		transition: width 0.1s linear;
-	}
-
-	.progress-container.discrete.done .progress-bar {
-		width: 100%;
-	}
-
-	.progress-container.infinite .progress-bar {
-		animation-name: progress;
-		animation-duration: 4s;
-		animation-iteration-count: infinite;
-		animation-timing-function: steps(100);
-		transform: translateZ(0);
-	}
-
-	@keyframes progress {
-		0% {
-			transform: translateX(0) scaleX(1);
-		}
-
-		50% {
-			transform: translateX(2500%) scaleX(3);
-		}
-
-		to {
-			transform: translateX(4900%) scaleX(1);
-		}
-	}
-`;
-
 export const titlebarStyles = css`
 	.titlebar {
-		background: var(--titlebar-bg);
-		color: var(--titlebar-fg);
-		padding: 0.6rem 0.8rem;
-		font-size: 1.3rem;
 		flex-wrap: wrap;
+		padding: 0 0.4rem 0.5rem;
+		font-size: var(--gl-font-base);
+		color: var(--titlebar-fg);
+		background: var(--titlebar-bg);
 	}
+
+	:host-context(body[data-placement='panel']) .titlebar {
+		border-color: var(--vscode-sideBarSectionHeader-border, transparent);
+		border-top: var(--gl-border-width) solid transparent;
+	}
+
 	.titlebar,
 	.titlebar__row,
 	.titlebar__group {
 		display: flex;
 		flex-direction: row;
-		align-items: center;
 		gap: 0.5rem;
+		align-items: center;
 	}
 
 	.titlebar > *,
@@ -96,82 +36,234 @@ export const titlebarStyles = css`
 
 	.titlebar__row {
 		flex: 0 0 100%;
+		padding: 0.5rem 0.8rem;
+		margin: -0.5rem -0.8rem;
+		border-top: var(--gl-border-width) solid transparent;
+		border-bottom: var(--gl-border-width) solid transparent;
 	}
+
+	.titlebar__row--filtered {
+		background: color-mix(in srgb, var(--gl-chip-filtered-color) var(--gl-chip-tint-bg), transparent);
+		border-top-color: color-mix(in srgb, var(--gl-chip-filtered-color) var(--gl-chip-tint-border), transparent);
+		border-bottom-color: color-mix(in srgb, var(--gl-chip-filtered-color) var(--gl-chip-tint-hover), transparent);
+	}
+
+	.titlebar__row--scoped {
+		background: color-mix(in srgb, var(--gl-chip-scoped-color) var(--gl-chip-tint-bg), transparent);
+		border-top-color: color-mix(in srgb, var(--gl-chip-scoped-color) var(--gl-chip-tint-border), transparent);
+		border-bottom-color: color-mix(in srgb, var(--gl-chip-scoped-color) var(--gl-chip-tint-hover), transparent);
+	}
+
 	.titlebar__row--wrap {
-		display: grid;
-		grid-auto-flow: column;
-		justify-content: start;
-		grid-template-columns: 1fr min-content;
+		/* Three flex groups: LEFT, CENTER (grows to fill, centered content),
+		   RIGHT. Using flex-start + flex-grow on CENTER instead of
+		   space-between because space-between anchors RIGHT to the row's right
+		   edge — when LEFT + RIGHT exceed the row width, RIGHT would overlap
+		   LEFT instead of extending past the right edge. With this layout,
+		   when content overflows CENTER shrinks first (flex-shrink 100), then
+		   LEFT (flex-shrink 10), and finally RIGHT (flex-shrink 0) gets pushed
+		   past the right edge and clipped by overflow:hidden — staying in the
+		   DOM so it reappears as the row widens again. */
+		display: flex;
+		gap: 0.5rem;
+		align-items: center;
+		justify-content: flex-start;
+		min-width: 0;
+		container-name: graph-titlebar;
+
+		/* Container so descendants (e.g. gl-fetch-button's text) can use container
+		   queries against the row's inline size for stepwise label collapsing. */
+		container-type: inline-size;
+		overflow: hidden;
 	}
 
 	.titlebar__group {
-		flex: auto 1 1;
+		flex: 1 1 auto;
 	}
 
 	.titlebar__row--wrap .titlebar__group {
+		flex: 0 1 auto;
+
+		/* min-width: 0 lets each group shrink past its intrinsic content
+		   min-width — without this, groups stay at content size and items
+		   overflow horizontally instead of ellipsing. */
+		min-width: 0;
 		white-space: nowrap;
 	}
-	.titlebar__row--wrap .titlebar__group:nth-child(odd) {
+
+	/* Search row uses one group; set per-child shrink priorities so the
+	   search box yields width first, then the scope chip, while dividers
+	   and the button-group stay pinned. */
+	.titlebar__row--search .titlebar__group {
 		min-width: 0;
+	}
+
+	.titlebar__row--search .titlebar__group > gl-graph-scope-popover {
+		flex: 0 1 auto;
+		min-width: 0;
+	}
+
+	.titlebar__row--search .titlebar__group > gl-search-box {
+		flex-shrink: 100;
+	}
+
+	.titlebar__row--search .titlebar__group > .button-group,
+	.titlebar__row--search .titlebar__group > span {
+		flex: none;
+	}
+
+	.titlebar__row--wrap .titlebar__group:nth-child(1) {
+		flex-shrink: 10;
+		min-width: min-content;
+	}
+
+	.titlebar__row--wrap .titlebar__group:nth-child(1) > * {
+		flex-shrink: 1;
+	}
+
+	/* Repo yields width before the branch. Keep this much higher than the
+		   sibling shrink factor so the branch doesn't lose even a few pixels
+		   before the repo reaches its compact floor. */
+	.titlebar__row--wrap .titlebar__group:nth-child(1) > gl-repo-button-group {
+		flex-shrink: 1000000;
+	}
+
+	.titlebar__row--wrap .titlebar__group:nth-child(1) > span,
+	.titlebar__row--wrap .titlebar__group:nth-child(1) > .jump-to-ref,
+	.titlebar__row--wrap .titlebar__group:nth-child(1) > gl-popover {
+		flex-shrink: 0;
+	}
+
+	.titlebar__row--wrap .titlebar__group:nth-child(2) {
+		flex: 1 100 auto;
+
+		/* Grow to fill so RIGHT sits at the row's right edge naturally without
+		   space-between. justify-content: center centers CENTER's own content
+		   (the fetch button) within the grown box so there's visual space on
+		   both sides — matching what space-between previously gave us at wide
+		   widths. */
+		justify-content: center;
+
+		/* Floor CENTER at its content's min-content. Without this, the generic
+		   .titlebar__group { min-width: 0 } rule above lets CENTER's box
+		   collapse to 0 under flex-shrink: 100. When that happens, its non-
+		   shrinkable inner buttons (gl-fetch-button, sync gl-button — all
+		   projected via display:contents from gl-git-actions-buttons) overflow
+		   the 0-width box and visually overlap RIGHT, which is sitting flush
+		   against the collapsed box. Flooring CENTER at min-content keeps the
+		   buttons inside (while still allowing them to shrink down to their
+		   icon-only states), so further shrinkage of the row pushes RIGHT past
+		   the row's right edge (clipped by the row's overflow: hidden) instead. */
+		min-width: min-content;
+	}
+
+	.titlebar__row--wrap .titlebar__group:nth-child(3) {
+		flex-shrink: 0;
 	}
 
 	.titlebar__debugging > * {
 		display: inline-block;
 	}
-
-	.titlebar gl-feature-badge {
-		color: var(--color-foreground);
-	}
 `;
 
 export const graphHeaderControlStyles = css`
-	.popover::part(body) {
-		padding: 0;
-		font-size: var(--vscode-font-size);
-		background-color: var(--vscode-menu-background);
-	}
-
 	.titlebar__group gl-repo-button-group,
 	.titlebar__group gl-ref-button {
-		font-size: 1.2rem;
+		font-size: var(--gl-font-md);
+	}
+
+	/* The repo group trims these icon buttons to a 0.2rem pad to keep its trailing edge tight, which
+	   also leaves them shorter than every other header control. Restore only the vertical pad so they
+	   match the ~2.6rem row height, keeping the tight horizontal pad the component intends. */
+	.titlebar__group gl-repo-button-group::part(provider-icon),
+	.titlebar__group gl-repo-button-group::part(connect-icon) {
+		--button-padding: 0.3rem 0.2rem;
 	}
 
 	.shrink {
 		max-width: fit-content;
-		transition: all 0.2s;
+		transition: all var(--gl-duration-medium);
 	}
+
 	.shrink.hidden {
 		max-width: 0;
 		overflow: hidden;
 	}
+
 	.titlebar__group .shrink.hidden:not(:first-child) {
-		// compensate the parent gap
+		/* compensate the parent gap */
 		margin-left: -0.5rem;
 	}
 
-	.branch-menu {
+	/* Rows in the hidden-refs popover. The outer tree wins over menu-item's own :host { display: block },
+	   so laying the row out from here is what gives the icon, label and restore glyph their alignment. */
+	.hidden-ref {
 		display: flex;
-		gap: 0.5em;
+		gap: var(--gl-space-6);
 		align-items: center;
 	}
 
-	.branch-menu__avatar {
+	.hidden-ref__label {
+		flex: 1 1 auto;
+		min-width: 0;
+		overflow: hidden;
+		text-overflow: ellipsis;
+		white-space: nowrap;
+	}
+
+	/* The owner prefix that disambiguates same-named branches across remotes, and the qualifier on a
+	   remote-wide hide. Both stay subordinate to the ref name — including against the selection fill,
+	   where descriptionForeground has no contrast left. */
+	.hidden-ref__owner,
+	.hidden-ref__suffix {
+		color: var(--vscode-descriptionForeground);
+	}
+
+	.hidden-ref:hover .hidden-ref__owner,
+	.hidden-ref:hover .hidden-ref__suffix,
+	.hidden-ref:focus-visible .hidden-ref__owner,
+	.hidden-ref:focus-visible .hidden-ref__suffix {
+		color: color-mix(in srgb, var(--vscode-menu-selectionForeground) 78%, transparent);
+	}
+
+	/* Clicking the row restores the ref; this is the only thing that says so. */
+	.hidden-ref__show {
+		flex: none;
+		opacity: 0;
+		transition: opacity var(--gl-duration-x-fast) var(--gl-ease-out);
+	}
+
+	.hidden-ref:hover .hidden-ref__show,
+	.hidden-ref:focus-visible .hidden-ref__show {
+		opacity: 1;
+	}
+
+	@media (prefers-reduced-motion: reduce) {
+		.hidden-ref__show {
+			transition: none;
+		}
+	}
+
+	.hidden-ref__avatar {
 		width: 1.4rem;
 		aspect-ratio: 1;
+		flex: none;
 		vertical-align: text-bottom;
+	}
+
+	.hidden-ref__icon {
+		flex: none;
 	}
 
 	.action-divider {
 		display: inline-block;
 		width: 0.1rem;
 		height: 2.2rem;
+		/* margin-left: 0.2rem; */
+		margin-right: 0.2rem;
 		vertical-align: middle;
 		background-color: var(--titlebar-fg);
 		opacity: 0.4;
-		margin: {
-			// left: 0.2rem;
-			right: 0.2rem;
-		}
 	}
 
 	.button-group {
@@ -179,111 +271,62 @@ export const graphHeaderControlStyles = css`
 		flex-direction: row;
 		align-items: stretch;
 	}
-	.button-group:hover,
-	.button-group:focus-within {
-		background-color: var(--color-graph-actionbar-selectedBackground);
-		border-radius: 3px;
-	}
-
-	.button-group > *:not(:first-child),
-	.button-group > *:not(:first-child) .action-button {
-		display: flex;
-		border-top-left-radius: 0;
-		border-bottom-left-radius: 0;
-	}
-	.button-group > *:not(:first-child) .action-button {
-		padding-left: 0.5rem;
-		padding-right: 0.5rem;
-		height: 100%;
-	}
-
-	.button-group:hover > *:not(:last-child),
-	.button-group:active > *:not(:last-child),
-	.button-group:focus-within > *:not(:last-child),
-	.button-group:hover > *:not(:last-child) .action-button,
-	.button-group:active > *:not(:last-child) .action-button,
-	.button-group:focus-within > *:not(:last-child) .action-button {
-		border-top-right-radius: 0;
-		border-bottom-right-radius: 0;
-	}
-
-	.minimap-marker-swatch {
-		display: inline-block;
-		width: 1rem;
-		height: 1rem;
-		border-radius: 2px;
-		transform: scale(1.6);
-		margin-left: 0.3rem;
-		margin-right: 1rem;
-	}
-
-	.minimap-marker-swatch[data-marker='localBranches'] {
-		background-color: var(--color-graph-minimap-marker-local-branches);
-	}
-
-	.minimap-marker-swatch[data-marker='pullRequests'] {
-		background-color: var(--color-graph-minimap-marker-pull-requests);
-	}
-
-	.minimap-marker-swatch[data-marker='remoteBranches'] {
-		background-color: var(--color-graph-minimap-marker-remote-branches);
-	}
-
-	.minimap-marker-swatch[data-marker='stashes'] {
-		background-color: var(--color-graph-minimap-marker-stashes);
-	}
-
-	.minimap-marker-swatch[data-marker='tags'] {
-		background-color: var(--color-graph-minimap-marker-tags);
-	}
 
 	gl-search-box::part(search) {
 		--gl-search-input-background: var(--color-graph-actionbar-background);
-		--gl-search-input-border: var(--sl-input-border-color);
+		--gl-search-input-border: var(--wa-input-border-color);
 	}
 
-	sl-option::part(base) {
-		padding: 0.2rem 0.4rem;
+	wa-option::part(base) {
+		padding: var(--gl-space-2) var(--gl-space-4);
 	}
 
-	sl-option[aria-selected='true']::part(base),
-	sl-option:not([aria-selected='true']):hover::part(base),
-	sl-option:not([aria-selected='true']):focus::part(base) {
-		background-color: var(--vscode-list-activeSelectionBackground);
+	wa-option:focus::part(base) {
 		color: var(--vscode-list-activeSelectionForeground);
+		background-color: var(--vscode-list-activeSelectionBackground);
 	}
 
-	sl-option::part(checked-icon) {
+	wa-option:not(:focus):hover::part(base) {
+		color: var(--vscode-list-activeSelectionForeground);
+		background-color: var(--vscode-list-inactiveSelectionBackground);
+	}
+
+	wa-option::part(checked-icon) {
 		display: none;
 	}
 
-	sl-select::part(listbox) {
-		padding-block: 0.2rem 0;
+	wa-select::part(listbox) {
+		display: flex;
+		flex-direction: column;
+		gap: 0.1rem;
 		width: max-content;
+		padding-block: var(--gl-space-2) 0;
 	}
 
-	sl-select::part(combobox) {
-		--sl-input-background-color: var(--color-graph-actionbar-background);
-		--sl-input-color: var(--color-foreground);
-		--sl-input-color-hover: var(--color-foreground);
+	wa-select::part(combobox) {
+		--wa-input-background-color: var(--color-graph-actionbar-background);
+		--wa-input-color: var(--color-foreground);
+		--wa-input-color-hover: var(--color-foreground);
+
 		padding: 0 0.75rem;
 		color: var(--color-foreground);
-		border-radius: var(--sl-border-radius-small);
+		border-radius: var(--wa-border-radius-small);
 	}
 
-	sl-select::part(display-input) {
+	wa-select::part(display-input) {
 		field-sizing: content;
 	}
 
-	sl-select::part(expand-icon) {
-		margin-inline-start: var(--sl-spacing-x-small);
+	wa-select::part(expand-icon) {
+		margin-inline-start: var(--wa-spacing-x-small);
 	}
 
-	sl-select[open]::part(combobox) {
+	wa-select[open]::part(combobox) {
 		background-color: var(--color-graph-actionbar-background);
 	}
-	sl-select:hover::part(combobox),
-	sl-select:focus::part(combobox) {
+
+	wa-select:hover::part(combobox),
+	wa-select:focus::part(combobox) {
 		background-color: var(--color-graph-actionbar-selectedBackground);
 	}
 `;

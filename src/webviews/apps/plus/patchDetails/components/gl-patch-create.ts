@@ -1,35 +1,39 @@
-import { Avatar, Button, defineGkElement, Menu, MenuItem, Popover } from '@gitkraken/shared-web-components';
 import { html } from 'lit';
 import { customElement, property, query, state } from 'lit/decorators.js';
 import { map } from 'lit/directives/map.js';
 import { repeat } from 'lit/directives/repeat.js';
 import { when } from 'lit/directives/when.js';
-import type { ViewFilesLayout } from '../../../../../config';
-import { urls } from '../../../../../constants';
-import type { GitFileChangeShape } from '../../../../../git/models/fileChange';
-import type { DraftRole, DraftVisibility } from '../../../../../plus/drafts/models/drafts';
-import { debounce } from '../../../../../system/function/debounce';
-import { flatCount } from '../../../../../system/iterable';
-import type { Serialized } from '../../../../../system/serialize';
+import type { GitFileChangeShape } from '@gitlens/git/models/fileChange.js';
+import { debounce } from '@gitlens/utils/debounce.js';
+import { flatCount } from '@gitlens/utils/iterable.js';
+import type { ViewFilesLayout } from '../../../../../config.js';
+import { urls } from '../../../../../constants.js';
+import type { DraftRole, DraftVisibility } from '../../../../../plus/drafts/models/drafts.js';
+import type { Serialized } from '../../../../../system/serialize.js';
 import type {
 	Change,
 	DraftUserSelection,
 	ExecuteFileActionParams,
 	State,
-} from '../../../../plus/patchDetails/protocol';
+} from '../../../../plus/patchDetails/protocol.js';
+import type { GlPopover } from '../../../shared/components/overlays/popover.js';
 import type {
 	TreeItemActionDetail,
 	TreeItemBase,
 	TreeItemCheckedDetail,
 	TreeItemSelectionDetail,
 	TreeModel,
-} from '../../../shared/components/tree/base';
-import { GlTreeBase } from './gl-tree-base';
-import '../../../shared/components/actions/action-nav';
-import '../../../shared/components/button';
-import '../../../shared/components/code-icon';
-import '../../../shared/components/commit/commit-stats';
-import '../../../shared/components/webview-pane';
+} from '../../../shared/components/tree/base.js';
+import { GlTreeBase } from './gl-tree-base.js';
+import '../../../shared/components/actions/action-nav.js';
+import '../../../shared/components/avatar/avatar.js';
+import '../../../shared/components/button.js';
+import '../../../shared/components/code-icon.js';
+import '../../../shared/components/commit/commit-stats.js';
+import '../../../shared/components/menu/menu-item.js';
+import '../../../shared/components/menu/menu-list.js';
+import '../../../shared/components/overlays/popover.js';
+import '../../../shared/components/webview-pane.js';
 
 export interface CreatePatchEventDetail {
 	title: string;
@@ -69,7 +73,9 @@ const BesideViewColumn = -2; /*ViewColumn.Beside*/
 export class GlPatchCreate extends GlTreeBase {
 	@property({ type: Object }) state?: Serialized<State>;
 
-	@property({ type: Boolean }) review = false;
+	/** Rendered inline (e.g. the Inspect WIP pane) rather than as the full Patch Details view;
+	 *  adds a Cancel affordance since there's no view chrome to close. */
+	@property({ type: Boolean }) inline = false;
 
 	@property({ type: Object })
 	generate?: GenerateState;
@@ -140,12 +146,6 @@ export class GlPatchCreate extends GlTreeBase {
 		return this.state?.create?.visibility ?? 'public';
 	}
 
-	constructor() {
-		super();
-
-		defineGkElement(Avatar, Button, Menu, MenuItem, Popover);
-	}
-
 	override updated(changedProperties: Map<string, any>): void {
 		if (changedProperties.has('state')) {
 			this.creationBusy = false;
@@ -173,7 +173,7 @@ export class GlPatchCreate extends GlTreeBase {
 		return html`
 			<div class="user-selection">
 				<div class="user-selection__avatar">
-					<gk-avatar .src=${userSelection.avatarUrl}></gk-avatar>
+					<gl-avatar .src=${userSelection.avatarUrl}></gl-avatar>
 				</div>
 				<div class="user-selection__info">
 					<div class="user-selection__name">
@@ -181,13 +181,13 @@ export class GlPatchCreate extends GlTreeBase {
 					</div>
 				</div>
 				<div class="user-selection__actions">
-					<gk-popover>
-						<gk-button slot="trigger">${roleLabel} <code-icon icon="chevron-down"></code-icon></gk-button>
-						<gk-menu>
+					<gl-popover trigger="click" appearance="menu" ?arrow=${false}>
+						<gl-button slot="anchor">${roleLabel} <code-icon icon="chevron-down"></code-icon></gl-button>
+						<menu-list slot="content">
 							${map(
 								options,
 								([value, label]) =>
-									html`<gk-menu-item
+									html`<menu-item
 										@click=${(e: MouseEvent) =>
 											this.onChangeSelectionRole(
 												e,
@@ -200,10 +200,10 @@ export class GlPatchCreate extends GlTreeBase {
 											class="user-selection__check ${role === value ? 'is-active' : ''}"
 										></code-icon>
 										${label}
-									</gk-menu-item>`,
+									</menu-item>`,
 							)}
-						</gk-menu>
-					</gk-popover>
+						</menu-list>
+					</gl-popover>
 				</div>
 			</div>
 		`;
@@ -241,8 +241,8 @@ export class GlPatchCreate extends GlTreeBase {
 				break;
 		}
 
-		const draftName = this.review ? 'Code Suggestion' : 'Cloud Patch';
-		const draftNamePlural = this.review ? 'Code Suggestions' : 'Cloud Patches';
+		const draftName = 'Cloud Patch';
+		const draftNamePlural = 'Cloud Patches';
 		return html`
 			<div class="section section--action">
 				${when(
@@ -253,40 +253,27 @@ export class GlPatchCreate extends GlTreeBase {
 							<p class="alert__content">${this.state!.create!.creationError}</p>
 						</div>`,
 				)}
-				${when(
-					this.review === false,
-					() => html`
-						<div class="message-input message-input--group">
-							<div class="message-input__select">
-								<span class="message-input__select-icon"
-									><code-icon icon=${visibilityIcon}></code-icon
-								></span>
-								<select
-									id="visibility"
-									class="message-input__control"
-									@change=${this.onVisibilityChange}
-								>
-									<option value="public" ?selected=${this.draftVisibility === 'public'}>
-										Anyone with the link
-									</option>
-									<option value="private" ?selected=${this.draftVisibility === 'private'}>
-										Members of my Org with the link
-									</option>
-									<option value="invite_only" ?selected=${this.draftVisibility === 'invite_only'}>
-										Collaborators only
-									</option>
-								</select>
-								<span class="message-input__select-caret"
-									><code-icon icon="chevron-down"></code-icon
-								></span>
-							</div>
-							<gl-button appearance="secondary" @click=${this.onInviteUsers}
-								><code-icon icon="person-add" slot="prefix"></code-icon> Invite</gl-button
-							>
-						</div>
-						${this.renderUserSelectionList()}
-					`,
-				)}
+				<div class="message-input message-input--group">
+					<div class="message-input__select">
+						<span class="message-input__select-icon"><code-icon icon=${visibilityIcon}></code-icon></span>
+						<select id="visibility" class="message-input__control" @change=${this.onVisibilityChange}>
+							<option value="public" ?selected=${this.draftVisibility === 'public'}>
+								Anyone with the link
+							</option>
+							<option value="private" ?selected=${this.draftVisibility === 'private'}>
+								Members of my Org with the link
+							</option>
+							<option value="invite_only" ?selected=${this.draftVisibility === 'invite_only'}>
+								Collaborators only
+							</option>
+						</select>
+						<span class="message-input__select-caret"><code-icon icon="chevron-down"></code-icon></span>
+					</div>
+					<gl-button appearance="secondary" @click=${this.onInviteUsers}
+						><code-icon icon="person-add" slot="prefix"></code-icon> Invite</gl-button
+					>
+				</div>
+				${this.renderUserSelectionList()}
 				<div class="message-input message-input--with-menu">
 					<input
 						id="title"
@@ -346,7 +333,7 @@ export class GlPatchCreate extends GlTreeBase {
 					</span>
 				</p>
 				${when(
-					this.review === true,
+					this.inline,
 					() => html`
 						<p class="button-container">
 							<span class="button-group button-group--single">
@@ -414,7 +401,7 @@ export class GlPatchCreate extends GlTreeBase {
 	private renderChangedFiles() {
 		return html`
 			<webview-pane class="h-no-border" expanded>
-				<span slot="title">${this.review ? 'Changes to Suggest' : 'Changes to Include'}</span>
+				<span slot="title">Changes to Include</span>
 				<action-nav slot="actions">${this.renderLayoutAction(this.fileLayout)}</action-nav>
 
 				${when(
@@ -484,17 +471,7 @@ export class GlPatchCreate extends GlTreeBase {
 
 	private renderTreeViewWithModel() {
 		if (this.createChanges == null || this.createChanges.length === 0) {
-			return this.renderTreeView([
-				{
-					label: 'No changes',
-					path: '',
-					level: 1,
-					branch: false,
-					checkable: false,
-					expanded: true,
-					checked: false,
-				},
-			]);
+			return this.renderTreeView([], 'none', 'No changes');
 		}
 
 		const treeModel: TreeModel[] = [];
@@ -517,7 +494,7 @@ export class GlPatchCreate extends GlTreeBase {
 				treeModel.push(...tree);
 			}
 		}
-		return this.renderTreeView(treeModel, this.state?.preferences?.indentGuides);
+		return this.renderTreeView(treeModel, this.state?.preferences?.indentGuides, 'No changes');
 	}
 
 	private getTreeForChange(change: Change, isMulti = false, isTree = false, compact = true): TreeModel[] | undefined {
@@ -610,6 +587,7 @@ export class GlPatchCreate extends GlTreeBase {
 			}
 			return;
 		}
+
 		this.validityMessage = undefined;
 		this.titleInput.setCustomValidity('');
 
@@ -638,10 +616,11 @@ export class GlPatchCreate extends GlTreeBase {
 		if (!this.state?.create) {
 			return;
 		}
+
 		this.creationBusy = true;
 	}
 
-	private onSelectCreateOption(_e: CustomEvent<{ target: MenuItem }>) {
+	private onSelectCreateOption(_e: CustomEvent) {
 		// const target = e.detail?.target;
 		// const value = target?.dataset?.value as 'staged' | 'unstaged' | undefined;
 		// const currentChange = this.create.[0];
@@ -715,8 +694,8 @@ export class GlPatchCreate extends GlTreeBase {
 	) {
 		this.emit('gl-patch-create-update-selection', { selection: selection, role: role });
 
-		const popoverEl: Popover | null = (e.target as HTMLElement)?.closest('gk-popover');
-		popoverEl?.hidePopover();
+		const popoverEl: GlPopover | null = (e.target as HTMLElement)?.closest('gl-popover');
+		void popoverEl?.hide();
 	}
 
 	private onVisibilityChange(e: Event) {
@@ -821,17 +800,14 @@ export class GlPatchCreate extends GlTreeBase {
 	): { icon: string; label: string; action: string }[] {
 		const openFile = {
 			icon: 'go-to-file',
-			label: 'Open file',
+			label: 'Open File',
 			action: 'file-open',
 		};
 
-		if (this.review) {
-			return [openFile];
-		}
 		if (file.staged === true) {
-			return [openFile, { icon: 'remove', label: 'Unstage changes', action: 'file-unstage' }];
+			return [openFile, { icon: 'remove', label: 'Unstage Changes', action: 'file-unstage' }];
 		}
-		return [openFile, { icon: 'plus', label: 'Stage changes', action: 'file-stage' }];
+		return [openFile, { icon: 'plus', label: 'Stage Changes', action: 'file-stage' }];
 	}
 
 	override getRepoActions(

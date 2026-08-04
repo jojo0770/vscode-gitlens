@@ -4,7 +4,7 @@ export interface Disposable {
 	dispose: () => void;
 }
 
-// eslint-disable-next-line @typescript-eslint/no-namespace
+// oxlint-disable-next-line typescript/no-namespace
 export namespace DOM {
 	export function on<K extends keyof WindowEventMap>(
 		window: Window,
@@ -62,6 +62,7 @@ export namespace DOM {
 			return {
 				dispose: () => {
 					if (disposed) return;
+
 					disposed = true;
 
 					document.removeEventListener(name, filteredListener as EventListener, options ?? true);
@@ -70,18 +71,80 @@ export namespace DOM {
 		}
 
 		const newListener = function (this: T, e: (DocumentEventMap | WindowEventMap)[K]) {
-			listener(e, this as unknown as T);
+			listener(e, this);
 		};
 		sourceOrSelector.addEventListener(name, newListener as EventListener, options ?? false);
 		return {
 			dispose: () => {
 				if (disposed) return;
+
 				disposed = true;
 
 				sourceOrSelector.removeEventListener(name, newListener as EventListener, options ?? false);
 			},
 		};
 	}
+}
+
+/**
+ * Opens the host context menu for `target` as if it had been right-clicked at its bottom-left corner
+ * — the affordance behind "kebab" buttons that surface a row's normal context menu.
+ *
+ * `composed` is required so the event escapes the component's shadow root and reaches the document
+ * listener that VS Code's menu is wired to.
+ */
+export function dispatchContextMenuAt(target: HTMLElement): void {
+	const rect = target.getBoundingClientRect();
+	target.dispatchEvent(
+		new MouseEvent('contextmenu', {
+			bubbles: true,
+			composed: true,
+			cancelable: true,
+			clientX: rect.left,
+			clientY: rect.bottom,
+			button: 2,
+		}),
+	);
+}
+
+/** `<input>` types that take no typed text, so a bare-key shortcut may still claim the keystroke. */
+const nonTextInputTypes = new Set([
+	'button',
+	'checkbox',
+	'color',
+	'file',
+	'image',
+	'radio',
+	'range',
+	'reset',
+	'submit',
+]);
+
+/**
+ * Whether an event originated in a text-entry surface — the guard an app-level single-key shortcut
+ * (e.g. the Commit Graph's `/`) needs so it never swallows a keystroke meant for typing.
+ *
+ * Walks the COMPOSED path rather than reading `event.target`, because a `document`-level listener sees
+ * the target retargeted to the outermost shadow host — for the commit search box that's
+ * `<gl-search-box>`, two shadow roots above the `<input>`.
+ *
+ * Checkbox and radio `<input>`s don't count: `gl-checkbox` / `gl-radio` delegate focus into a real
+ * `<input>`, and a shortcut should still fire while one of those holds focus. Unrecognized input types
+ * DO count, so a new text-ish type errs toward keeping the keystroke.
+ */
+export function isTextEntryTarget(event: Event): boolean {
+	return event.composedPath().some(el => {
+		const target = el as HTMLElement & { type?: string };
+		switch (target.tagName) {
+			case 'INPUT':
+				return !nonTextInputTypes.has(target.type ?? 'text');
+			case 'TEXTAREA':
+			case 'SELECT':
+				return true;
+			default:
+				return target.isContentEditable === true;
+		}
+	});
 }
 
 /** Parses a CSS duration and returns the number of milliseconds. */

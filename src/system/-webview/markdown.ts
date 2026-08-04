@@ -1,8 +1,8 @@
 import type { TextDocumentShowOptions, Uri } from 'vscode';
-import type { Container } from '../../container';
-import type { MarkdownContentMetadata } from '../../documents/markdown';
-import { Logger } from '../logger';
-import { executeCoreCommand } from './command';
+import { Logger } from '@gitlens/utils/logger.js';
+import type { Container } from '../../container.js';
+import type { MarkdownContentMetadata } from '../../documents/markdown.js';
+import { executeCoreCommand } from './command.js';
 
 export function showMarkdownPreview(
 	uriOrContent: Uri | string,

@@ -1,14 +1,17 @@
 import type { Command, Disposable, Uri } from 'vscode';
-import { commands, TreeItem, TreeItemCollapsibleState } from 'vscode';
-import { GlyphChars } from '../../constants';
-import { unknownGitUri } from '../../git/gitUri';
-import { configuration } from '../../system/-webview/configuration';
-import { getScopedCounter } from '../../system/counter';
-import { isPromise } from '../../system/promise';
-import { compareSubstringIgnoreCase, equalsIgnoreCase } from '../../system/string';
-import type { View } from '../viewBase';
-import type { PageableViewNode } from './abstract/viewNode';
-import { ContextValues, ViewNode } from './abstract/viewNode';
+import { commands, MarkdownString, ThemeIcon, TreeItem, TreeItemCollapsibleState } from 'vscode';
+import { getScopedCounter } from '@gitlens/utils/counter.js';
+import { isPromise } from '@gitlens/utils/promise.js';
+import { compareSubstringIgnoreCase, equalsIgnoreCase, pluralize } from '@gitlens/utils/string.js';
+import { GlyphChars } from '../../constants.js';
+import { unknownGitUri } from '../../git/gitUri.js';
+import type { GlRepository } from '../../git/models/repository.js';
+import { configuration } from '../../system/-webview/configuration.js';
+import type { View } from '../viewBase.js';
+import type { PageableViewNode } from './abstract/viewNode.js';
+import { ContextValues, ViewNode } from './abstract/viewNode.js';
+
+type AllowedContextValues = ContextValues | `gitlens:views:${View['type']}`;
 
 export class MessageNode extends ViewNode<'message'> {
 	constructor(
@@ -18,7 +21,7 @@ export class MessageNode extends ViewNode<'message'> {
 		protected description?: string,
 		protected tooltip?: string,
 		protected iconPath?: TreeItem['iconPath'],
-		protected contextValue?: ContextValues | `gitlens:views:${View['type']}`,
+		protected contextValue?: AllowedContextValues,
 		protected resourceUri?: Uri,
 	) {
 		super('message', unknownGitUri, view, parent);
@@ -39,31 +42,6 @@ export class MessageNode extends ViewNode<'message'> {
 	}
 }
 
-export class GroupedHeaderNode extends MessageNode {
-	constructor(view: View, parent: ViewNode) {
-		let description = view.description;
-		if (description && !equalsIgnoreCase(view.name, description)) {
-			const index = compareSubstringIgnoreCase(description, view.name, 0, view.name.length);
-			description = index === 0 ? description.substring(view.name.length).trimStart() : description;
-			if (description.startsWith(':')) {
-				description = description.substring(1).trimStart();
-			}
-		} else {
-			description = undefined;
-		}
-
-		super(
-			view,
-			parent,
-			view.name.toLocaleUpperCase(),
-			description,
-			view.description,
-			undefined,
-			`gitlens:views:${view.type}`,
-		);
-	}
-}
-
 export class CommandMessageNode extends MessageNode {
 	constructor(
 		view: View,
@@ -73,7 +51,7 @@ export class CommandMessageNode extends MessageNode {
 		description?: string,
 		tooltip?: string,
 		iconPath?: TreeItem['iconPath'],
-		contextValue?: ContextValues,
+		contextValue?: AllowedContextValues,
 		resourceUri?: Uri,
 	) {
 		super(view, parent, message, description, tooltip, iconPath, contextValue, resourceUri);
@@ -99,25 +77,26 @@ export class CommandMessageNode extends MessageNode {
 
 const actionCommandCounter = getScopedCounter();
 
-export class ActionMessageNode extends CommandMessageNode {
+export abstract class ActionMessageNodeBase extends CommandMessageNode {
 	private readonly _disposable: Disposable;
 
 	constructor(
 		view: View,
 		parent: ViewNode,
-		action: (node: ActionMessageNode) => void | Promise<void>,
 		message: string,
 		description?: string,
 		tooltip?: string,
 		iconPath?: TreeItem['iconPath'],
-		contextValue?: ContextValues,
+		contextValue?: AllowedContextValues,
 		resourceUri?: Uri,
 	) {
 		const command = { command: `gitlens.node.action:${actionCommandCounter.next()}`, title: 'Execute action' };
 		super(view, parent, command, message, description, tooltip, iconPath, contextValue, resourceUri);
 
-		this._disposable = commands.registerCommand(command.command, action.bind(undefined, this));
+		this._disposable = commands.registerCommand(command.command, this.action.bind(this));
 	}
+
+	abstract action(): void | Promise<void>;
 
 	override dispose(): void {
 		this._disposable.dispose();
@@ -128,7 +107,7 @@ export class ActionMessageNode extends CommandMessageNode {
 		description?: string | null;
 		tooltip?: string | null;
 		iconPath?: TreeItem['iconPath'] | null;
-		contextValue?: ContextValues | null;
+		contextValue?: AllowedContextValues | null;
 		resourceUri?: Uri | null;
 	}): void {
 		this.message = options.message ?? this.message;
@@ -138,6 +117,147 @@ export class ActionMessageNode extends CommandMessageNode {
 		this.contextValue = options.contextValue === null ? undefined : (options.contextValue ?? this.contextValue);
 		this.resourceUri = options.resourceUri === null ? undefined : (options.resourceUri ?? this.resourceUri);
 		this.view.triggerNodeChange(this);
+	}
+}
+
+export class ActionMessageNode extends ActionMessageNodeBase {
+	private readonly _action: (node: ActionMessageNode) => void | Promise<void>;
+
+	constructor(
+		view: View,
+		parent: ViewNode,
+		action: (node: ActionMessageNode) => void | Promise<void>,
+		message: string,
+		description?: string,
+		tooltip?: string,
+		iconPath?: TreeItem['iconPath'],
+		contextValue?: AllowedContextValues,
+		resourceUri?: Uri,
+	) {
+		super(view, parent, message, description, tooltip, iconPath, contextValue, resourceUri);
+		this._action = action;
+	}
+
+	override action(): void | Promise<void> {
+		return this._action(this);
+	}
+}
+
+export class GroupedHeaderNode extends ActionMessageNodeBase {
+	constructor(view: View, parent: ViewNode) {
+		super(
+			view,
+			parent,
+			view.grouped ? (view.groupedLabel ?? view.name).toLocaleUpperCase() : 'Showing',
+			view.grouped ? view.description : undefined,
+			undefined,
+			undefined,
+			view.grouped ? `gitlens:views:${view.type}` : undefined,
+		);
+	}
+
+	override async action(): Promise<void> {
+		if (!this.view.canFilterRepositories()) return;
+		return this.view.filterRepositories();
+	}
+
+	override async getTreeItem(): Promise<TreeItem> {
+		const item = await super.getTreeItem();
+		const repos = this.view.getFilteredRepositories();
+
+		item.description = this.getDescription(repos);
+		item.tooltip = this.getTooltip(repos);
+		if (!this.view.grouped) {
+			item.iconPath =
+				this.view.isRepositoryFilterActive() || this.view.isRepositoryFilterExcludingWorktreesActive()
+					? new ThemeIcon('filter-filled')
+					: new ThemeIcon('filter');
+		}
+		return item;
+	}
+
+	private getDescription(repos: GlRepository[]): string | undefined {
+		const description = this.getViewDescription();
+		const label = this.getRepositoryFilterLabel(repos, true);
+		return label
+			? description
+				? `${description} ${GlyphChars.Space}${GlyphChars.Dot}${GlyphChars.Space} ${label}`
+				: label
+			: description;
+	}
+
+	private getTooltip(repos: GlRepository[]): MarkdownString {
+		const tooltip = new MarkdownString();
+		if (this.view.grouped) {
+			tooltip.appendText(this.view.name);
+			const description = this.getViewDescription();
+			if (description) {
+				// TODO: This is so hacky
+				if (description.startsWith('(')) {
+					tooltip.appendMarkdown(` ${description}`);
+				} else if (description.startsWith(GlyphChars.Dot)) {
+					tooltip.appendMarkdown(` ${GlyphChars.Space}${description}`);
+				} else {
+					tooltip.appendMarkdown(`: ${description}`);
+				}
+			}
+		}
+
+		if (!this.view.supportsRepositoryFilter) return tooltip;
+
+		if (this.view.isRepositoryFilterExcludingWorktreesActive()) {
+			tooltip.appendMarkdown('\n\nShowing all repos, excluding worktrees / submodules');
+			tooltip.appendMarkdown('\\\nClick to change filtering');
+		} else {
+			const { openRepositories } = this.view.container.git;
+			const type = openRepositories.some(r => r.isWorktree) ? 'repos / worktrees' : 'repos';
+
+			if (this.view.isRepositoryFilterActive()) {
+				tooltip.appendMarkdown(`\n\nShowing ${repos.length} of ${openRepositories.length} ${type}`);
+				tooltip.appendMarkdown('\\\nClick to change filtering');
+			} else if (repos.length > 1) {
+				tooltip.appendMarkdown(`\n\nShowing all ${type}`);
+				tooltip.appendMarkdown('\\\nClick to filter by a repo or worktree');
+			}
+		}
+
+		return tooltip;
+	}
+
+	private getRepositoryFilterLabel(repos?: GlRepository[], addSuffix?: boolean): string | undefined {
+		if (!this.view.supportsRepositoryFilter) return undefined;
+		if (!repos?.length) return undefined;
+
+		const prefix = this.view.grouped ? 'showing ' : '';
+
+		if (repos.length === 1) {
+			if (this.view.repositoryFilter?.length) {
+				return addSuffix ? `${prefix}${repos[0].name} — click to change` : repos[0].name;
+			}
+			return undefined;
+		}
+
+		// When excluding worktrees/submodules, always show "repos" not "repos / worktrees"
+		const mixed = !this.view.supportsWorktreeCollapsing && !this.view.isRepositoryFilterExcludingWorktreesActive();
+
+		const label = pluralize(mixed ? 'repo / worktree' : 'repo', repos.length, {
+			plural: mixed ? 'repos / worktrees' : 'repos',
+		});
+		return addSuffix ? `${prefix}${label} — click to filter` : label;
+	}
+
+	private getViewDescription(): string | undefined {
+		let description = this.view.grouped ? this.view.description : undefined;
+		if (description && !equalsIgnoreCase(this.view.name, description)) {
+			const index = compareSubstringIgnoreCase(description, this.view.name, 0, this.view.name.length);
+			description = index === 0 ? description.substring(this.view.name.length).trimStart() : description;
+			if (description.startsWith(':')) {
+				description = description.substring(1).trimStart();
+			}
+			return description;
+		}
+
+		return undefined;
 	}
 }
 

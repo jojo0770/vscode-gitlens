@@ -1,11 +1,20 @@
 import { ThemeIcon, window } from 'vscode';
-import type { OpenChangedFilesCommandArgs } from '../../commands/openChangedFiles';
-import type { OpenOnlyChangedFilesCommandArgs } from '../../commands/openOnlyChangedFiles';
-import { RevealInSideBarQuickInputButton, ShowDetailsViewQuickInputButton } from '../../commands/quickCommand.buttons';
-import type { Keys } from '../../constants';
-import { GlyphChars } from '../../constants';
-import { Container } from '../../container';
-import { browseAtRevision } from '../../git/actions';
+import type { GitCommit } from '@gitlens/git/models/commit.js';
+import type { GitFile } from '@gitlens/git/models/file.js';
+import type { GitFileChange } from '@gitlens/git/models/fileChange.js';
+import type { GitStatusFile } from '@gitlens/git/models/statusFile.js';
+import { basename } from '@gitlens/utils/path.js';
+import { pad } from '@gitlens/utils/string.js';
+import type { OpenChangedFilesCommandArgs } from '../../commands/openChangedFiles.js';
+import type { OpenOnlyChangedFilesCommandArgs } from '../../commands/openOnlyChangedFiles.js';
+import {
+	RevealInSideBarQuickInputButton,
+	ShowDetailsViewQuickInputButton,
+} from '../../commands/quick-wizard/quickButtons.js';
+import type { Keys } from '../../constants.js';
+import { GlyphChars } from '../../constants.js';
+import { Container } from '../../container.js';
+import { browseAtRevision } from '../../git/actions.js';
 import {
 	applyChanges,
 	copyIdToClipboard,
@@ -26,18 +35,14 @@ import {
 	restoreFile,
 	showCommitInDetailsView,
 	showCommitInGraph,
-} from '../../git/actions/commit';
-import { CommitFormatter } from '../../git/formatters/commitFormatter';
-import type { GitCommit } from '../../git/models/commit';
-import type { GitFile } from '../../git/models/file';
-import type { GitFileChange } from '../../git/models/fileChange';
-import type { GitStatusFile } from '../../git/models/statusFile';
-import { getGitFileFormattedDirectory } from '../../git/utils/-webview/file.utils';
-import { getGitFileStatusThemeIcon } from '../../git/utils/-webview/icons';
-import { basename } from '../../system/path';
-import { pad } from '../../system/string';
-import type { CompareResultsNode } from '../../views/nodes/compareResultsNode';
-import { CommandQuickPickItem } from './common';
+} from '../../git/actions/commit.js';
+import { CommitFormatter } from '../../git/formatters/commitFormatter.js';
+import { formatCommitStats, getCommitGitUri } from '../../git/utils/-webview/commit.utils.js';
+import { getGitFileFormattedDirectory } from '../../git/utils/-webview/file.utils.js';
+import { formatFileChangeStats } from '../../git/utils/-webview/fileChange.utils.js';
+import { getGitFileStatusThemeIcon } from '../../git/utils/-webview/icons.js';
+import type { CompareResultsNode } from '../../views/nodes/compareResultsNode.js';
+import { CommandQuickPickItem } from './common.js';
 
 export class CommitFilesQuickPickItem extends CommandQuickPickItem {
 	constructor(
@@ -57,11 +62,15 @@ export class CommitFilesQuickPickItem extends CommandQuickPickItem {
 				}`,
 				detail: `${
 					options?.file != null
-						? `$(file) ${basename(options.file.path)}${options.file.formatStats('expanded', {
-								separator: ', ',
-								prefix: ` ${GlyphChars.Dot} `,
-							})}`
-						: `$(files) ${commit.formatStats('expanded', {
+						? `$(file) ${basename(options.file.path)}${formatFileChangeStats(
+								options.file.stats,
+								'expanded',
+								{
+									separator: ', ',
+									prefix: ` ${GlyphChars.Dot} `,
+								},
+							)}`
+						: `$(files) ${formatCommitStats(commit.stats, 'expanded', {
 								separator: ', ',
 								empty: 'No files changed',
 							})}`
@@ -141,7 +150,7 @@ export class CommitBrowseRepositoryFromHereCommandQuickPickItem extends CommandQ
 	}
 
 	override execute(_options: { preserveFocus?: boolean; preview?: boolean }): Promise<void> {
-		return browseAtRevision(this.commit.getGitUri(), {
+		return browseAtRevision(getCommitGitUri(this.commit), {
 			before: this.executeOptions?.before,
 			openInNewWindow: this.executeOptions?.openInNewWindow,
 		});
@@ -306,7 +315,10 @@ export class CommitOpenInGraphCommandQuickPickItem extends CommandQuickPickItem 
 	}
 
 	override execute(options: { preserveFocus?: boolean; preview?: boolean }): Promise<void> {
-		return showCommitInGraph(this.commit, { preserveFocus: options?.preserveFocus });
+		return showCommitInGraph(this.commit, {
+			preserveFocus: options?.preserveFocus,
+			source: { source: 'quick-wizard' },
+		});
 	}
 }
 
@@ -316,7 +328,7 @@ export class CommitExplainCommandQuickPickItem extends CommandQuickPickItem {
 	}
 
 	override execute(_options: { preserveFocus?: boolean; preview?: boolean }): Promise<void> {
-		return explainCommit(this.commit, { source: { source: 'commandPalette' } });
+		return explainCommit(this.commit, { source: { source: 'quick-wizard' } });
 	}
 }
 

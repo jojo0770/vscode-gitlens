@@ -1,11 +1,11 @@
-import { GlyphChars } from '../../../constants';
-// import { getBranchNameWithoutRemote, getRemoteNameFromBranchName } from '../../../git/models/branch';
-import type { GitReference, GitStashReference } from '../../../git/models/reference';
-import type { GitRevisionRange } from '../../../git/models/revision';
-// import { isRevisionRange, isShaParent, isStashReference } from '../../../git/models/reference';
-import { capitalize } from '../../../system/string';
+// import { getBranchNameWithoutRemote, getRemoteNameFromBranchName } from '@gitlens/git/models/branch.js';
+import type { GitReference, GitStashReference } from '@gitlens/git/models/reference.js';
+import type { GitRevisionRange } from '@gitlens/git/models/revision.js';
+import { capitalize } from '@gitlens/utils/string.js';
+import { GlyphChars } from '../../../constants.js';
+// import { isRevisionRange, isShaParent, isStashReference } from '@gitlens/git/models/reference.js';
 
-// import { getBranchNameWithoutRemote, getRemoteNameFromBranchName } from '../../../git/models/branch';
+// import { getBranchNameWithoutRemote, getRemoteNameFromBranchName } from '@gitlens/git/models/branch.js';
 export function getRemoteNameSlashIndex(name: string): number {
 	return name.startsWith('remotes/') ? name.indexOf('/', 8) : name.indexOf('/');
 }
@@ -16,7 +16,13 @@ export function getRemoteNameFromBranchName(name: string): string {
 	return name.substring(0, getRemoteNameSlashIndex(name));
 }
 
-// import { isRevisionRange, isShaParent, isStashReference } from '../../../git/models/reference';
+/** A remote's hosting-provider glicon, or the `cloud` codicon for an unrecognized/absent provider (there is
+ *  no `gl-provider-cloud`). Applies the same `'remote'` → `'cloud'` normalization the host already does. */
+export function providerIconName(icon: string | undefined): string {
+	return icon == null || icon === 'cloud' || icon === 'remote' ? 'cloud' : `gl-provider-${icon}`;
+}
+
+// import { isRevisionRange, isShaParent, isStashReference } from '@gitlens/git/models/reference.js';
 const rangeRegex = /^([\w\-/]+(?:\.[\w\-/]+)*)?(\.\.\.?)([\w\-/]+(?:\.[\w\-/]+)*)?$/;
 const qualifiedRangeRegex = /^([\w\-/]+(?:\.[\w\-/]+)*)(\.\.\.?)([\w\-/]+(?:\.[\w\-/]+)*)$/;
 const qualifiedDoubleDotRange = /^([\w\-/]+(?:\.[\w\-/]+)*)(\.\.)([\w\-/]+(?:\.[\w\-/]+)*)$/;

@@ -1,12 +1,12 @@
 import type { TextEditor, Uri } from 'vscode';
 import { window } from 'vscode';
-import { Schemes } from '../constants';
-import type { MarkdownContentMetadata } from '../documents/markdown';
-import { decodeGitLensRevisionUriAuthority } from '../git/gitUri.authority';
-import { command, executeCommand } from '../system/-webview/command';
-import { Logger } from '../system/logger';
-import { ActiveEditorCommand } from './commandBase';
-import { getCommandUri } from './commandBase.utils';
+import { decodeGitLensRevisionUriAuthority } from '@gitlens/git/utils/uriAuthority.js';
+import { Logger } from '@gitlens/utils/logger.js';
+import { Schemes } from '../constants.js';
+import type { MarkdownContentMetadata } from '../documents/markdown.js';
+import { command, executeCommand } from '../system/-webview/command.js';
+import { ActiveEditorCommand } from './commandBase.js';
+import { getCommandUri } from './commandBase.utils.js';
 
 @command()
 export class RegenerateMarkdownDocumentCommand extends ActiveEditorCommand {

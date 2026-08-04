@@ -1,30 +1,32 @@
 import type { Disposable } from 'vscode';
 import { window } from 'vscode';
-import { ClearQuickInputButton } from '../commands/quickCommand.buttons';
-import { GlyphChars, quickPickTitleMaxChars } from '../constants';
-import type { Container } from '../container';
-import type { GitContributor } from '../git/models/contributor';
-import type { Repository } from '../git/models/repository';
-import type { ContributorQuickPickItem } from '../git/utils/-webview/contributor.quickpick';
-import { createContributorQuickPickItem } from '../git/utils/-webview/contributor.quickpick';
-import { sortContributors } from '../git/utils/-webview/sorting';
-import { getQuickPickIgnoreFocusOut } from '../system/-webview/vscode';
-import { debounce } from '../system/function/debounce';
-import { defer } from '../system/promise';
-import { pad, truncate } from '../system/string';
+import type { GitContributor } from '@gitlens/git/models/contributor.js';
+import { debounce } from '@gitlens/utils/debounce.js';
+import { defer } from '@gitlens/utils/promise.js';
+import { pad, truncate } from '@gitlens/utils/string.js';
+import { ClearQuickInputButton } from '../commands/quick-wizard/quickButtons.js';
+import { GlyphChars, quickPickTitleMaxChars } from '../constants.js';
+import type { Container } from '../container.js';
+import type { GlRepository } from '../git/models/repository.js';
+import type { ContributorQuickPickItem } from '../git/utils/-webview/contributor.quickpick.js';
+import { createContributorQuickPickItem } from '../git/utils/-webview/contributor.quickpick.js';
+import { sortContributors } from '../git/utils/-webview/sorting.js';
+import { getQuickPickIgnoreFocusOut } from '../system/-webview/vscode.js';
+
+export interface ContributorQuickPickOptions {
+	appendReposToTitle?: boolean;
+	clearButton?: boolean;
+	ignoreFocusOut?: boolean;
+	multiselect?: boolean;
+	picked?: (contributor: GitContributor) => boolean;
+}
 
 export async function showContributorsPicker(
 	container: Container,
-	repository: Repository,
+	repository: GlRepository,
 	title: string,
 	placeholder: string,
-	options?: {
-		appendReposToTitle?: boolean;
-		clearButton?: boolean;
-		ignoreFocusOut?: boolean;
-		multiselect?: boolean;
-		picked?: (contributor: GitContributor) => boolean;
-	},
+	options?: ContributorQuickPickOptions,
 ): Promise<GitContributor[] | undefined> {
 	const deferred = defer<GitContributor[] | undefined>();
 	const disposables: Disposable[] = [];
@@ -105,7 +107,7 @@ export async function showContributorsPicker(
 	}
 }
 
-function appendRepoToTitle(container: Container, title: string, repo: Repository) {
+function appendRepoToTitle(container: Container, title: string, repo: GlRepository) {
 	return container.git.openRepositoryCount <= 1
 		? title
 		: `${title}${truncate(`${pad(GlyphChars.Dot, 2, 2)}${repo.name}`, quickPickTitleMaxChars - title.length)}`;

@@ -1,15 +1,16 @@
 import type { TextEditor } from 'vscode';
 import { Range } from 'vscode';
-import type { Container } from '../container';
-import type { GitCommit } from '../git/models/commit';
-import { log } from '../system/decorators/log';
-import { getLogScope } from '../system/logger.scope';
-import { maybeStopWatch } from '../system/stopwatch';
-import type { TrackedGitDocument } from '../trackers/trackedDocument';
-import type { AnnotationContext, AnnotationState, DidChangeStatusCallback } from './annotationProvider';
-import type { Decoration } from './annotations';
-import { addOrUpdateGutterHeatmapDecoration } from './annotations';
-import { BlameAnnotationProviderBase } from './blameAnnotationProvider';
+import type { GitCommit } from '@gitlens/git/models/commit.js';
+import { debug } from '@gitlens/utils/decorators/log.js';
+import { getScopedLogger } from '@gitlens/utils/logger.scoped.js';
+import { maybeStopWatch } from '@gitlens/utils/stopwatch.js';
+import type { Container } from '../container.js';
+import { getCommitDate } from '../git/utils/-webview/commit.utils.js';
+import type { TrackedGitDocument } from '../trackers/trackedDocument.js';
+import type { AnnotationContext, AnnotationState, DidChangeStatusCallback } from './annotationProvider.js';
+import type { Decoration } from './annotations.js';
+import { addOrUpdateGutterHeatmapDecoration } from './annotations.js';
+import { BlameAnnotationProviderBase } from './blameAnnotationProvider.js';
 
 export class GutterHeatmapBlameAnnotationProvider extends BlameAnnotationProviderBase {
 	constructor(
@@ -21,9 +22,9 @@ export class GutterHeatmapBlameAnnotationProvider extends BlameAnnotationProvide
 		super(container, onDidChangeStatus, 'heatmap', editor, trackedDocument);
 	}
 
-	@log()
+	@debug()
 	override async onProvideAnnotation(_context?: AnnotationContext, state?: AnnotationState): Promise<boolean> {
-		const scope = getLogScope();
+		const scope = getScopedLogger();
 
 		const blame = await this.getBlame(state?.recompute);
 		if (blame == null) return false;
@@ -42,7 +43,7 @@ export class GutterHeatmapBlameAnnotationProvider extends BlameAnnotationProvide
 			if (commit == null) continue;
 
 			addOrUpdateGutterHeatmapDecoration(
-				commit.date,
+				getCommitDate(commit),
 				computedHeatmap,
 				new Range(editorLine, 0, editorLine, 0),
 				decorationsMap,

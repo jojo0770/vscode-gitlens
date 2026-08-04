@@ -1,33 +1,33 @@
 import type { TreeCheckboxChangeEvent } from 'vscode';
 import { Disposable, ThemeIcon, TreeItem, TreeItemCollapsibleState } from 'vscode';
-import type { ViewShowBranchComparison } from '../../config';
-import { GlyphChars } from '../../constants';
-import type { StoredBranchComparison, StoredBranchComparisons, StoredNamedRef } from '../../constants.storage';
-import type { GitUri } from '../../git/gitUri';
-import type { GitBranch } from '../../git/models/branch';
-import type { RepositoryFileSystemChangeEvent } from '../../git/models/repository';
-import type { GitUser } from '../../git/models/user';
-import type { CommitsQueryResults, FilesQueryResults } from '../../git/queryResults';
-import { getAheadBehindFilesQuery, getCommitsQuery, getFilesQuery } from '../../git/queryResults';
-import { createRevisionRange, shortenRevision } from '../../git/utils/revision.utils';
-import { CommandQuickPickItem } from '../../quickpicks/items/common';
-import { showReferencePicker } from '../../quickpicks/referencePicker';
-import { debug, log } from '../../system/decorators/log';
-import { weakEvent } from '../../system/event';
-import { pluralize } from '../../system/string';
-import type { ViewsWithBranches } from '../viewBase';
-import type { WorktreesView } from '../worktreesView';
-import { SubscribeableViewNode } from './abstract/subscribeableViewNode';
-import type { ViewNode } from './abstract/viewNode';
-import { ContextValues, getViewNodeId } from './abstract/viewNode';
+import type { GitBranch } from '@gitlens/git/models/branch.js';
+import type { GitUser } from '@gitlens/git/models/user.js';
+import { createRevisionRange, shortenRevision } from '@gitlens/git/utils/revision.utils.js';
+import { debug, trace } from '@gitlens/utils/decorators/log.js';
+import { weakEvent } from '@gitlens/utils/event.js';
+import { pluralize } from '@gitlens/utils/string.js';
+import type { ViewShowBranchComparison } from '../../config.js';
+import { GlyphChars } from '../../constants.js';
+import type { StoredBranchComparison, StoredBranchComparisons, StoredNamedRef } from '../../constants.storage.js';
+import type { GitUri } from '../../git/gitUri.js';
+import type { RepositoryWorkingTreeChangeEvent } from '../../git/models/repository.js';
+import type { CommitsQueryResults, FilesQueryResults } from '../../git/queryResults.js';
+import { getAheadBehindFilesQuery, getCommitsQuery, getFilesQuery } from '../../git/queryResults.js';
+import { CommandQuickPickItem } from '../../quickpicks/items/common.js';
+import { showReferencePicker } from '../../quickpicks/referencePicker.js';
+import type { ViewsWithBranches } from '../viewBase.js';
+import type { WorktreesView } from '../worktreesView.js';
+import { SubscribeableViewNode } from './abstract/subscribeableViewNode.js';
+import type { ViewNode } from './abstract/viewNode.js';
+import { ContextValues, getViewNodeId } from './abstract/viewNode.js';
 import {
 	getComparisonCheckedFiles,
 	getComparisonStoragePrefix,
 	resetComparisonCheckedFiles,
 	restoreComparisonCheckedFiles,
-} from './compareResultsNode';
-import { ResultsCommitsNode } from './resultsCommitsNode';
-import { ResultsFilesNode } from './resultsFilesNode';
+} from './compareResultsNode.js';
+import { ResultsCommitsNode } from './resultsCommitsNode.js';
+import { ResultsFilesNode } from './resultsFilesNode.js';
 
 type State = {
 	filterCommits: GitUser[] | undefined;
@@ -103,7 +103,7 @@ export class CompareBranchNode extends SubscribeableViewNode<
 		return this.branch.repoPath;
 	}
 
-	@debug()
+	@trace()
 	protected override subscribe(): Disposable | Promise<Disposable | undefined> | undefined {
 		const subscriptions: Disposable[] = [
 			weakEvent(this.view.onDidChangeNodesCheckedState, this.onNodesCheckedStateChanged, this),
@@ -113,7 +113,7 @@ export class CompareBranchNode extends SubscribeableViewNode<
 			const repo = this.view.container.git.getRepository(this.uri);
 			if (repo != null) {
 				subscriptions.push(
-					weakEvent(repo.onDidChangeFileSystem, this.onFileSystemChanged, this, [repo.watchFileSystem()]),
+					weakEvent(repo.onDidChangeWorkingTree, this.onWorkingTreeChanged, this, [repo.watchWorkingTree()]),
 				);
 			}
 		}
@@ -121,7 +121,7 @@ export class CompareBranchNode extends SubscribeableViewNode<
 		return Disposable.from(...subscriptions);
 	}
 
-	private onFileSystemChanged(_e: RepositoryFileSystemChangeEvent) {
+	private onWorkingTreeChanged(_e: RepositoryWorkingTreeChangeEvent) {
 		void this.triggerChange(true);
 	}
 
@@ -264,7 +264,7 @@ export class CompareBranchNode extends SubscribeableViewNode<
 		return item;
 	}
 
-	@log()
+	@debug()
 	async clear(): Promise<void> {
 		this._compareWith = undefined;
 		await this.updateCompareWith(undefined);
@@ -273,20 +273,20 @@ export class CompareBranchNode extends SubscribeableViewNode<
 		this.view.triggerNodeChange(this);
 	}
 
-	@log()
+	@debug()
 	clearReviewed(): void {
 		void this.storeCompareWith(true).catch();
 		void this.triggerChange();
 	}
 
-	@log()
+	@debug()
 	async edit(): Promise<void> {
 		const pick = await showReferencePicker(
 			this.branch.repoPath,
 			`Compare ${this.branch.name}${this.compareWithWorkingTree ? ' (working)' : ''} with`,
 			'Choose a reference (branch, tag, etc) to compare with',
 			{
-				allowRevisions: true,
+				allowedAdditionalInput: { rev: true },
 				picked: this.branch.ref,
 				sort: { branches: { current: true }, tags: {} },
 			},
@@ -303,13 +303,13 @@ export class CompareBranchNode extends SubscribeableViewNode<
 		this.view.triggerNodeChange(this);
 	}
 
-	@debug()
+	@trace()
 	override refresh(reset?: boolean): void | { cancel: boolean } | Promise<void | { cancel: boolean }> {
 		this.loadCompareWith();
 		return super.refresh(reset);
 	}
 
-	@log()
+	@debug()
 	async setComparisonType(comparisonType: Exclude<ViewShowBranchComparison, false>): Promise<void> {
 		if (this._compareWith != null) {
 			await this.updateCompareWith({ ...this._compareWith, type: comparisonType, checkedFiles: undefined });
@@ -321,7 +321,7 @@ export class CompareBranchNode extends SubscribeableViewNode<
 		this.view.triggerNodeChange(this);
 	}
 
-	@log()
+	@debug()
 	async setDefaultCompareWith(compareWith: StoredBranchComparison): Promise<void> {
 		if (this._compareWith != null) return;
 

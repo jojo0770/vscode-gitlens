@@ -1,17 +1,17 @@
 import type { Uri } from 'vscode';
 import { window } from 'vscode';
-import type { Container } from '../../container';
-import { create as createWorktree, open as openWorktree } from '../../git/actions/worktree';
-import type { GitBranchReference } from '../../git/models/reference';
-import type { GitRemote } from '../../git/models/remote';
-import { parseGitRemoteUrl } from '../../git/parsers/remoteParser';
-import { getReferenceFromBranch } from '../../git/utils/-webview/reference.utils';
-import { getWorktreeForBranch } from '../../git/utils/-webview/worktree.utils';
-import { createReference } from '../../git/utils/reference.utils';
-import { command } from '../../system/-webview/command';
-import { Logger } from '../../system/logger';
-import { waitUntilNextTick } from '../../system/promise';
-import { GlCommandBase } from '../commandBase';
+import type { GitBranchReference } from '@gitlens/git/models/reference.js';
+import type { GitRemote } from '@gitlens/git/models/remote.js';
+import { createReference } from '@gitlens/git/utils/reference.utils.js';
+import { parseGitRemoteUrl } from '@gitlens/git/utils/remote.utils.js';
+import { Logger } from '@gitlens/utils/logger.js';
+import { waitUntilNextTick } from '@gitlens/utils/promise.js';
+import type { Container } from '../../container.js';
+import { create, open } from '../../git/actions/worktree.js';
+import { getReferenceFromBranch } from '../../git/utils/-webview/reference.utils.js';
+import { getWorktreeForBranch } from '../../git/utils/-webview/worktree.utils.js';
+import { command } from '../../system/-webview/command.js';
+import { GlCommandBase } from '../commandBase.js';
 
 interface GHPRPullRequestNode {
 	readonly pullRequestModel: GHPRPullRequest;
@@ -76,7 +76,7 @@ export class OpenOrCreateWorktreeCommand extends GlCommandBase {
 			return;
 		}
 
-		repo = await repo.getCommonRepository();
+		repo = await repo.git.getOrOpenCommonRepository();
 		if (repo == null) {
 			void window.showWarningMessage(`Unable to find main repository(${localUri.toString()}) for PR #${number}`);
 			return;
@@ -93,7 +93,7 @@ export class OpenOrCreateWorktreeCommand extends GlCommandBase {
 		if (remote != null) {
 			remoteName = remote.name;
 			// Ensure we have the latest from the remote
-			await repo.git.fetch({ remote: remote.name });
+			await repo.git.ops?.fetch({ remote: remote.name });
 		} else {
 			remoteName = remoteOwner;
 			addRemote = { name: remoteOwner, url: remoteUrl };
@@ -105,7 +105,7 @@ export class OpenOrCreateWorktreeCommand extends GlCommandBase {
 
 		const worktree = await getWorktreeForBranch(repo, localBranchName, remoteBranchName);
 		if (worktree != null) {
-			void openWorktree(worktree, { openOnly: true });
+			void open(worktree, { openOnly: true });
 			return;
 		}
 
@@ -128,7 +128,7 @@ export class OpenOrCreateWorktreeCommand extends GlCommandBase {
 		await waitUntilNextTick();
 
 		try {
-			const worktree = await createWorktree(repo, undefined, branchRef, {
+			const worktree = await create(repo, undefined, branchRef, {
 				addRemote: addRemote,
 				createBranch: createBranch,
 			});

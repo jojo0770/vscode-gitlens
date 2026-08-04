@@ -5,15 +5,15 @@ import type {
 	Event,
 } from 'vscode';
 import { Disposable, EventEmitter, window } from 'vscode';
-import { uuid } from '@env/crypto';
-import type { TrackingContext } from '../../constants.telemetry';
-import type { Container, Environment } from '../../container';
-import { CancellationError } from '../../errors';
-import { debug } from '../../system/decorators/log';
-import { getLoggableName, Logger } from '../../system/logger';
-import { getLogScope, setLogScopeExit, startLogScope } from '../../system/logger.scope';
-import { AuthenticationConnection } from './authenticationConnection';
-import type { ServerConnection } from './serverConnection';
+import { isCancellationError } from '@gitlens/utils/cancellation.js';
+import { uuid } from '@gitlens/utils/crypto.js';
+import { trace } from '@gitlens/utils/decorators/log.js';
+import { getLoggableName, Logger } from '@gitlens/utils/logger.js';
+import { getScopedLogger, maybeStartScopedLogger } from '@gitlens/utils/logger.scoped.js';
+import type { TrackingContext } from '../../constants.telemetry.js';
+import type { Container, Environment } from '../../container.js';
+import { AuthenticationConnection } from './authenticationConnection.js';
+import type { ServerConnection } from './serverConnection.js';
 
 interface StoredSession {
 	id: string;
@@ -83,9 +83,9 @@ export class AccountAuthenticationProvider implements AuthenticationProvider, Di
 		this._optionsByScope?.delete(getScopesKey(scopes));
 	}
 
-	@debug()
+	@trace()
 	public async createSession(scopes: string[]): Promise<AuthenticationSession> {
-		const scope = getLogScope();
+		const scope = getScopedLogger();
 
 		const options = this._optionsByScope?.get(getScopesKey(scopes));
 		if (options != null) {
@@ -99,7 +99,7 @@ export class AccountAuthenticationProvider implements AuthenticationProvider, Di
 			const token =
 				options?.signIn != null
 					? await this._authConnection.getTokenFromCodeAndState(options.signIn.code, options.signIn.state)
-					: await this._authConnection.login(scopes, scopesKey, options?.signUp, options?.context);
+					: await this._authConnection.login(scopesKey, options?.signUp, options?.context);
 			const session = await this.createSessionForToken(token, scopes);
 
 			const sessions = await this._sessionsPromise;
@@ -118,19 +118,19 @@ export class AccountAuthenticationProvider implements AuthenticationProvider, Di
 			// If login was cancelled, do not notify user.
 			if (ex === 'Cancelled' || ex.message === 'Cancelled') throw ex;
 
-			Logger.error(ex, scope);
+			scope?.error(ex);
 			void window.showErrorMessage(
 				`Unable to sign in to GitKraken: ${
-					ex instanceof CancellationError ? 'request timed out' : ex
+					isCancellationError(ex) ? 'request timed out' : ex
 				}. Please try again. If this issue persists, please contact support.`,
 			);
 			throw ex;
 		}
 	}
 
-	@debug()
+	@trace()
 	async getSessions(scopes?: string[]): Promise<AuthenticationSession[]> {
-		const scope = getLogScope();
+		const scope = getScopedLogger();
 
 		scopes = scopes?.sort();
 		const scopesKey = getScopesKey(scopes);
@@ -138,20 +138,20 @@ export class AccountAuthenticationProvider implements AuthenticationProvider, Di
 		const sessions = await this._sessionsPromise;
 		const filtered = scopes != null ? sessions.filter(s => getScopesKey(s.scopes) === scopesKey) : sessions;
 
-		setLogScopeExit(scope, ` \u2022 Found ${filtered.length} sessions`);
+		scope?.addExitInfo(`Found ${filtered.length} sessions`);
 
 		return filtered;
 	}
 
-	@debug()
+	@trace()
 	public async removeSession(id: string): Promise<void> {
-		const scope = getLogScope();
+		const scope = getScopedLogger();
 
 		try {
 			const sessions = await this._sessionsPromise;
 			const sessionIndex = sessions.findIndex(session => session.id === id);
 			if (sessionIndex === -1) {
-				Logger.log(`Unable to remove session ${id}; Not found`);
+				scope?.debug(`Unable to remove session ${id}; Not found`);
 				return;
 			}
 
@@ -162,15 +162,15 @@ export class AccountAuthenticationProvider implements AuthenticationProvider, Di
 
 			this._onDidChangeSessions.fire({ added: [], removed: [session], changed: [] });
 		} catch (ex) {
-			Logger.error(ex, scope);
+			scope?.error(ex);
 			void window.showErrorMessage(`Unable to sign out of GitKraken: ${ex}`);
 			throw ex;
 		}
 	}
 
-	@debug()
+	@trace()
 	public async removeSessionsByScopes(scopes?: string[]): Promise<void> {
-		const scope = getLogScope();
+		const scope = getScopedLogger();
 
 		try {
 			scopes = scopes?.sort();
@@ -198,14 +198,16 @@ export class AccountAuthenticationProvider implements AuthenticationProvider, Di
 
 			this._onDidChangeSessions.fire({ added: [], removed: removed, changed: [] });
 		} catch (ex) {
-			Logger.error(ex, scope);
-			void window.showErrorMessage(`Unable to sign out of GitKraken: ${ex}`);
+			scope?.error(ex);
+			void window.showErrorMessage(
+				`Unable to sign out of GitKraken: ${isCancellationError(ex) ? 'request timed out' : ex}`,
+			);
 			throw ex;
 		}
 	}
 
 	private async checkForUpdates() {
-		using scope = startLogScope(`${getLoggableName(this)}.checkForUpdates`, false);
+		using scope = maybeStartScopedLogger(`${getLoggableName(this)}.checkForUpdates`);
 
 		const previousSessions = await this._sessionsPromise;
 		this._sessionsPromise = this.getSessionsFromStorage();
@@ -229,7 +231,7 @@ export class AccountAuthenticationProvider implements AuthenticationProvider, Di
 		}
 
 		if (added.length || removed.length) {
-			Logger.debug(scope, `firing sessions changed event; added=${added.length}, removed=${removed.length}`);
+			scope?.trace(`firing sessions changed event; added=${added.length}, removed=${removed.length}`);
 			this._onDidChangeSessions.fire({ added: added, removed: removed, changed: [] });
 		}
 	}
@@ -259,7 +261,7 @@ export class AccountAuthenticationProvider implements AuthenticationProvider, Di
 	}
 
 	private async getSessionsFromStorage(): Promise<AuthenticationSession[]> {
-		using scope = startLogScope(`${getLoggableName(this)}.getSessionsFromStorage`, false);
+		using scope = maybeStartScopedLogger(`${getLoggableName(this)}.getSessionsFromStorage`);
 
 		let storedSessions: StoredSession[];
 
@@ -277,20 +279,20 @@ export class AccountAuthenticationProvider implements AuthenticationProvider, Di
 				throw ex;
 			}
 		} catch (ex) {
-			Logger.error(ex, scope, 'Unable to read sessions from storage');
+			scope?.error(ex, 'Unable to read sessions from storage');
 			return [];
 		}
 
 		const sessionPromises = storedSessions.map(async (session: StoredSession) => {
 			const scopesKey = getScopesKey(session.scopes);
 
-			Logger.debug(scope, `read session from storage with scopes=${scopesKey}`);
+			scope?.trace(`read session from storage with scopes=${scopesKey}`);
 
 			let userInfo: { id: string; accountName: string } | undefined;
 			if (session.account == null) {
 				try {
 					userInfo = await this._authConnection.getAccountInfo(session.accessToken);
-					Logger.debug(scope, `verified session with scopes=${scopesKey}`);
+					scope?.trace(`verified session with scopes=${scopesKey}`);
 				} catch (ex) {
 					// Remove sessions that return unauthorized response
 					if (ex.message === 'Unauthorized') return undefined;
@@ -316,7 +318,7 @@ export class AccountAuthenticationProvider implements AuthenticationProvider, Di
 			.map(p => (p as PromiseFulfilledResult<AuthenticationSession | undefined>).value)
 			.filter(<T>(p?: T): p is T => Boolean(p));
 
-		Logger.debug(scope, `found ${verifiedSessions.length} verified sessions`);
+		scope?.trace(`found ${verifiedSessions.length} verified sessions`);
 		if (verifiedSessions.length !== storedSessions.length) {
 			await this.storeSessions(verifiedSessions);
 		}

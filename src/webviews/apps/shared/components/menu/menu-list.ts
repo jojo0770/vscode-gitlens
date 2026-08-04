@@ -1,7 +1,7 @@
 import type { PropertyValueMap } from 'lit';
 import { css, html, LitElement } from 'lit';
 import { customElement } from 'lit/decorators.js';
-import { elementBase } from '../styles/lit/base.css';
+import { elementBase } from '../styles/lit/base.css.js';
 
 @customElement('menu-list')
 export class MenuList extends LitElement {
@@ -10,9 +10,9 @@ export class MenuList extends LitElement {
 		css`
 			:host {
 				width: max-content;
+				padding-bottom: var(--gl-space-6);
 				background-color: var(--vscode-menu-background);
-				border: 1px solid var(--vscode-menu-border);
-				padding-bottom: 0.6rem;
+				border: var(--gl-border-width) solid var(--vscode-menu-border);
 			}
 		`,
 	];

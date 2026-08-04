@@ -1,79 +1,93 @@
 import type { ConfigurationChangeEvent, Disposable, Event, ExtensionContext } from 'vscode';
 import { EventEmitter, ExtensionMode } from 'vscode';
+import { IpcService } from '@env/ipc/ipcService.js';
+import type { GkCliService, GkMcpService } from '@env/providers.js';
 import {
-	getGkCliIntegrationProvider,
+	getAgentSessionProviders,
+	getGkCliService,
+	getGkMcpService,
 	getSharedGKStorageLocationProvider,
-	getSupportedGitProviders,
 	getSupportedRepositoryLocationProvider,
 	getSupportedWorkspacesStorageProvider,
-} from '@env/providers';
-import { FileAnnotationController } from './annotations/fileAnnotationController';
-import { LineAnnotationController } from './annotations/lineAnnotationController';
-import { ActionRunners } from './api/actionRunners';
-import { AutolinksProvider } from './autolinks/autolinksProvider';
-import { setDefaultGravatarsStyle } from './avatars';
-import { CacheProvider } from './cache';
-import { GitCodeLensController } from './codelens/codeLensController';
-import type { ToggleFileAnnotationCommandArgs } from './commands/toggleFileAnnotations';
-import type { DateStyle, FileAnnotationType, Mode } from './config';
-import { fromOutputLevel } from './config';
-import { extensionPrefix } from './constants';
-import type { GlCommands } from './constants.commands';
-import { MarkdownContentProvider } from './documents/markdown';
-import { EventBus } from './eventBus';
-import { GitFileSystemProvider } from './git/fsProvider';
-import { GitProviderService } from './git/gitProviderService';
-import type { RepositoryLocationProvider } from './git/location/repositorylocationProvider';
-import { LineHoverController } from './hovers/lineHoverController';
-import { AIProviderService } from './plus/ai/aiProviderService';
-import { DraftService } from './plus/drafts/draftsService';
-import { AccountAuthenticationProvider } from './plus/gk/authenticationProvider';
-import { OrganizationService } from './plus/gk/organizationService';
-import { ProductConfigProvider } from './plus/gk/productConfigProvider';
-import { ServerConnection } from './plus/gk/serverConnection';
-import { SubscriptionService } from './plus/gk/subscriptionService';
-import { UrlsProvider } from './plus/gk/urlsProvider';
-import { GraphStatusBarController } from './plus/graph/statusbar';
-import type { CloudIntegrationService } from './plus/integrations/authentication/cloudIntegrationService';
-import { ConfiguredIntegrationService } from './plus/integrations/authentication/configuredIntegrationService';
-import { IntegrationAuthenticationService } from './plus/integrations/authentication/integrationAuthenticationService';
-import { IntegrationService } from './plus/integrations/integrationService';
-import type { AzureDevOpsApi } from './plus/integrations/providers/azure/azure';
-import type { BitbucketApi } from './plus/integrations/providers/bitbucket/bitbucket';
-import type { GitHubApi } from './plus/integrations/providers/github/github';
-import type { GitLabApi } from './plus/integrations/providers/gitlab/gitlab';
-import { EnrichmentService } from './plus/launchpad/enrichmentService';
-import { LaunchpadIndicator } from './plus/launchpad/launchpadIndicator';
-import { LaunchpadProvider } from './plus/launchpad/launchpadProvider';
-import { RepositoryIdentityService } from './plus/repos/repositoryIdentityService';
-import type { SharedGkStorageLocationProvider } from './plus/repos/sharedGkStorageLocationProvider';
-import { WorkspacesApi } from './plus/workspaces/workspacesApi';
-import { scheduleAddMissingCurrentWorkspaceRepos, WorkspacesService } from './plus/workspaces/workspacesService';
-import { StatusBarController } from './statusbar/statusBarController';
-import { executeCommand } from './system/-webview/command';
-import { configuration } from './system/-webview/configuration';
-import { Keyboard } from './system/-webview/keyboard';
-import type { Storage } from './system/-webview/storage';
-import { memoize } from './system/decorators/-webview/memoize';
-import { log } from './system/decorators/log';
-import { Logger } from './system/logger';
-import { TelemetryService } from './telemetry/telemetry';
-import { UsageTracker } from './telemetry/usageTracker';
-import { isWalkthroughSupported, WalkthroughStateProvider } from './telemetry/walkthroughStateProvider';
-import { GitTerminalLinkProvider } from './terminal/linkProvider';
-import { GitDocumentTracker } from './trackers/documentTracker';
-import { LineTracker } from './trackers/lineTracker';
-import { DeepLinkService } from './uris/deepLinks/deepLinkService';
-import { UriService } from './uris/uriService';
-import { ViewFileDecorationProvider } from './views/viewDecorationProvider';
-import { Views } from './views/views';
-import { VslsController } from './vsls/vsls';
-import { registerGraphWebviewCommands, registerGraphWebviewPanel } from './webviews/plus/graph/registration';
-import { registerPatchDetailsWebviewPanel } from './webviews/plus/patchDetails/registration';
-import { registerTimelineWebviewCommands, registerTimelineWebviewPanel } from './webviews/plus/timeline/registration';
-import { RebaseEditorProvider } from './webviews/rebase/rebaseEditor';
-import { registerSettingsWebviewCommands, registerSettingsWebviewPanel } from './webviews/settings/registration';
-import { WebviewsController } from './webviews/webviewsController';
+	setTelemetryService,
+} from '@env/providers.js';
+import type { IntegrationManager } from '@gitlens/integrations/index.js';
+import { createIntegrationManager } from '@gitlens/integrations/index.js';
+import { debug } from '@gitlens/utils/decorators/log.js';
+import { memoize } from '@gitlens/utils/decorators/memoize.js';
+import { Logger } from '@gitlens/utils/logger.js';
+import { AgentService } from './agents/agentService.js';
+import { AgentStatusService } from './agents/agentStatusService.js';
+import { FileAnnotationController } from './annotations/fileAnnotationController.js';
+import { LineAnnotationController } from './annotations/lineAnnotationController.js';
+import { ActionRunners } from './api/actionRunners.js';
+import { AutolinksProvider } from './autolinks/autolinksProvider.js';
+import { setDefaultGravatarsStyle } from './avatars.js';
+import { CacheProvider } from './cache.js';
+import { GitCodeLensController } from './codelens/codeLensController.js';
+import type { ToggleFileAnnotationCommandArgs } from './commands/toggleFileAnnotations.js';
+import type { DateSource, DateStyle, Mode } from './config.js';
+import type { GlCommands } from './constants.commands.js';
+import { extensionPrefix } from './constants.js';
+import { MarkdownContentProvider } from './documents/markdown.js';
+import { EventBus } from './eventBus.js';
+import type { FeatureFlagService } from './featureFlags/featureFlagService.js';
+import { ConfigCatFeatureFlagService } from './featureFlags/featureFlagService.js';
+import { GitFileSystemProvider } from './git/fsProvider.js';
+import { GitProviderService } from './git/gitProviderService.js';
+import type { RepositoryLocationProvider } from './git/location/repositorylocationProvider.js';
+import { registerPublishListener } from './git/publishListener.js';
+import { LineHoverController } from './hovers/lineHoverController.js';
+import { OnboardingService } from './onboarding/onboardingService.js';
+import { UsageTracker } from './onboarding/usageTracker.js';
+import { WalkthroughStateProvider } from './onboarding/walkthroughStateProvider.js';
+import { AIProviderService } from './plus/ai/aiProviderService.js';
+import { AutoRebaseService } from './plus/coretools/conflict/autoRebaseService.js';
+import { DraftService } from './plus/drafts/draftsService.js';
+import { AccountAuthenticationProvider } from './plus/gk/authenticationProvider.js';
+import { OrganizationService } from './plus/gk/organizationService.js';
+import { ProductConfigProvider } from './plus/gk/productConfigProvider.js';
+import { ServerConnection } from './plus/gk/serverConnection.js';
+import { SubscriptionService } from './plus/gk/subscriptionService.js';
+import { UrlsProvider } from './plus/gk/urlsProvider.js';
+import { GraphStatusBarController } from './plus/graph/statusbar.js';
+import { createIntegrationServiceContext } from './plus/integrations/host/context.js';
+import { EnrichmentService } from './plus/launchpad/enrichmentService.js';
+import { LaunchpadIndicator } from './plus/launchpad/launchpadIndicator.js';
+import { LaunchpadProvider } from './plus/launchpad/launchpadProvider.js';
+import { RepositoryIdentityService } from './plus/repos/repositoryIdentityService.js';
+import type { SharedGkStorageLocationProvider } from './plus/repos/sharedGkStorageLocationProvider.js';
+import { WorkspacesApi } from './plus/workspaces/workspacesApi.js';
+import { scheduleAddMissingCurrentWorkspaceRepos, WorkspacesService } from './plus/workspaces/workspacesService.js';
+import { StatusBarController } from './statusbar/statusBarController.js';
+import { executeCommand } from './system/-webview/command.js';
+import { configuration } from './system/-webview/configuration.js';
+import { getContext, onDidChangeContext, setContext } from './system/-webview/context.js';
+import { Keyboard } from './system/-webview/keyboard.js';
+import type { Storage } from './system/-webview/storage.js';
+import { AIFeedbackProvider } from './telemetry/aiFeedbackProvider.js';
+import { TelemetryService } from './telemetry/telemetry.js';
+import { GitTerminalLinkProvider } from './terminal/linkProvider.js';
+import { GitDocumentTracker } from './trackers/documentTracker.js';
+import { LineTracker } from './trackers/lineTracker.js';
+import { TreemapAggregatorService } from './treemap/treemapAggregatorService.js';
+import { DeepLinkService } from './uris/deepLinks/deepLinkService.js';
+import { UriService } from './uris/uriService.js';
+import { ViewFileDecorationProvider } from './views/viewDecorationProvider.js';
+import { Views } from './views/views.js';
+import { VirtualFileSystemService } from './virtual/virtualFileSystemService.js';
+import { VslsController } from './vsls/vsls.js';
+import { registerAllowedSignersWebviewPanel } from './webviews/allowedSigners/registration.js';
+import { registerGraphWebviewCommands, registerGraphWebviewPanel } from './webviews/plus/graph/registration.js';
+import { registerPatchDetailsWebviewPanel } from './webviews/plus/patchDetails/registration.js';
+import {
+	registerTimelineWebviewCommands,
+	registerTimelineWebviewPanel,
+} from './webviews/plus/timeline/registration.js';
+import { RebaseEditorProvider } from './webviews/rebase/rebaseEditor.js';
+import { registerSettingsWebviewCommands, registerSettingsWebviewPanel } from './webviews/settings/registration.js';
+import { WebviewCommandRegistrar } from './webviews/webviewCommandRegistrar.js';
+import { WebviewsController } from './webviews/webviewsController.js';
 
 export type Environment = 'dev' | 'staging' | 'production';
 
@@ -82,7 +96,7 @@ export class Container {
 	static #proxy = new Proxy<Container>({} as Container, {
 		get: function (_target, prop) {
 			// In case anyone has cached this instance
-			// eslint-disable-next-line @typescript-eslint/no-unsafe-return
+			// oxlint-disable-next-line typescript/no-unsafe-return
 			if (Container.#instance != null) return (Container.#instance as any)[prop];
 
 			// Allow access to config before we are initialized
@@ -121,6 +135,10 @@ export class Container {
 		return this._onReady.event;
 	}
 
+	toLoggable(): string {
+		return '<container>';
+	}
+
 	readonly BranchDateFormatting = {
 		dateFormat: undefined! as string | null,
 		dateStyle: undefined! as DateStyle,
@@ -133,8 +151,8 @@ export class Container {
 
 	readonly CommitDateFormatting = {
 		dateFormat: null as string | null,
-		dateSource: 'authored',
-		dateStyle: 'relative',
+		dateSource: 'authored' as DateSource,
+		dateStyle: 'relative' as DateStyle,
 
 		reset: (): void => {
 			this.CommitDateFormatting.dateFormat = configuration.get('defaultDateFormat');
@@ -172,6 +190,38 @@ export class Container {
 		},
 	};
 
+	private _agentService: AgentService | undefined;
+
+	get agents(): AgentService {
+		return (this._agentService ??= new AgentService());
+	}
+
+	private readonly _gkCliService: GkCliService | undefined;
+
+	/** The GitKraken CLI service — owns binary install/update/version, IPC publish, authentication.
+	 *  Returns `undefined` on browser builds (CLI is Node-only). */
+	get gkCli(): GkCliService | undefined {
+		return this._gkCliService;
+	}
+
+	private readonly _gkMcpService: GkMcpService | undefined;
+
+	/** The GitKraken MCP service — owns MCP host registration + user-facing setup flows.
+	 *  Returns `undefined` on browser builds (MCP is Node-only). */
+	get gkMcp(): GkMcpService | undefined {
+		return this._gkMcpService;
+	}
+
+	private _agentStatusService: AgentStatusService | undefined;
+
+	get agentStatus(): AgentStatusService | undefined {
+		return this._agentStatusService;
+	}
+
+	private readonly _onDidChangeAgentStatus = new EventEmitter<void>();
+	get onDidChangeAgentStatus(): Event<void> {
+		return this._onDidChangeAgentStatus.event;
+	}
 	private readonly _connection: ServerConnection;
 	private _disposables: Disposable[];
 	private _terminalLinks: GitTerminalLinkProvider | undefined;
@@ -187,15 +237,18 @@ export class Container {
 		this._context = context;
 		this._prerelease = prerelease;
 		this._version = version;
+		this._previousVersion = previousVersion;
 		this.ensureModeApplied();
 
 		this._disposables = [
 			configuration,
 			(this._storage = storage),
+			(this._onboarding = new OnboardingService(storage, version)),
 			(this._telemetry = new TelemetryService(this)),
 			(this._usage = new UsageTracker(this, storage)),
 			configuration.onDidChangeAny(this.onAnyConfigurationChanged, this),
 		];
+		setTelemetryService(this._telemetry);
 
 		this._urls = new UrlsProvider(this.env);
 		this._disposables.push((this._connection = new ServerConnection(this, this._urls)));
@@ -205,22 +258,23 @@ export class Container {
 		);
 		this._disposables.push((this._uri = new UriService(this)));
 		this._disposables.push((this._subscription = new SubscriptionService(this, this._connection, previousVersion)));
-		if (isWalkthroughSupported()) {
-			this._disposables.push((this._walkthrough = new WalkthroughStateProvider(this)));
-		}
+		this._disposables.push((this._walkthrough = new WalkthroughStateProvider(this)));
 		this._disposables.push((this._organizations = new OrganizationService(this, this._connection)));
 
+		this._disposables.push((this._eventBus = new EventBus()));
+		this._disposables.push((this._ipc = new IpcService(this)));
 		this._disposables.push((this._git = new GitProviderService(this)));
 		this._disposables.push(new GitFileSystemProvider(this));
+		this._disposables.push((this._virtualFs = new VirtualFileSystemService(this)));
 
 		this._disposables.push((this._deepLinks = new DeepLinkService(this)));
 
 		this._disposables.push((this._actionRunners = new ActionRunners(this)));
+		this._disposables.push(registerPublishListener(this));
 		this._disposables.push((this._documentTracker = new GitDocumentTracker(this)));
 		this._disposables.push((this._lineTracker = new LineTracker(this, this._documentTracker)));
 		this._disposables.push((this._keyboard = new Keyboard()));
 		this._disposables.push((this._vsls = new VslsController(this)));
-		this._disposables.push((this._eventBus = new EventBus()));
 		this._disposables.push((this._launchpadProvider = new LaunchpadProvider(this)));
 		this._disposables.push((this._markdownProvider = new MarkdownContentProvider(this)));
 
@@ -230,7 +284,10 @@ export class Container {
 		this._disposables.push((this._statusBarController = new StatusBarController(this)));
 		this._disposables.push((this._codeLensController = new GitCodeLensController(this)));
 
-		const webviews = new WebviewsController(this);
+		const webviewCommandRegistrar = new WebviewCommandRegistrar();
+		this._disposables.push(webviewCommandRegistrar);
+
+		const webviews = new WebviewsController(this, webviewCommandRegistrar);
 		this._disposables.push(webviews);
 		this._disposables.push((this._views = new Views(this, webviews)));
 
@@ -241,13 +298,15 @@ export class Container {
 
 		const timelinePanels = registerTimelineWebviewPanel(webviews);
 		this._disposables.push(timelinePanels);
-		this._disposables.push(registerTimelineWebviewCommands(timelinePanels));
+		this._disposables.push(registerTimelineWebviewCommands(this, timelinePanels));
 
-		this._disposables.push((this._rebaseEditor = new RebaseEditorProvider(this)));
+		this._disposables.push((this._rebaseEditor = new RebaseEditorProvider(this, webviewCommandRegistrar)));
 
 		const settingsPanels = registerSettingsWebviewPanel(webviews);
 		this._disposables.push(settingsPanels);
 		this._disposables.push(registerSettingsWebviewCommands(settingsPanels));
+
+		this._disposables.push(registerAllowedSignersWebviewPanel(webviews));
 
 		this._disposables.push(new ViewFileDecorationProvider());
 
@@ -258,13 +317,24 @@ export class Container {
 			this._disposables.push((this._launchpadIndicator = new LaunchpadIndicator(this, this._launchpadProvider)));
 		}
 
+		this._disposables.push(this._onDidChangeAgentStatus, {
+			dispose: () => this._agentStatusService?.dispose(),
+		});
+		this.updateAiStatus();
+
 		if (configuration.get('terminalLinks.enabled')) {
 			this._disposables.push((this._terminalLinks = new GitTerminalLinkProvider(this)));
 		}
 
-		const cliIntegration = getGkCliIntegrationProvider(this);
-		if (cliIntegration != null) {
-			this._disposables.push(cliIntegration);
+		// Both are Node-only (undefined on browser builds); the MCP service takes the CLI service as a
+		// dependency so it can wire its install/IPC listeners at construction.
+		this._gkCliService = getGkCliService(this);
+		if (this._gkCliService != null) {
+			this._disposables.push(this._gkCliService);
+			this._gkMcpService = getGkMcpService(this, this._gkCliService);
+			if (this._gkMcpService != null) {
+				this._disposables.push(this._gkMcpService);
+			}
 		}
 
 		this._disposables.push(
@@ -289,11 +359,20 @@ export class Container {
 						);
 					}
 				}
+
+				if (configuration.changed(e, 'ai.enabled')) {
+					this.updateAiStatus();
+				}
+			}),
+			onDidChangeContext(key => {
+				if (key === 'gitlens:gk:organization:ai:enabled') {
+					this.updateAiStatus();
+				}
 			}),
 		);
 
 		context.subscriptions.push({
-			dispose: () => this._disposables.reverse().forEach(d => void d.dispose()),
+			dispose: () => this._disposables.reverse().forEach(d => void d?.dispose()),
 		});
 
 		scheduleAddMissingCurrentWorkspaceRepos(this);
@@ -309,34 +388,56 @@ export class Container {
 	}
 
 	private _ready: boolean = false;
+	private _readyAt: number | undefined;
+	/** Timestamp (ms since epoch) when the container transitioned to ready, or `undefined` if not yet ready. */
+	get readyAt(): number | undefined {
+		return this._readyAt;
+	}
 
 	async ready(): Promise<void> {
 		if (this._ready) throw new Error('Container is already ready');
 
 		this._ready = true;
-		await this.registerGitProviders();
+		this._readyAt = Date.now();
+		try {
+			await this.registerGitProviders();
+		} catch (ex) {
+			// Don't let a provider registration failure abort activation — better degraded than dead
+			Logger.error(ex, 'Failed to register Git providers');
+		}
 		queueMicrotask(() => this._onReady.fire());
 	}
 
-	@log()
+	@debug()
 	private async registerGitProviders(): Promise<void> {
-		const providers = await getSupportedGitProviders(this);
-		for (const provider of providers) {
-			this._disposables.push(this._git.register(provider.descriptor.id, provider));
-		}
+		await this._git.registerProviders();
+	}
 
-		// Don't wait here otherwise will we deadlock in certain places
-		void this._git.registrationComplete();
+	private updateAiStatus(): void {
+		// Visibility gate: require a CONFIRMED org state so AI/agent commands don't flash on before org
+		// settings load. `ai.orgEnabled` stays fail-open (defaults true) for runtime feature-access checks.
+		const allowed = this.ai.enabled && getContext('gitlens:gk:organization:ai:enabled') === true;
+		void setContext('gitlens:ai:allowed', allowed);
+
+		const providers = allowed ? getAgentSessionProviders(this) : [];
+		const canEnable = allowed && providers.length > 0;
+
+		void setContext('gitlens:agents:enabled', canEnable);
+
+		if (canEnable && this._agentStatusService == null) {
+			this._agentStatusService = new AgentStatusService(this, providers);
+			this._onDidChangeAgentStatus.fire();
+		} else if (!canEnable && this._agentStatusService != null) {
+			this._agentStatusService.dispose();
+			this._agentStatusService = undefined;
+			this._onDidChangeAgentStatus.fire();
+		}
 	}
 
 	private onAnyConfigurationChanged(e: ConfigurationChangeEvent) {
 		if (!configuration.changedAny(e, extensionPrefix)) return;
 
 		this._mode = undefined;
-
-		if (configuration.changed(e, 'outputLevel')) {
-			Logger.logLevel = fromOutputLevel(configuration.get('outputLevel'));
-		}
 
 		if (configuration.changed(e, 'defaultGravatarsStyle')) {
 			setDefaultGravatarsStyle(configuration.get('defaultGravatarsStyle'));
@@ -365,6 +466,14 @@ export class Container {
 		return this._ai;
 	}
 
+	private _aiFeedback: AIFeedbackProvider | undefined;
+	get aiFeedback(): AIFeedbackProvider {
+		if (this._aiFeedback == null) {
+			this._disposables.push((this._aiFeedback = new AIFeedbackProvider()));
+		}
+		return this._aiFeedback;
+	}
+
 	private _autolinks: AutolinksProvider | undefined;
 	get autolinks(): AutolinksProvider {
 		if (this._autolinks == null) {
@@ -383,35 +492,27 @@ export class Container {
 		return this._cache;
 	}
 
-	private _cloudIntegrations: Promise<CloudIntegrationService | undefined> | undefined;
-	get cloudIntegrations(): Promise<CloudIntegrationService | undefined> {
-		if (this._cloudIntegrations == null) {
-			async function load(this: Container) {
-				try {
-					const cloudIntegrations = new (
-						await import(
-							/* webpackChunkName: "integrations" */ './plus/integrations/authentication/cloudIntegrationService'
-						)
-					).CloudIntegrationService(this, this._connection);
-					return cloudIntegrations;
-				} catch (ex) {
-					Logger.error(ex);
-					return undefined;
-				}
-			}
-
-			this._cloudIntegrations = load.call(this);
+	private _featureFlags: FeatureFlagService | undefined;
+	get featureFlags(): FeatureFlagService {
+		if (this._featureFlags == null) {
+			this._disposables.push((this._featureFlags = new ConfigCatFeatureFlagService(this)));
 		}
-
-		return this._cloudIntegrations;
+		return this._featureFlags;
 	}
-
 	private _drafts: DraftService | undefined;
 	get drafts(): DraftService {
 		if (this._drafts == null) {
 			this._disposables.push((this._drafts = new DraftService(this, this._connection)));
 		}
 		return this._drafts;
+	}
+
+	private _autoRebase: AutoRebaseService | undefined;
+	get autoRebase(): AutoRebaseService {
+		if (this._autoRebase == null) {
+			this._disposables.push((this._autoRebase = new AutoRebaseService(this)));
+		}
+		return this._autoRebase;
 	}
 
 	private readonly _codeLensController: GitCodeLensController;
@@ -464,6 +565,15 @@ export class Container {
 		return this._eventBus;
 	}
 
+	private readonly _ipc: IpcService;
+	get ipc(): IpcService {
+		return this._ipc;
+	}
+
+	get extensionMode(): ExtensionMode {
+		return this._context.extensionMode;
+	}
+
 	private readonly _fileAnnotationController: FileAnnotationController;
 	get fileAnnotations(): FileAnnotationController {
 		return this._fileAnnotationController;
@@ -479,103 +589,14 @@ export class Container {
 		return this._markdownProvider;
 	}
 
+	private readonly _virtualFs: VirtualFileSystemService;
+	get virtualFs(): VirtualFileSystemService {
+		return this._virtualFs;
+	}
+
 	private readonly _git: GitProviderService;
 	get git(): GitProviderService {
 		return this._git;
-	}
-
-	private _azure: Promise<AzureDevOpsApi | undefined> | undefined;
-	get azure(): Promise<AzureDevOpsApi | undefined> {
-		if (this._azure == null) {
-			async function load(this: Container) {
-				try {
-					const azure = new (
-						await import(/* webpackChunkName: "integrations" */ './plus/integrations/providers/azure/azure')
-					).AzureDevOpsApi(this);
-					this._disposables.push(azure);
-					return azure;
-				} catch (ex) {
-					Logger.error(ex);
-					return undefined;
-				}
-			}
-
-			this._azure = load.call(this);
-		}
-
-		return this._azure;
-	}
-
-	private _bitbucket: Promise<BitbucketApi | undefined> | undefined;
-	get bitbucket(): Promise<BitbucketApi | undefined> {
-		if (this._bitbucket == null) {
-			async function load(this: Container) {
-				try {
-					const bitbucket = new (
-						await import(
-							/* webpackChunkName: "integrations" */ './plus/integrations/providers/bitbucket/bitbucket'
-						)
-					).BitbucketApi(this);
-					this._disposables.push(bitbucket);
-					return bitbucket;
-				} catch (ex) {
-					Logger.error(ex);
-					return undefined;
-				}
-			}
-
-			this._bitbucket = load.call(this);
-		}
-
-		return this._bitbucket;
-	}
-
-	private _github: Promise<GitHubApi | undefined> | undefined;
-	get github(): Promise<GitHubApi | undefined> {
-		if (this._github == null) {
-			async function load(this: Container) {
-				try {
-					const github = new (
-						await import(
-							/* webpackChunkName: "integrations" */ './plus/integrations/providers/github/github'
-						)
-					).GitHubApi(this);
-					this._disposables.push(github);
-					return github;
-				} catch (ex) {
-					Logger.error(ex);
-					return undefined;
-				}
-			}
-
-			this._github = load.call(this);
-		}
-
-		return this._github;
-	}
-
-	private _gitlab: Promise<GitLabApi | undefined> | undefined;
-	get gitlab(): Promise<GitLabApi | undefined> {
-		if (this._gitlab == null) {
-			async function load(this: Container) {
-				try {
-					const gitlab = new (
-						await import(
-							/* webpackChunkName: "integrations" */ './plus/integrations/providers/gitlab/gitlab'
-						)
-					).GitLabApi(this);
-					this._disposables.push(gitlab);
-					return gitlab;
-				} catch (ex) {
-					Logger.error(ex);
-					return undefined;
-				}
-			}
-
-			this._gitlab = load.call(this);
-		}
-
-		return this._gitlab;
 	}
 
 	@memoize()
@@ -583,16 +604,23 @@ export class Container {
 		return this._context.extension.id;
 	}
 
-	private _integrations: IntegrationService | undefined;
-	get integrations(): IntegrationService {
-		if (this._integrations == null) {
-			const configuredIntegrationService = new ConfiguredIntegrationService(this);
-			const authService = new IntegrationAuthenticationService(this, configuredIntegrationService);
+	// Single host context shared by every integrations consumer (the manager, the cloud service, and
+	// the provider-API getters). Unlike git's stateless context, this one eagerly registers VS Code
+	// listeners + emitters, so building one per getter (6×) leaked redundant subscriptions.
+	private _integrationContext: ReturnType<typeof createIntegrationServiceContext> | undefined;
+	private get integrationContext(): ReturnType<typeof createIntegrationServiceContext> {
+		if (this._integrationContext == null) {
 			this._disposables.push(
-				authService,
-				configuredIntegrationService,
-				(this._integrations = new IntegrationService(this, authService, configuredIntegrationService)),
+				(this._integrationContext = createIntegrationServiceContext(this, this._connection)),
 			);
+		}
+		return this._integrationContext;
+	}
+
+	private _integrations: IntegrationManager | undefined;
+	get integrations(): IntegrationManager {
+		if (this._integrations == null) {
+			this._disposables.push((this._integrations = createIntegrationManager(this.integrationContext)));
 		}
 		return this._integrations;
 	}
@@ -619,9 +647,7 @@ export class Container {
 
 	private _mode: Mode | undefined;
 	get mode(): Mode | undefined {
-		if (this._mode == null) {
-			this._mode = configuration.get('modes')?.[configuration.get('mode.active')];
-		}
+		this._mode ??= configuration.get('modes')?.[configuration.get('mode.active')];
 		return this._mode;
 	}
 
@@ -690,6 +716,11 @@ export class Container {
 		return this._storage;
 	}
 
+	private readonly _onboarding: OnboardingService;
+	get onboarding(): OnboardingService {
+		return this._onboarding;
+	}
+
 	private _subscription: SubscriptionService;
 	get subscription(): SubscriptionService {
 		return this._subscription;
@@ -698,6 +729,14 @@ export class Container {
 	private readonly _telemetry: TelemetryService;
 	get telemetry(): TelemetryService {
 		return this._telemetry;
+	}
+
+	private _treemapAggregator: TreemapAggregatorService | undefined;
+	get treemapAggregator(): TreemapAggregatorService {
+		if (this._treemapAggregator == null) {
+			this._disposables.push((this._treemapAggregator = new TreemapAggregatorService(this)));
+		}
+		return this._treemapAggregator;
 	}
 
 	private readonly _uri: UriService;
@@ -715,14 +754,24 @@ export class Container {
 		return this._usage;
 	}
 
-	private readonly _walkthrough: WalkthroughStateProvider | undefined;
-	get walkthrough(): WalkthroughStateProvider | undefined {
+	/** Shared `GitLens/<version> (...)` User-Agent for outbound HTTP, sourced from the GK server connection. */
+	get userAgent(): string {
+		return this._connection.userAgent;
+	}
+
+	private readonly _walkthrough: WalkthroughStateProvider;
+	get walkthrough(): WalkthroughStateProvider {
 		return this._walkthrough;
 	}
 
 	private readonly _version: string;
 	get version(): string {
 		return this._version;
+	}
+
+	private readonly _previousVersion: string | undefined;
+	get previousVersion(): string | undefined {
+		return this._previousVersion;
 	}
 
 	private readonly _views: Views;
@@ -762,21 +811,18 @@ export class Container {
 			let command: GlCommands | undefined;
 			switch (mode.annotations) {
 				case 'blame':
-					command = 'gitlens.toggleFileBlame';
+					command = 'gitlens.toggleFileBlame:mode';
 					break;
 				case 'changes':
-					command = 'gitlens.toggleFileChanges';
+					command = 'gitlens.toggleFileChanges:mode';
 					break;
 				case 'heatmap':
-					command = 'gitlens.toggleFileHeatmap';
+					command = 'gitlens.toggleFileHeatmap:mode';
 					break;
 			}
 
 			if (command != null) {
-				const commandArgs: ToggleFileAnnotationCommandArgs = {
-					type: mode.annotations as FileAnnotationType,
-					on: true,
-				};
+				const commandArgs: ToggleFileAnnotationCommandArgs = { type: mode.annotations, on: true };
 				// Make sure to delay the execution by a bit so that the configuration changes get propagated first
 				setTimeout(executeCommand, 50, command, commandArgs);
 			}

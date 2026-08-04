@@ -1,26 +1,28 @@
 import { MarkdownString, ThemeColor, ThemeIcon, TreeItem, TreeItemCollapsibleState, window } from 'vscode';
-import type { Colors } from '../../constants.colors';
-import type { FilesComparison } from '../../git/actions/commit';
-import { GitUri } from '../../git/gitUri';
-import type { GitBranch, GitTrackingUpstream } from '../../git/models/branch';
-import type { GitLog } from '../../git/models/log';
-import type { GitRemote } from '../../git/models/remote';
-import { getRemoteNameFromBranchName } from '../../git/utils/branch.utils';
-import { getHighlanderProviders } from '../../git/utils/remote.utils';
-import { createRevisionRange } from '../../git/utils/revision.utils';
-import { getUpstreamStatus } from '../../git/utils/status.utils';
-import { fromNow } from '../../system/date';
-import { gate } from '../../system/decorators/-webview/gate';
-import { debug } from '../../system/decorators/log';
-import { first, last, map } from '../../system/iterable';
-import { pluralize } from '../../system/string';
-import type { ViewsWithCommits } from '../viewBase';
-import type { PageableViewNode } from './abstract/viewNode';
-import { ContextValues, getViewNodeId, ViewNode } from './abstract/viewNode';
-import { BranchTrackingStatusFilesNode } from './branchTrackingStatusFilesNode';
-import { CommitNode } from './commitNode';
-import { LoadMoreNode } from './common';
-import { insertDateMarkers } from './utils/-webview/node.utils';
+import type { GitBranch, GitTrackingUpstream } from '@gitlens/git/models/branch.js';
+import { GitCommit } from '@gitlens/git/models/commit.js';
+import type { GitLog } from '@gitlens/git/models/log.js';
+import type { GitRemote } from '@gitlens/git/models/remote.js';
+import { getRemoteNameFromBranchName } from '@gitlens/git/utils/branch.utils.js';
+import { getHighlanderProviders } from '@gitlens/git/utils/remote.utils.js';
+import { createRevisionRange } from '@gitlens/git/utils/revision.utils.js';
+import { getUpstreamStatus } from '@gitlens/git/utils/status.utils.js';
+import { fromNow } from '@gitlens/utils/date.js';
+import { trace } from '@gitlens/utils/decorators/log.js';
+import { first, last, map } from '@gitlens/utils/iterable.js';
+import { pluralize } from '@gitlens/utils/string.js';
+import type { Colors } from '../../constants.colors.js';
+import type { FilesComparison } from '../../git/actions/commit.js';
+import { GitUri } from '../../git/gitUri.js';
+import { getBranchRemote } from '../../git/utils/-webview/branch.utils.js';
+import { gate } from '../../system/decorators/gate.js';
+import type { ViewsWithCommits } from '../viewBase.js';
+import type { PageableViewNode } from './abstract/viewNode.js';
+import { ContextValues, getViewNodeId, ViewNode } from './abstract/viewNode.js';
+import { BranchTrackingStatusFilesNode } from './branchTrackingStatusFilesNode.js';
+import { CommitNode } from './commitNode.js';
+import { LoadMoreNode } from './common.js';
+import { insertDateMarkers } from './utils/-webview/node.utils.js';
 
 export interface BranchTrackingStatus {
 	ref: string;
@@ -118,8 +120,8 @@ export class BranchTrackingStatusNode
 		if (this.upstreamType === 'ahead') {
 			// Since the last commit when we are looking 'ahead' can have no previous (because of the range given) -- look it up
 			commits = [...log.commits.values()];
-			const commit = commits[commits.length - 1];
-			const previousSha = await commit.getPreviousSha();
+			const commit = commits.at(-1)!;
+			const previousSha = await GitCommit.getPreviousSha(commit);
 			if (previousSha == null) {
 				const previousLog = await this.view.container.git
 					.getRepositoryService(this.uri.repoPath!)
@@ -157,7 +159,7 @@ export class BranchTrackingStatusNode
 			);
 
 			if (log.hasMore) {
-				children.push(new LoadMoreNode(this.view, this, children[children.length - 1]));
+				children.push(new LoadMoreNode(this.view, this, children.at(-1)!));
 			}
 		}
 
@@ -208,7 +210,7 @@ export class BranchTrackingStatusNode
 		let tooltip;
 		switch (this.upstreamType) {
 			case 'ahead': {
-				const remote = await this.branch.getRemote();
+				const remote = await getBranchRemote(this.view.container, this.branch);
 
 				label = 'Outgoing';
 				description = `${pluralize('commit', this.status.upstream!.state.ahead)} to push to ${
@@ -233,7 +235,7 @@ export class BranchTrackingStatusNode
 				break;
 			}
 			case 'behind': {
-				const remote = await this.branch.getRemote();
+				const remote = await getBranchRemote(this.view.container, this.branch);
 
 				label = 'Incoming';
 				description = `${pluralize('commit', this.status.upstream!.state.behind)} to pull from ${
@@ -258,7 +260,7 @@ export class BranchTrackingStatusNode
 				break;
 			}
 			case 'same': {
-				const remote = await this.branch.getRemote();
+				const remote = await getBranchRemote(this.view.container, this.branch);
 
 				label = `Up to date with ${remote?.name ?? getRemoteNameFromBranchName(this.status.upstream!.name)}${
 					remote?.provider?.name ? ` on ${remote.provider.name}` : ''
@@ -275,7 +277,7 @@ export class BranchTrackingStatusNode
 				break;
 			}
 			case 'missing': {
-				const remote = await this.branch.getRemote();
+				const remote = await getBranchRemote(this.view.container, this.branch);
 
 				label = `Missing upstream branch${remote?.provider?.name ? ` on ${remote.provider.name}` : ''}`;
 				description = this.status.upstream!.name;
@@ -331,7 +333,7 @@ export class BranchTrackingStatusNode
 		return item;
 	}
 
-	@debug()
+	@trace()
 	override refresh(reset?: boolean): void {
 		if (reset) {
 			this._log = undefined;

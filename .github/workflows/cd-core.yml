@@ -1,0 +1,89 @@
+name: Publish Core
+
+on:
+    push:
+        tags:
+            - 'releases/core/v*.*.*'
+    workflow_dispatch:
+        inputs:
+            dry_run:
+                description: 'Dry-run (runs pnpm publish --dry-run instead of actually publishing)'
+                type: boolean
+                default: true
+
+jobs:
+    publish:
+        name: Publish @gitkraken/core-gitlens
+        runs-on: ubuntu-latest
+        permissions:
+            contents: read
+        steps:
+            - name: Checkout code
+              uses: actions/checkout@v4
+
+            - name: Setup node
+              uses: actions/setup-node@v4
+              with:
+                  node-version: '22'
+                  registry-url: 'https://registry.npmjs.org'
+
+            # Publishing relies on pnpm resolving this package's `catalog:` dependencies when packing,
+            # so pin the major we verify against locally (`packageManager` in the root manifest).
+            - name: Setup pnpm
+              uses: pnpm/action-setup@v3
+              with:
+                  version: 11
+
+            - name: Verify tag matches package version
+              if: github.event_name == 'push'
+              env:
+                  GITHUB_REF: ${{ github.ref }}
+              run: |
+                  PKG_VERSION=$(node -p "require('./packages/core/package.json').version")
+                  EXPECTED_TAG="refs/tags/releases/core/v${PKG_VERSION}"
+                  if [ "$GITHUB_REF" != "$EXPECTED_TAG" ]; then
+                    echo "::error::Tag $GITHUB_REF does not match packages/core/package.json version ($PKG_VERSION). Expected $EXPECTED_TAG."
+                    exit 1
+                  fi
+
+            - name: Install
+              run: pnpm install --frozen-lockfile
+
+            # One version per dependency, and packages/core's generated manifest in step with the
+            # packages it bundles. A release is the last place to discover otherwise.
+            - name: Check dependency hygiene
+              run: pnpm run check:deps
+
+            - name: Build sub-packages
+              run: pnpm run build:packages
+
+            - name: Bundle core package
+              run: pnpm --filter @gitkraken/core-gitlens run bundle
+
+            - name: Pack tarball (artifact)
+              run: pnpm --filter @gitkraken/core-gitlens pack --pack-destination packages/core
+
+            - name: Upload tarball artifact
+              uses: actions/upload-artifact@v4
+              with:
+                  name: core-gitlens-tarball
+                  path: packages/core/*.tgz
+                  retention-days: 30
+
+            # pnpm, not npm: the manifest's `catalog:` specifiers are only rewritten to concrete
+            # versions by pnpm at pack time — `npm publish` would ship them verbatim and every
+            # consumer would fail with EUNSUPPORTEDPROTOCOL. `--no-git-checks` because releases
+            # publish from a tag (detached HEAD) and `prepack` regenerates the manifest.
+            - name: Publish (dry-run)
+              if: github.event_name == 'workflow_dispatch' && inputs.dry_run == true
+              working-directory: packages/core
+              run: pnpm publish --access public --no-git-checks --dry-run
+              env:
+                  NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN_GITKRAKEN }}
+
+            - name: Publish
+              if: github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.dry_run == false)
+              working-directory: packages/core
+              run: pnpm publish --access public --no-git-checks
+              env:
+                  NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN_GITKRAKEN }}

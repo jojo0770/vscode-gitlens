@@ -1,27 +1,26 @@
 import type { CancellationToken, ConfigurationChangeEvent, Disposable } from 'vscode';
 import { ProgressLocation, TreeItem, TreeItemCollapsibleState, window } from 'vscode';
-import type { ViewBranchesLayout, ViewFilesLayout, WorktreesViewConfig } from '../config';
-import { proBadge } from '../constants';
-import type { Container } from '../container';
-import { GitUri } from '../git/gitUri';
-import type { RepositoryChangeEvent } from '../git/models/repository';
-import { RepositoryChange, RepositoryChangeComparisonMode } from '../git/models/repository';
-import type { GitWorktree } from '../git/models/worktree';
-import { groupRepositories } from '../git/utils/-webview/repository.utils';
-import { ensurePlusFeaturesEnabled } from '../plus/gk/utils/-webview/plus.utils';
-import { executeCommand } from '../system/-webview/command';
-import { configuration } from '../system/-webview/configuration';
-import { gate } from '../system/decorators/-webview/gate';
-import { RepositoriesSubscribeableNode } from './nodes/abstract/repositoriesSubscribeableNode';
-import { RepositoryFolderNode } from './nodes/abstract/repositoryFolderNode';
-import type { ViewNode } from './nodes/abstract/viewNode';
-import { BranchOrTagFolderNode } from './nodes/branchOrTagFolderNode';
-import { WorktreeNode } from './nodes/worktreeNode';
-import { WorktreesNode } from './nodes/worktreesNode';
-import type { GroupedViewContext, RevealOptions } from './viewBase';
-import { ViewBase } from './viewBase';
-import type { CopyNodeCommandArgs } from './viewCommands';
-import { registerViewCommand } from './viewCommands';
+import type { GitWorktree } from '@gitlens/git/models/worktree.js';
+import type { ViewBranchesLayout, ViewFilesLayout, WorktreesViewConfig } from '../config.js';
+import { proBadge } from '../constants.js';
+import type { Container } from '../container.js';
+import { GitUri } from '../git/gitUri.js';
+import type { RepositoryChangeEvent } from '../git/models/repository.js';
+import { ensurePlusFeaturesEnabled } from '../plus/gk/utils/-webview/plus.utils.js';
+import { executeCommand } from '../system/-webview/command.js';
+import { configuration } from '../system/-webview/configuration.js';
+import { gate } from '../system/decorators/gate.js';
+import { RepositoriesSubscribeableNode } from './nodes/abstract/repositoriesSubscribeableNode.js';
+import { RepositoryFolderNode } from './nodes/abstract/repositoryFolderNode.js';
+import type { ViewNode } from './nodes/abstract/viewNode.js';
+import { BranchOrTagFolderNode } from './nodes/branchOrTagFolderNode.js';
+import { WorktreeNode } from './nodes/worktreeNode.js';
+import { WorktreesNode } from './nodes/worktreesNode.js';
+import { updateSorting, updateSortingDirection } from './utils/-webview/sorting.utils.js';
+import type { GroupedViewContext, RevealOptions } from './viewBase.js';
+import { ViewBase } from './viewBase.js';
+import type { CopyNodeCommandArgs } from './viewCommands.js';
+import { registerViewCommand } from './viewCommands.js';
 
 export class WorktreesRepositoryNode extends RepositoryFolderNode<WorktreesView, WorktreesNode> {
 	getChildren(): Promise<ViewNode[]> {
@@ -30,21 +29,11 @@ export class WorktreesRepositoryNode extends RepositoryFolderNode<WorktreesView,
 	}
 
 	protected changed(e: RepositoryChangeEvent): boolean {
-		if (this.view.config.showStashes && e.changed(RepositoryChange.Stash, RepositoryChangeComparisonMode.Any)) {
+		if (this.view.config.showStashes && e.changed('stash')) {
 			return true;
 		}
 
-		return e.changed(
-			RepositoryChange.Config,
-			RepositoryChange.Heads,
-			RepositoryChange.Index,
-			RepositoryChange.Remotes,
-			RepositoryChange.RemoteProviders,
-			RepositoryChange.PausedOperationStatus,
-			RepositoryChange.Worktrees,
-			RepositoryChange.Unknown,
-			RepositoryChangeComparisonMode.Any,
-		);
+		return e.changed('config', 'heads', 'index', 'remotes', 'remoteProviders', 'pausedOp', 'worktrees', 'unknown');
 	}
 }
 
@@ -61,7 +50,7 @@ export class WorktreesViewNode extends RepositoriesSubscribeableNode<WorktreesVi
 				await this.view.container.git.isDiscoveringRepositories;
 			}
 
-			let repositories = this.view.container.git.openRepositories;
+			const repositories = this.view.getFilteredRepositories();
 			if (!repositories.length) {
 				this.view.message = 'No worktrees could be found.';
 				return [];
@@ -70,13 +59,11 @@ export class WorktreesViewNode extends RepositoriesSubscribeableNode<WorktreesVi
 			const repo = this.view.container.git.getBestRepositoryOrFirst();
 			if (repo != null && !(await repo.git.supports('git:worktrees'))) return [];
 
-			if (configuration.get('views.collapseWorktreesWhenPossible')) {
-				const grouped = await groupRepositories(repositories);
-				repositories = [...grouped.keys()];
-			}
-
 			this.children = repositories.map(
-				r => new WorktreesRepositoryNode(GitUri.fromRepoPath(r.path), this.view, this, r),
+				r =>
+					new WorktreesRepositoryNode(GitUri.fromRepoPath(r.path), this.view, this, r, {
+						expand: r === repo,
+					}),
 			);
 		}
 
@@ -148,8 +135,13 @@ export class WorktreesView extends ViewBase<'worktrees', WorktreesViewNode, Work
 				},
 				this,
 			),
+			registerViewCommand(this.getQualifiedCommand('filterRepositories'), () => this.filterRepositories(), this),
 			registerViewCommand(this.getQualifiedCommand('setLayoutToList'), () => this.setLayout('list'), this),
 			registerViewCommand(this.getQualifiedCommand('setLayoutToTree'), () => this.setLayout('tree'), this),
+			registerViewCommand(this.getQualifiedCommand('setSortByDate'), () => this.setSortByDate(), this),
+			registerViewCommand(this.getQualifiedCommand('setSortByName'), () => this.setSortByName(), this),
+			registerViewCommand(this.getQualifiedCommand('setSortDescending'), () => this.setSortDescending(), this),
+			registerViewCommand(this.getQualifiedCommand('setSortAscending'), () => this.setSortAscending(), this),
 			registerViewCommand(
 				this.getQualifiedCommand('setFilesLayoutToAuto'),
 				() => this.setFilesLayout('auto'),
@@ -197,6 +189,7 @@ export class WorktreesView extends ViewBase<'worktrees', WorktreesViewNode, Work
 		const changed = super.filterConfigurationChanged(e);
 		if (
 			!changed &&
+			!configuration.changed(e, 'defaultCurrentUserNameStyle') &&
 			!configuration.changed(e, 'defaultDateFormat') &&
 			!configuration.changed(e, 'defaultDateLocale') &&
 			!configuration.changed(e, 'defaultDateShortFormat') &&
@@ -205,8 +198,7 @@ export class WorktreesView extends ViewBase<'worktrees', WorktreesViewNode, Work
 			!configuration.changed(e, 'defaultGravatarsStyle') &&
 			!configuration.changed(e, 'defaultTimeFormat') &&
 			!configuration.changed(e, 'sortRepositoriesBy') &&
-			!configuration.changed(e, 'views.collapseWorktreesWhenPossible')
-			// !configuration.changed(e, 'sortWorktreesBy')
+			!configuration.changed(e, 'sortWorktreesBy')
 		) {
 			return false;
 		}
@@ -272,6 +264,22 @@ export class WorktreesView extends ViewBase<'worktrees', WorktreesViewNode, Work
 
 	private setFilesLayout(layout: ViewFilesLayout) {
 		return configuration.updateEffective(`views.${this.configKey}.files.layout` as const, layout);
+	}
+
+	private setSortByDate() {
+		return updateSorting('sortWorktreesBy', 'date', 'desc');
+	}
+
+	private setSortByName() {
+		return updateSorting('sortWorktreesBy', 'name', 'asc');
+	}
+
+	private setSortDescending() {
+		return updateSortingDirection('sortWorktreesBy', 'desc');
+	}
+
+	private setSortAscending() {
+		return updateSortingDirection('sortWorktreesBy', 'asc');
 	}
 
 	private setShowAvatars(enabled: boolean) {

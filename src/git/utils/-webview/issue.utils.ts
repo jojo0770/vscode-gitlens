@@ -1,15 +1,15 @@
 import { Uri } from 'vscode';
-import { Schemes } from '../../../constants';
-import type { Container } from '../../../container';
-import type { Issue, IssueShape } from '../../models/issue';
-import type { Repository } from '../../models/repository';
-import { getRepositoryIdentityForIssue } from '../issue.utils';
+import type { Issue, IssueShape } from '@gitlens/git/models/issue.js';
+import { getRepositoryIdentityForIssue } from '@gitlens/git/utils/issue.utils.js';
+import { Schemes } from '../../../constants.js';
+import type { Container } from '../../../container.js';
+import type { GlRepository } from '../../models/repository.js';
 
 export async function getOrOpenIssueRepository(
 	container: Container,
 	issue: IssueShape | Issue,
 	options?: { promptIfNeeded?: boolean; skipVirtual?: boolean },
-): Promise<Repository | undefined> {
+): Promise<GlRepository | undefined> {
 	const identity = getRepositoryIdentityForIssue(issue);
 	let repo = await container.repositoryIdentity.getRepository(identity, {
 		openIfNeeded: true,
@@ -20,7 +20,7 @@ export async function getOrOpenIssueRepository(
 	if (repo == null && !options?.skipVirtual) {
 		const virtualUri = getVirtualUriForIssue(issue);
 		if (virtualUri != null) {
-			repo = await container.git.getOrOpenRepository(virtualUri, { closeOnOpen: true, detectNested: false });
+			repo = await container.git.getOrAddRepository(virtualUri, { opened: false, detectNested: false });
 		}
 	}
 

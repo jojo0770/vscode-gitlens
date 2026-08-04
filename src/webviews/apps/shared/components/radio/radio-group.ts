@@ -1,14 +1,17 @@
 import { html } from 'lit';
 import { customElement, property, queryAssignedElements } from 'lit/decorators.js';
-import { GlElement, observe } from '../element';
-import type { Radio } from './radio';
-import { radioStyles } from './radio.css';
+import { GlElement, observe } from '../element.js';
+import { radioStyles } from './radio.css.js';
+import type { Radio } from './radio.js';
+import '../code-icon.js';
 
-import '../code-icon';
+declare global {
+	interface HTMLElementTagNameMap {
+		['gl-radio-group']: RadioGroup;
+	}
+}
 
-export const tagName = 'gl-radio-group';
-
-@customElement(tagName)
+@customElement('gl-radio-group')
 export class RadioGroup extends GlElement {
 	static override readonly styles = [radioStyles];
 
@@ -48,11 +51,5 @@ export class RadioGroup extends GlElement {
 		this.value = value;
 		const event = new CustomEvent('gl-change-value');
 		this.dispatchEvent(event);
-	}
-}
-
-declare global {
-	interface HTMLElementTagNameMap {
-		[tagName]: RadioGroup;
 	}
 }

@@ -1,17 +1,25 @@
 {
 	"extends": "../../../tsconfig.base.json",
 	"compilerOptions": {
-		"jsx": "react",
+		"rootDir": "../../..",
 		"lib": ["dom", "dom.iterable", "es2023"],
-		"outDir": "../../",
+		"outDir": "../../../out/webviews",
 		"paths": {
-			"@env/*": ["src/env/browser/*"]
+			"@env/*": ["../../env/browser/*"],
+			"#env/*": ["../../../packages/utils/src/env/browser/*"],
+			"@gitlens/utils/*": ["../../../packages/utils/src/*"],
+			"@gitlens/ipc/*": ["../../../packages/ipc/src/*"],
+			"@gitlens/git/*": ["../../../packages/git/src/*"],
+			"@gitlens/git-github/*": ["../../../packages/plus/git-github/src/*"],
+			"@gitlens/integrations/*": ["../../../packages/plus/integrations/src/*"],
+			"@gitlens/ai/*": ["../../../packages/plus/ai/src/*"],
+			"@gitlens/agents/*": ["../../../packages/plus/agents/src/*"]
 		},
 		"useDefineForClassFields": false // Needed for lit decorators https://github.com/lit/lit/issues/3278 https://lit.dev/docs/tools/publishing/#publishing-modern-javascript
 	},
-	// Keep in sync with `src/eslint.config.mjs`
 	"include": [
 		"**/*",
+		"../ipc/models/ipc.ts",
 		"../**/protocol.ts",
 		"../../**/models/**/*.ts",
 		"../../**/utils/**/*.ts",
@@ -24,5 +32,5 @@
 		"../../system/**/*.ts",
 		"../../**/webview/**/*"
 	],
-	"exclude": ["src/**/__tests__/**/*", "src/**/-webview/**/*"]
+	"exclude": ["../../**/-webview/**/*"]
 }

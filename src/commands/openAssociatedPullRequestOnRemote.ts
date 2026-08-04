@@ -1,12 +1,14 @@
 import type { TextEditor, Uri } from 'vscode';
-import type { Container } from '../container';
-import { GitUri } from '../git/gitUri';
-import { getRepositoryOrShowPicker } from '../quickpicks/repositoryPicker';
-import { command, executeCommand } from '../system/-webview/command';
-import { Logger } from '../system/logger';
-import { ActiveEditorCommand } from './commandBase';
-import { getCommandUri } from './commandBase.utils';
-import type { OpenPullRequestOnRemoteCommandArgs } from './openPullRequestOnRemote';
+import { Logger } from '@gitlens/utils/logger.js';
+import type { Container } from '../container.js';
+import { GitUri } from '../git/gitUri.js';
+import { getBranchAssociatedPullRequest } from '../git/utils/-webview/branch.utils.js';
+import { getBestRemoteWithIntegration } from '../git/utils/-webview/remote.utils.js';
+import { getRepositoryOrShowPicker } from '../quickpicks/repositoryPicker.js';
+import { command, executeCommand } from '../system/-webview/command.js';
+import { ActiveEditorCommand } from './commandBase.js';
+import { getCommandUri } from './commandBase.utils.js';
+import type { OpenPullRequestOnRemoteCommandArgs } from './openPullRequestOnRemote.js';
 
 @command()
 export class OpenAssociatedPullRequestOnRemoteCommand extends ActiveEditorCommand {
@@ -35,13 +37,22 @@ export class OpenAssociatedPullRequestOnRemoteCommand extends ActiveEditorComman
 			}
 		} else {
 			try {
-				const repo = await getRepositoryOrShowPicker('Open Associated Pull Request', undefined, undefined, {
-					filter: async r => (await r.git.remotes.getBestRemoteWithIntegration()) != null,
-				});
+				const repo = await getRepositoryOrShowPicker(
+					this.container,
+					'Open Associated Pull Request',
+					undefined,
+					undefined,
+					{
+						filter: async r => (await getBestRemoteWithIntegration(r.path)) != null,
+					},
+				);
 				if (repo == null) return;
 
 				const branch = await repo?.git.branches.getBranch();
-				const pr = await branch?.getAssociatedPullRequest({ expiryOverride: true });
+				const pr =
+					branch != null
+						? await getBranchAssociatedPullRequest(this.container, branch, { expiryOverride: true })
+						: undefined;
 
 				args =
 					pr != null

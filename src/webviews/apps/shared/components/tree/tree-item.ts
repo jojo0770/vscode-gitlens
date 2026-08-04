@@ -1,11 +1,15 @@
 import { html, nothing } from 'lit';
 import { customElement, property, query, state } from 'lit/decorators.js';
 import { when } from 'lit/directives/when.js';
-import { GlElement } from '../element';
-import type { TreeItemCheckedDetail, TreeItemSelectionDetail } from './base';
-import { treeItemStyles } from './tree.css';
-import '../actions/action-nav';
-import '../code-icon';
+import { getAltKeySymbol } from '@env/platform.js';
+import { ModifierKeysController } from '../../controllers/modifier-keys.js';
+import { GlElement } from '../element.js';
+import type { TreeItemCheckedDetail, TreeItemSelectionDetail } from './base.js';
+import { treeItemFileDragDataType } from './base.js';
+import { treeItemStyles } from './tree.css.js';
+import '../actions/action-nav.js';
+import '../code-icon.js';
+import '../overlays/tooltip.js';
 
 @customElement('gl-tree-item')
 export class GlTreeItem extends GlElement {
@@ -42,24 +46,74 @@ export class GlTreeItem extends GlElement {
 	@property({ type: Boolean })
 	checkable = false;
 
-	@property({ type: Boolean })
-	checked = false;
+	@property()
+	checked: boolean | 'indeterminate' = false;
 
+	// When set, the checkbox is controlled by `checked` (model-driven): a user toggle doesn't
+	// optimistically flip it. See TreeItemBase.controlledCheck.
 	@property({ type: Boolean })
+	controlledCheck = false;
+
+	/**
+	 * When set, `selected` is fully controlled by the host (bound via `.selected`); `selectCore`
+	 * then skips the imperative self-select so it can't diverge from the host's controlled value.
+	 * The controlled `gl-tree-view` sets this and drives selection through a re-render; without it,
+	 * the imperative `this.selected = true` corrupts Lit's dirty-check and a later re-render/recycle
+	 * that binds the same committed value is skipped — leaving the selection highlight stuck. Left
+	 * off, the legacy `gl-tree` keeps managing selection imperatively via `select()`/`deselect()`.
+	 */
+	@property({ type: Boolean })
+	controlledSelection = false;
+
+	@property({ type: Boolean, reflect: true, attribute: 'disable-check' })
 	disableCheck = false;
+
+	@property({ attribute: 'checkable-tooltip' })
+	checkableTooltip?: string;
+
+	@property({ attribute: 'checkable-alt-tooltip' })
+	checkableAltTooltip?: string;
+
+	private readonly _modifiers = new ModifierKeysController(this);
 
 	@property({ type: Boolean })
 	showIcon = true;
+
+	/** Opt-in: makes the row a native drag source that carries its file `path` on the drag (typed
+	 *  {@link treeItemFileDragDataType}). Off by default; set only by consumers that want file rows
+	 *  draggable (e.g. compose mode's file→commit move). Branch (folder) rows are never draggable. */
+	@property({ type: Boolean, attribute: 'draggable-item' })
+	draggableItem = false;
+
+	// Opts the host out of the single-line tree-row layout (fixed height, inline text, nowrap).
+	// Use when the default slot hosts a multi-line / card component; consumer drives row height
+	// via --gl-tree-item-min-height / --gl-tree-item-padding-y.
+	@property({ type: Boolean, reflect: true })
+	rich = false;
+
+	@property({ type: Boolean, reflect: true })
+	matched = false;
+
+	@property({ type: Number })
+	override tabIndex = -1;
+
+	// Reflected as `data-vscode-context` so the shared ContextMenuProxyController on an ancestor can
+	// find it via `composedPath()` and bridge it to light DOM — no bespoke per-tree handler needed.
+	@property({ type: String, attribute: 'data-vscode-context', reflect: true })
+	vscodeContext?: string;
 
 	// state
 	@state()
 	selected = false;
 
-	@state()
+	@property({ type: Boolean, reflect: true })
 	focused = false;
 
 	@query('#button')
 	buttonEl!: HTMLButtonElement;
+
+	@query('#checkbox')
+	private checkboxEl?: HTMLInputElement;
 
 	get isHidden(): boolean {
 		return this.parentExpanded === false || (!this.branch && !this.expanded);
@@ -68,11 +122,13 @@ export class GlTreeItem extends GlElement {
 	override connectedCallback(): void {
 		super.connectedCallback?.();
 		this.addEventListener('click', this.onComponentClick);
+		this.addEventListener('dragstart', this.onDragStart);
 	}
 
 	override disconnectedCallback(): void {
 		super.disconnectedCallback?.();
 		this.removeEventListener('click', this.onComponentClick);
+		this.removeEventListener('dragstart', this.onDragStart);
 	}
 
 	private readonly onComponentClick = (e: MouseEvent) => {
@@ -80,12 +136,32 @@ export class GlTreeItem extends GlElement {
 			dblClick: false,
 			altKey: e.altKey,
 		});
-		this.buttonEl.focus();
 	};
 
+	private readonly onDragStart = (e: DragEvent) => {
+		// Only file rows opt in; folders are never dragged. Payload is the file path.
+		if (!this.draggableItem || this.branch || e.dataTransfer == null) return;
+
+		e.dataTransfer.setData(treeItemFileDragDataType, this.path);
+		e.dataTransfer.effectAllowed = 'move';
+	};
+
+	private onChevronClick(e: MouseEvent) {
+		// The chevron is a dedicated expand/collapse affordance — stop the click from bubbling to the
+		// host's onComponentClick, which would fire the row's open/select action (e.g. focusing the
+		// graph to a worktree in the agents panel). Emit a toggle-only event instead.
+		e.stopPropagation();
+		this.emit('gl-tree-item-toggle');
+	}
+
 	private updateAttrs(changedProperties: Map<string, any>, force = false) {
-		if (changedProperties.has('expanded') || force) {
-			this.setAttribute('aria-expanded', this.expanded.toString());
+		// Only set aria-expanded on branch (parent) nodes, not end nodes
+		if (changedProperties.has('expanded') || changedProperties.has('branch') || force) {
+			if (this.branch) {
+				this.setAttribute('aria-expanded', this.expanded.toString());
+			} else {
+				this.removeAttribute('aria-expanded');
+			}
 		}
 
 		if (changedProperties.has('parentExpanded') || force) {
@@ -106,6 +182,11 @@ export class GlTreeItem extends GlElement {
 
 		if (changedProperties.has('level') || force) {
 			this.setAttribute('aria-level', this.level.toString());
+		}
+
+		if (changedProperties.has('draggableItem') || changedProperties.has('branch') || force) {
+			// Setting the native DOM property reflects the enumerated `draggable` attribute correctly.
+			this.draggable = this.draggableItem && !this.branch;
 		}
 	}
 
@@ -132,7 +213,11 @@ export class GlTreeItem extends GlElement {
 
 		if (this.branch) {
 			branching.push(
-				html`<code-icon class="branch" icon="${this.expanded ? 'chevron-down' : 'chevron-right'}"></code-icon>`,
+				html`<code-icon
+					class="branch"
+					icon="${this.expanded ? 'chevron-down' : 'chevron-right'}"
+					@click=${this.onChevronClick}
+				></code-icon>`,
 			);
 		}
 
@@ -143,24 +228,52 @@ export class GlTreeItem extends GlElement {
 		if (!this.checkable) {
 			return nothing;
 		}
-		return html`<span class="checkbox"
+
+		const checkbox = html`<span
+			class="checkbox"
+			@mouseenter=${this.onCheckboxMouseEnter}
+			@mouseleave=${this.onCheckboxMouseLeave}
 			><input
 				class="checkbox__input"
 				id="checkbox"
 				type="checkbox"
-				.checked=${this.checked}
+				tabindex="-1"
+				.checked=${this.checked === true}
+				.indeterminate=${this.checked === 'indeterminate'}
 				?disabled=${this.disableCheck}
 				@change=${this.onCheckboxChange}
 				@click=${this.onCheckboxClick} /><code-icon icon="check" size="14" class="checkbox__check"></code-icon
+			><code-icon icon="dash" size="14" class="checkbox__dash"></code-icon
 		></span>`;
+		const tooltipContent = this.getEffectiveCheckboxTooltip();
+		// `content` attribute (rather than the `content` slot) so multi-line tooltips with `\n`
+		// get converted to `<br>` by gl-tooltip's `handleUnsafeOverlayContent` — slot content
+		// flows through CSS `white-space: normal` and collapses newlines to spaces.
+		return tooltipContent
+			? html`<gl-tooltip placement="right" content=${tooltipContent}>${checkbox}</gl-tooltip>`
+			: checkbox;
+	}
+
+	private getEffectiveCheckboxTooltip(): string | undefined {
+		const base = this.checkableTooltip;
+		const alt = this.checkableAltTooltip;
+		if (!alt) return base;
+		if (!base) return alt;
+		// Alt held: show the alt label alone (mirrors the alt action's actual effect).
+		// Otherwise: stack the base label and the alt-key hint so the modifier is discoverable.
+		return this._modifiers.altKey ? alt : `${base}\n[${getAltKeySymbol()}] ${alt}`;
 	}
 
 	private renderActions() {
-		return html`<action-nav class="actions"><slot name="actions"></slot></action-nav>`;
+		return html`<action-nav class="actions" part="actions"><slot name="actions"></slot></action-nav>`;
 	}
 
-	private renderDecorations() {
-		return html`<slot name="decorations" class="decorations"></slot>`;
+	private renderBefore() {
+		return html`<slot name="decorations-before" class="decorations-before"></slot>`;
+	}
+
+	private renderAfter() {
+		return html`<slot name="decorations-after" class="decorations-after"></slot>`;
 	}
 
 	override render(): unknown {
@@ -169,29 +282,34 @@ export class GlTreeItem extends GlElement {
 			<button
 				id="button"
 				class="item"
+				part="item"
 				type="button"
+				tabindex=${this.tabIndex}
 				@click=${this.onButtonClick}
 				@dblclick=${this.onButtonDblClick}
+				@contextmenu=${this.onButtonContextMenu}
 			>
 				${when(this.showIcon, () => html`<slot name="icon" class="icon"></slot>`)}
-				<span class="text">
-					<slot class="main"></slot>
+				<span class="text" part="text">
+					<slot class="main" part="main"></slot>
 					<slot name="description" class="description"></slot>
 				</span>
 			</button>
-			${this.renderActions()}${this.renderDecorations()}
+			${this.renderBefore()}${this.renderActions()}${this.renderAfter()}
 		`;
 	}
 
 	private selectCore(
-		modifiers?: { dblClick: boolean; altKey?: boolean; ctrlKey?: boolean; metaKey?: boolean },
+		modifiers?: { dblClick: boolean; altKey?: boolean; ctrlKey?: boolean; metaKey?: boolean; shiftKey?: boolean },
 		quiet = false,
 	) {
 		this.emit('gl-tree-item-select');
-		if (this.branch) {
-			this.expanded = !this.expanded;
+		// In controlled mode the host owns `selected` (bound via `.selected`) and re-renders in
+		// response to the select event; skip the imperative set so it can't diverge from Lit's
+		// dirty-check and leave the highlight stuck. See `controlledSelection`.
+		if (!this.controlledSelection) {
+			this.selected = true;
 		}
-		this.selected = true;
 
 		if (!quiet) {
 			window.requestAnimationFrame(() => {
@@ -201,6 +319,7 @@ export class GlTreeItem extends GlElement {
 					altKey: modifiers?.altKey ?? false,
 					ctrlKey: modifiers?.ctrlKey ?? false,
 					metaKey: modifiers?.metaKey ?? false,
+					shiftKey: modifiers?.shiftKey ?? false,
 				});
 			});
 		}
@@ -218,17 +337,29 @@ export class GlTreeItem extends GlElement {
 		this.buttonEl.focus();
 	}
 
+	/** Move DOM focus onto this row's checkbox, if it has an enabled one; returns whether it did.
+	 *  The checkbox is `tabindex="-1"` so Tab can't walk it row-to-row — gl-tree-view drives it into
+	 *  its managed within-row Tab cycle via this method instead. */
+	focusCheckbox(): boolean {
+		const el = this.checkboxEl;
+		if (el == null || el.disabled) return false;
+
+		el.focus();
+		return true;
+	}
+
 	private onButtonClick(e: MouseEvent) {
-		console.log('onButtonClick', e);
 		e.stopPropagation();
 		this.selectCore({
 			dblClick: false,
 			altKey: e.altKey,
+			ctrlKey: e.ctrlKey,
+			metaKey: e.metaKey,
+			shiftKey: e.shiftKey,
 		});
 	}
 
 	private onButtonDblClick(e: MouseEvent) {
-		console.log('onButtonDblClick', e);
 		e.stopPropagation();
 		this.selectCore({
 			dblClick: true,
@@ -238,18 +369,72 @@ export class GlTreeItem extends GlElement {
 		});
 	}
 
-	private onCheckboxClick(e: Event) {
-		console.log('onCheckboxClick', e);
+	private onButtonContextMenu(e: MouseEvent) {
+		e.preventDefault();
 		e.stopPropagation();
+
+		// Create a new contextmenu event that can cross shadow DOM boundaries
+		const evt = new MouseEvent('contextmenu', {
+			bubbles: true,
+			composed: true, // This is key - allows event to cross shadow DOM boundaries
+			cancelable: true,
+			clientX: e.clientX,
+			clientY: e.clientY,
+			button: e.button,
+			buttons: e.buttons,
+			ctrlKey: e.ctrlKey,
+			shiftKey: e.shiftKey,
+			altKey: e.altKey,
+			metaKey: e.metaKey,
+		});
+
+		// Dispatch from the host element (outside shadow DOM)
+		this.dispatchEvent(evt);
+	}
+
+	private _checkboxClickAlt = false;
+
+	private onCheckboxClick(e: MouseEvent) {
+		e.stopPropagation();
+		this._checkboxClickAlt = e.altKey;
 	}
 
 	private onCheckboxChange(e: Event) {
-		console.log('onCheckboxChange', e);
 		e.preventDefault();
 		e.stopPropagation();
-		this.checked = (e.target as HTMLInputElement).checked;
+		let newChecked = (e.target as HTMLInputElement).checked;
+		// Alt+click on a mixed (indeterminate) checkbox flips the natural transition from
+		// checked-true (stage remaining) to checked-false (unstage everything) so users can
+		// drop staged content in one click instead of two. Read alt from BOTH the captured
+		// click event AND the live modifier tracker — keyboard activation (Space) skips the
+		// click handler, and some platforms may not fire the click handler before change.
+		const altHeld = this._checkboxClickAlt || this._modifiers.altKey;
+		if (this.checked === 'indeterminate' && altHeld) {
+			newChecked = false;
+			// Sync the input — the browser already set checked=true for the indeterminate
+			// click; without this, the input visually flips on for one frame before Lit's
+			// next render reconciles against `this.checked = false`.
+			(e.target as HTMLInputElement).checked = false;
+		}
+		this._checkboxClickAlt = false;
+		if (this.controlledCheck) {
+			// Controlled: the action may be blocked or cancelled (e.g. a conflict-stage confirm), so don't
+			// adopt the toggle optimistically — revert the input and let the model drive `checked` once the
+			// operation actually completes.
+			(e.target as HTMLInputElement).checked = this.checked === true;
+		} else {
+			this.checked = newChecked;
+		}
 
-		this.emit('gl-tree-item-checked', { node: this, checked: this.checked });
+		this.emit('gl-tree-item-checked', { node: this, checked: newChecked });
+	}
+
+	private onCheckboxMouseEnter() {
+		this.emit('gl-tree-item-suspend-tooltip');
+	}
+
+	private onCheckboxMouseLeave() {
+		this.emit('gl-tree-item-resume-tooltip');
 	}
 }
 
@@ -261,6 +446,9 @@ declare global {
 	interface GlobalEventHandlersEventMap {
 		'gl-tree-item-select': CustomEvent<undefined>;
 		'gl-tree-item-selected': CustomEvent<TreeItemSelectionDetail>;
+		'gl-tree-item-toggle': CustomEvent<undefined>;
 		'gl-tree-item-checked': CustomEvent<TreeItemCheckedDetail>;
+		'gl-tree-item-suspend-tooltip': CustomEvent<undefined>;
+		'gl-tree-item-resume-tooltip': CustomEvent<undefined>;
 	}
 }

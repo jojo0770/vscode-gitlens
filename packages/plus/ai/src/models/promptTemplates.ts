@@ -1,0 +1,171 @@
+export interface PromptTemplate<T extends PromptTemplateType = PromptTemplateType> {
+	readonly id: PromptTemplateId<T>;
+	readonly template: string;
+	readonly variables: (keyof PromptTemplateContext<T>)[];
+}
+
+/**
+ * Handler for intelligently truncating template context when it exceeds token limits.
+ * Receives the full context, budget information, and a helper to check new character counts.
+ *
+ * @param context - The full template context with all variable values
+ * @param currentCharacters - The current total character count of the prompt
+ * @param targetCharacters - The maximum characters the prompt should be reduced to
+ * @param getCharacters - Helper function to calculate character count for a modified context
+ * @returns Modified context with truncated values, or undefined if truncation is not possible (will throw RequestTooLarge)
+ */
+export type TruncationHandler<T extends PromptTemplateType> = (
+	context: PromptTemplateContext<T>,
+	currentCharacters: number,
+	targetCharacters: number,
+	getCharacters: (context: PromptTemplateContext<T>) => number,
+) => Promise<PromptTemplateContext<T> | undefined>;
+
+interface ChangelogPromptTemplateContext {
+	data: string;
+	instructions?: string;
+}
+
+interface CommitMessagePromptTemplateContext {
+	diff: string;
+	context?: string;
+	instructions?: string;
+}
+
+interface CreateDraftPromptTemplateContext {
+	diff: string;
+	context?: string;
+	instructions?: string;
+}
+
+interface CreatePullRequestPromptTemplateContext {
+	diff: string;
+	data: string;
+	context?: string;
+	instructions?: string;
+}
+
+interface ExplainChangesPromptTemplateContext {
+	diff: string;
+	message: string;
+	instructions?: string;
+}
+
+interface SearchQueryPromptTemplateContext {
+	query: string;
+	date: string;
+	context?: string;
+	instructions?: string;
+}
+
+interface StashMessagePromptTemplateContext {
+	diff: string;
+	context?: string;
+	instructions?: string;
+}
+
+interface GenerateCommitsPromptTemplateContext {
+	hunks: string;
+	existingCommits: string;
+	commitMessages: string;
+	hunkMap: string;
+	context?: string;
+	instructions?: string;
+}
+
+interface ReviewPullRequestPromptTemplateContext {
+	prData: string;
+	instructions?: string;
+}
+
+interface ReviewChangesPromptTemplateContext {
+	diff: string;
+	message: string;
+	context?: string;
+	instructions?: string;
+}
+
+interface ReviewOverviewPromptTemplateContext {
+	files: string;
+	message: string;
+	context?: string;
+	instructions?: string;
+}
+
+interface ReviewDetailPromptTemplateContext {
+	diff: string;
+	overview: string;
+	message: string;
+	focusArea: string;
+	context?: string;
+	instructions?: string;
+}
+
+interface ReviewRefinePromptTemplateContext {
+	instructions: string;
+}
+
+interface AddressReviewFindingsPromptTemplateContext {
+	reviewMarkdown: string;
+	scopeLabel: string;
+	granularity: 'review' | 'focusArea' | 'finding';
+	instructions?: string;
+}
+
+interface StartWorkIssuePromptTemplateContext {
+	issue: string;
+	instructions?: string;
+}
+
+export type PromptTemplateType =
+	| 'generate-commitMessage'
+	| 'generate-stashMessage'
+	| 'generate-changelog'
+	| `generate-create-${'cloudPatch' | 'pullRequest'}`
+	| 'generate-commits'
+	| 'generate-searchQuery'
+	| 'explain-changes'
+	| 'review-changes'
+	| 'review-overview'
+	| 'review-detail'
+	| 'review-refine'
+	| 'address-review-findings'
+	| 'start-review-pullRequest'
+	| 'start-work-issue';
+
+type PromptTemplateVersions = '' | '_v2';
+
+export type PromptTemplateId<T extends PromptTemplateType = PromptTemplateType> = `${T}${PromptTemplateVersions}`;
+
+// prettier-ignore
+export type PromptTemplateContext<T extends PromptTemplateType> = T extends 'generate-commitMessage'
+	? CommitMessagePromptTemplateContext
+	: T extends 'generate-stashMessage'
+	? StashMessagePromptTemplateContext
+	: T extends 'generate-create-cloudPatch'
+	? CreateDraftPromptTemplateContext
+	: T extends 'generate-create-pullRequest'
+	? CreatePullRequestPromptTemplateContext
+	: T extends 'generate-changelog'
+	? ChangelogPromptTemplateContext
+	: T extends 'generate-commits'
+	? GenerateCommitsPromptTemplateContext
+	: T extends 'generate-searchQuery'
+	? SearchQueryPromptTemplateContext
+	: T extends 'explain-changes'
+	? ExplainChangesPromptTemplateContext
+	: T extends 'review-changes'
+	? ReviewChangesPromptTemplateContext
+	: T extends 'review-overview'
+	? ReviewOverviewPromptTemplateContext
+	: T extends 'review-detail'
+	? ReviewDetailPromptTemplateContext
+	: T extends 'review-refine'
+	? ReviewRefinePromptTemplateContext
+	: T extends 'address-review-findings'
+	? AddressReviewFindingsPromptTemplateContext
+	: T extends 'start-review-pullRequest'
+	? ReviewPullRequestPromptTemplateContext
+	: T extends 'start-work-issue'
+	? StartWorkIssuePromptTemplateContext
+	: never;

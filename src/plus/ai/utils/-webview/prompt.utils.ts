@@ -1,27 +1,58 @@
-import type { TelemetryEvents } from '../../../../constants.telemetry';
-import { AIError, AIErrorReason, CancellationError } from '../../../../errors';
-import { configuration } from '../../../../system/-webview/configuration';
-import { filterMap } from '../../../../system/array';
-import { sum } from '../../../../system/iterable';
-import { getPossessiveForm, interpolate } from '../../../../system/string';
-import type { AIModel } from '../../models/model';
-import type { PromptTemplate, PromptTemplateContext, PromptTemplateType } from '../../models/promptTemplates';
+import type { AIModel } from '@gitlens/ai/models/model.js';
+import type {
+	PromptTemplate,
+	PromptTemplateContext,
+	PromptTemplateType,
+	TruncationHandler,
+} from '@gitlens/ai/models/promptTemplates.js';
 import {
+	addressReviewFindings,
 	explainChanges,
 	generateChangelog,
 	generateCommitMessage,
+	generateCommits,
 	generateCreateCloudPatch,
-	generateCreateCodeSuggest,
 	generateCreatePullRequest,
-	generateRebase,
 	generateSearchQuery,
 	generateStashMessage,
-} from '../../prompts';
-import { estimatedCharactersPerToken, showLargePromptWarning, showPromptTruncationWarning } from './ai.utils';
+	reviewChanges,
+	reviewDetail,
+	reviewOverview,
+	reviewPullRequest,
+	reviewRefine,
+	startWorkFromIssue,
+} from '@gitlens/ai/prompts.js';
+import { estimatedCharactersPerToken } from '@gitlens/ai/utils/ai.utils.js';
+import { CancellationError } from '@gitlens/utils/cancellation.js';
+import { getPossessiveForm, interpolate } from '@gitlens/utils/string.js';
+import type { TelemetryEvents } from '../../../../constants.telemetry.js';
+import { AIError, AIErrorReason } from '../../../../errors.js';
+import { configuration } from '../../../../system/-webview/configuration.js';
+import { showLargePromptWarning, showPromptTruncationWarning } from './ai.utils.js';
+
+/**
+ * Merges custom user-configured instructions and per-request user guidance into a single instructions block.
+ * `userGuidanceHeader` is the natural-language header prepended to the user guidance (e.g. "The user provided ...:").
+ * Returns an empty string when both inputs are empty.
+ */
+export function mergeUserInstructions(
+	customInstructions: string | null | undefined,
+	userGuidance: string | null | undefined,
+	userGuidanceHeader: string,
+): string {
+	let instructions = '';
+	if (customInstructions) {
+		instructions += customInstructions;
+	}
+	if (userGuidance) {
+		instructions += `${instructions ? '\n\n' : ''}${userGuidanceHeader}\n${userGuidance}`;
+	}
+	return instructions;
+}
 
 export function getLocalPromptTemplate<T extends PromptTemplateType>(
 	template: T,
-	_model: AIModel,
+	_model: AIModel | undefined,
 ): PromptTemplate<T> | undefined {
 	switch (template) {
 		case 'generate-commitMessage':
@@ -32,100 +63,172 @@ export function getLocalPromptTemplate<T extends PromptTemplateType>(
 			return generateChangelog as PromptTemplate<T>;
 		case 'generate-create-cloudPatch':
 			return generateCreateCloudPatch as PromptTemplate<T>;
-		case 'generate-create-codeSuggestion':
-			return generateCreateCodeSuggest as PromptTemplate<T>;
 		case 'generate-create-pullRequest':
 			return generateCreatePullRequest as PromptTemplate<T>;
 		case 'generate-searchQuery':
 			return generateSearchQuery as PromptTemplate<T>;
-		case 'generate-rebase':
-			return generateRebase as PromptTemplate<T>;
+		case 'generate-commits':
+			return generateCommits as PromptTemplate<T>;
 		case 'explain-changes':
 			return explainChanges as PromptTemplate<T>;
+		case 'review-changes':
+			return reviewChanges as PromptTemplate<T>;
+		case 'review-overview':
+			return reviewOverview as PromptTemplate<T>;
+		case 'review-detail':
+			return reviewDetail as PromptTemplate<T>;
+		case 'review-refine':
+			return reviewRefine as PromptTemplate<T>;
+		case 'address-review-findings':
+			return addressReviewFindings as PromptTemplate<T>;
+		case 'start-review-pullRequest':
+			return reviewPullRequest as PromptTemplate<T>;
+		case 'start-work-issue':
+			return startWorkFromIssue as PromptTemplate<T>;
+		default:
+			return undefined;
 	}
 }
 
-const canTruncateTemplateVariables = ['diff'];
+export interface ResolvePromptOptions {
+	suppressLargePromptWarning?: boolean;
+}
 
+// Overload: when model is provided, all parameters can be provided
 export async function resolvePrompt<T extends PromptTemplateType>(
 	model: AIModel,
 	template: PromptTemplate<T>,
 	templateContext: PromptTemplateContext<T>,
-	maxInputTokens: number,
-	retries: number,
-	reporting: TelemetryEvents['ai/generate' | 'ai/explain'],
+	maxInputTokens: number | undefined,
+	retries: number | undefined,
+	reporting: TelemetryEvents['ai/generate' | 'ai/explain' | 'ai/review'] | undefined,
+	truncationHandler?: TruncationHandler<T>,
+	options?: ResolvePromptOptions,
+): Promise<{ prompt: string; truncated: boolean }>;
+
+// Overload: when model is undefined, other parameters must be undefined
+export async function resolvePrompt<T extends PromptTemplateType>(
+	model: undefined,
+	template: PromptTemplate<T>,
+	templateContext: PromptTemplateContext<T>,
+	maxInputTokens?: undefined,
+	retries?: undefined,
+	reporting?: undefined,
+	truncationHandler?: undefined,
+	options?: undefined,
+): Promise<{ prompt: string; truncated: boolean }>;
+
+// Implementation
+export async function resolvePrompt<T extends PromptTemplateType>(
+	model: AIModel | undefined,
+	template: PromptTemplate<T>,
+	templateContext: PromptTemplateContext<T>,
+	maxInputTokens?: number | undefined,
+	retries?: number | undefined,
+	reporting?: TelemetryEvents['ai/generate' | 'ai/explain' | 'ai/review'] | undefined,
+	truncationHandler?: TruncationHandler<T>,
+	options?: ResolvePromptOptions,
 ): Promise<{ prompt: string; truncated: boolean }> {
-	if (templateContext.instructions) {
-		reporting['config.usedCustomInstructions'] = true;
-	}
-
-	let entries = filterMap(Object.entries(templateContext), ([k, v]) => {
-		if (!template.variables.includes(k as keyof PromptTemplateContext<T>) || (v != null && typeof v !== 'string')) {
-			debugger;
-			return undefined;
-		}
-
-		return [k, (v as string | null | undefined) ?? ''] as const;
-	});
-	const length = template.template.length + sum(entries, ([, v]) => v.length);
-
+	let currentContext = templateContext;
 	let truncated = false;
 
-	const estimatedMaxCharacters = maxInputTokens * estimatedCharactersPerToken;
+	// Only perform truncation and telemetry if model is provided
+	// (overloads ensure maxInputTokens, retries, reporting are also defined when model is defined)
+	if (model != null) {
+		if (templateContext.instructions) {
+			reporting!['config.usedCustomInstructions'] = true;
+		}
 
-	if (length > estimatedMaxCharacters) {
-		truncated = true;
+		const estimatedMaxCharacters = maxInputTokens! * estimatedCharactersPerToken;
+		const currentCharacters = getContextCharacters(template, currentContext);
 
-		entries = entries.map(([k, v]) => {
-			if (!canTruncateTemplateVariables.includes(k)) return [k, v] as const;
+		// If over limit, try truncation handler or fail
+		if (currentCharacters > estimatedMaxCharacters) {
+			if (truncationHandler != null) {
+				const truncatedContext = await truncationHandler(
+					currentContext,
+					currentCharacters,
+					estimatedMaxCharacters,
+					ctx => getContextCharacters(template, ctx),
+				);
+				if (truncatedContext == null) {
+					throw new AIError(
+						AIErrorReason.RequestTooLarge,
+						new Error(
+							`Unable to truncate context to fit within the ${getPossessiveForm(model.provider.name)} limits`,
+						),
+					);
+				}
 
-			const truncateTo = estimatedMaxCharacters - (length - v.length);
-			if (truncateTo > v.length) {
-				debugger;
+				currentContext = truncatedContext;
+				truncated = true;
+			} else {
+				// No handler provided and over limit - fail fast
 				throw new AIError(
 					AIErrorReason.RequestTooLarge,
-					new Error(
-						`Unable to truncate context to fit within the ${getPossessiveForm(model.provider.name)} limits`,
-					),
+					new Error(`Context exceeds the ${getPossessiveForm(model.provider.name)} limits`),
 				);
 			}
-			return [k, v.substring(0, truncateTo)] as const;
-		});
-	}
-
-	// Ensure we blank out any missing variables
-	for (const v of template.variables) {
-		if (!entries.some(([k]) => k === v)) {
-			entries.push([v as string, '']);
 		}
 	}
 
-	const prompt = interpolate(template.template, Object.fromEntries(entries));
+	const prompt = buildPrompt(template, currentContext);
 
-	const estimatedTokens = Math.ceil(prompt.length / estimatedCharactersPerToken);
-	const warningThreshold = configuration.get('ai.largePromptWarningThreshold', undefined, 10000);
+	// Only perform telemetry and warnings if model is provided
+	if (model != null) {
+		const estimatedTokens = Math.ceil(prompt.length / estimatedCharactersPerToken);
+		const warningThreshold = configuration.get('ai.largePromptWarningThreshold', undefined, 10000);
 
-	reporting['retry.count'] = retries;
-	reporting['input.length'] = prompt.length;
-	reporting['config.largePromptThreshold'] = warningThreshold;
+		reporting!['retry.count'] = retries!;
+		reporting!['input.length'] = prompt.length;
+		reporting!['config.largePromptThreshold'] = warningThreshold;
 
-	if (retries === 0) {
-		reporting['warning.promptTruncated'] = truncated;
+		if (retries === 0) {
+			reporting!['warning.promptTruncated'] = truncated;
 
-		if (truncated) {
-			showPromptTruncationWarning(model);
-		}
+			if (truncated) {
+				showPromptTruncationWarning(model);
+			}
 
-		if (estimatedTokens > warningThreshold) {
-			reporting['warning.exceededLargePromptThreshold'] = true;
+			if (estimatedTokens > warningThreshold) {
+				reporting!['warning.exceededLargePromptThreshold'] = true;
 
-			if (!(await showLargePromptWarning(Math.ceil(estimatedTokens / 100) * 100, warningThreshold))) {
-				reporting['failed.reason'] = 'user-cancelled';
-				reporting['failed.cancelled.reason'] = 'large-prompt';
+				if (!options?.suppressLargePromptWarning) {
+					if (!(await showLargePromptWarning(Math.ceil(estimatedTokens / 100) * 100, warningThreshold))) {
+						reporting!['failed.reason'] = 'user-cancelled';
+						reporting!['failed.cancelled.reason'] = 'large-prompt';
 
-				throw new CancellationError();
+						throw new CancellationError();
+					}
+				}
 			}
 		}
 	}
 	return { prompt: prompt, truncated: truncated };
+}
+
+function getContextCharacters<T extends PromptTemplateType>(
+	template: PromptTemplate<T>,
+	context: PromptTemplateContext<T>,
+): number {
+	let length = template.template.length;
+	for (const key of template.variables) {
+		const value = context[key];
+		if (typeof value === 'string') {
+			length += value.length;
+		}
+	}
+	return length;
+}
+
+function buildPrompt<T extends PromptTemplateType>(
+	template: PromptTemplate<T>,
+	context: PromptTemplateContext<T>,
+): string {
+	const entries: [string, string][] = [];
+	for (const key of template.variables) {
+		const value = context[key];
+		entries.push([key as string, typeof value === 'string' ? value : '']);
+	}
+	return interpolate(template.template, Object.fromEntries(entries));
 }

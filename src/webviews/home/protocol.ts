@@ -1,26 +1,33 @@
-import type { IntegrationDescriptor } from '../../constants.integrations';
-import type { Source } from '../../constants.telemetry';
-import type { GitBranchMergedStatus } from '../../git/gitProvider';
-import type { GitBranchStatus, GitTrackingState, GitTrackingUpstream } from '../../git/models/branch';
-import type { GitDiffFileStats } from '../../git/models/diff';
-import type { Issue } from '../../git/models/issue';
-import type { MergeConflict } from '../../git/models/mergeConflict';
-import type { GitPausedOperationStatus } from '../../git/models/pausedOperationStatus';
-import type { GitBranchReference } from '../../git/models/reference';
-import type { RepositoryShape } from '../../git/models/repositoryShape';
-import type { RemoteProviderSupportedFeatures } from '../../git/remotes/remoteProvider';
-import type { AIModel } from '../../plus/ai/models/model';
-import type { Subscription } from '../../plus/gk/models/subscription';
-import type { LaunchpadSummaryResult } from '../../plus/launchpad/launchpadIndicator';
-import type { LaunchpadItem } from '../../plus/launchpad/launchpadProvider';
-import type { LaunchpadGroup } from '../../plus/launchpad/models/launchpad';
-import type { OpenWorkspaceLocation } from '../../system/-webview/vscode/workspaces';
-import type { IpcScope, WebviewState } from '../protocol';
-import { IpcCommand, IpcNotification, IpcRequest } from '../protocol';
+import type { AIModel } from '@gitlens/ai/models/model.js';
+import type { GitBranchStatus, GitTrackingState, GitTrackingUpstream } from '@gitlens/git/models/branch.js';
+import type { GitDiffFileStats } from '@gitlens/git/models/diff.js';
+import type { Issue } from '@gitlens/git/models/issue.js';
+import type { ConflictDetectionResult } from '@gitlens/git/models/mergeConflicts.js';
+import type { GitPausedOperationStatus } from '@gitlens/git/models/pausedOperationStatus.js';
+import type { GitBranchReference } from '@gitlens/git/models/reference.js';
+import type { RemoteProviderSupportedFeatures } from '@gitlens/git/models/remoteProvider.js';
+import type { GitBranchMergedStatus } from '@gitlens/git/providers/branches.js';
+import type { IntegrationDescriptor } from '@gitlens/integrations/constants.js';
+import type { AgentSessionState } from '../../agents/models/agentSessionState.js';
+import type { WalkthroughProgress } from '../../constants.walkthroughs.js';
+import type { RepositoryShape } from '../../git/models/repositoryShape.js';
+import type { Subscription } from '../../plus/gk/models/subscription.js';
+import type { LaunchpadSummaryError, LaunchpadSummaryResult } from '../../plus/launchpad/launchpadIndicator.js';
+import type { LaunchpadItem } from '../../plus/launchpad/launchpadProvider.js';
+import type { LaunchpadGroup } from '../../plus/launchpad/models/launchpad.js';
+import type { IpcScope } from '../ipc/models/ipc.js';
+import { IpcNotification } from '../ipc/models/ipc.js';
+import type { WebviewState } from '../protocol.js';
+import type { OverviewBranch, OverviewRecentThreshold, OverviewStaleThreshold } from '../shared/overviewBranches.js';
 
+export type { OverviewRecentThreshold, OverviewStaleThreshold } from '../shared/overviewBranches.js';
 export const scope: IpcScope = 'home';
 
-export interface State extends WebviewState {
+// ============================================================
+// Bootstrap State (used by includeBootstrap / legacy getState)
+// ============================================================
+
+export interface State extends WebviewState<'gitlens.views.home'> {
 	discovering: boolean;
 	repositories: DidChangeRepositoriesParams;
 	webroot?: string;
@@ -30,31 +37,44 @@ export interface State extends WebviewState {
 		ai: boolean;
 	};
 	aiEnabled: boolean;
-	previewCollapsed: boolean;
-	integrationBannerCollapsed: boolean;
-	aiAllAccessBannerCollapsed: boolean;
+	mcpBannerCollapsed: boolean;
+	mcpCanAutoRegister: boolean;
 	hasAnyIntegrationConnected: boolean;
 	integrations: IntegrationState[];
 	ai: { model: AIModel | undefined };
 	avatar?: string;
 	organizationsCount?: number;
 	walkthroughSupported: boolean;
-	walkthroughProgress?: {
-		doneCount: number;
-		allCount: number;
-		progress: number;
-	};
+	walkthroughProgress?: WalkthroughProgress;
+	dateFormat: string | null;
 	previewEnabled: boolean;
 	newInstall: boolean;
-	amaBannerCollapsed: boolean;
+	hostAppName: string;
+	agentSessions?: AgentSessionState[];
+}
+
+export type { AgentSessionState };
+
+export interface SubscriptionState {
+	subscription: Subscription;
+	avatar: string;
+	organizationsCount: number;
 }
 
 export interface IntegrationState extends IntegrationDescriptor {
 	connected: boolean;
 }
 
-export type OverviewRecentThreshold = 'OneDay' | 'OneWeek' | 'OneMonth';
-export type OverviewStaleThreshold = 'OneYear';
+// ============================================================
+// Shared Data Types (used by components, services, backend)
+// ============================================================
+
+export interface DidChangeRepositoriesParams {
+	count: number;
+	openCount: number;
+	hasUnsafe: boolean;
+	trusted: boolean;
+}
 
 export interface OverviewFilters {
 	recent: {
@@ -63,16 +83,7 @@ export interface OverviewFilters {
 	stale: { threshold: OverviewStaleThreshold; show: boolean; limit: number };
 }
 
-// REQUESTS
-
-export interface GetLaunchpadSummaryRequest {
-	[key: string]: unknown;
-}
-export type GetLaunchpadSummaryResponse = LaunchpadSummaryResult | { error: Error } | undefined;
-export const GetLaunchpadSummary = new IpcRequest<GetLaunchpadSummaryRequest, GetLaunchpadSummaryResponse>(
-	scope,
-	'launchpad/summary',
-);
+export type GetLaunchpadSummaryResponse = LaunchpadSummaryResult | { error: LaunchpadSummaryError } | undefined;
 
 export interface GetOverviewBranch {
 	reference: GitBranchReference;
@@ -81,7 +92,11 @@ export interface GetOverviewBranch {
 	id: string;
 	name: string;
 	opened: boolean;
-	timestamp?: number;
+	timestamps?: {
+		lastCommit?: number;
+		lastAccessed?: number;
+		lastModified?: number;
+	};
 	status: GitBranchStatus;
 	upstream: GitTrackingUpstream | undefined;
 
@@ -116,7 +131,7 @@ export interface GetOverviewBranch {
 				name: string;
 				status?: GitTrackingState;
 				mergedStatus?: GitBranchMergedStatus;
-				potentialConflicts?: MergeConflict;
+				potentialConflicts?: ConflictDetectionResult;
 
 				targetBranch: string | undefined;
 				baseBranch: string | undefined;
@@ -126,19 +141,20 @@ export interface GetOverviewBranch {
 	>;
 
 	contributors?: Promise<
-		{
-			name: string;
-			email: string;
-			avatarUrl: string;
-			current: boolean;
-			timestamp?: number;
-			count: number;
-			stats?: {
-				files: number;
-				additions: number;
-				deletions: number;
-			};
-		}[]
+		| {
+				name: string;
+				email: string;
+				avatarUrl: string;
+				current: boolean;
+				timestamp?: number;
+				count: number;
+				stats?: {
+					files: number;
+					additions: number;
+					deletions: number;
+				};
+		  }[]
+		| undefined
 	>;
 
 	pr?: Promise<
@@ -170,7 +186,6 @@ export interface GetOverviewBranch {
 									approval: number;
 									changeRequest: number;
 									comment: number;
-									codeSuggest: number;
 								};
 							};
 
@@ -183,25 +198,28 @@ export interface GetOverviewBranch {
 	>;
 
 	autolinks?: Promise<
-		{
-			id: string;
-			title: string;
-			url: string;
-			state: Omit<Issue['state'], 'merged'>;
-		}[]
+		| {
+				id: string;
+				title: string;
+				url: string;
+				state: Omit<Issue['state'], 'merged'>;
+		  }[]
+		| undefined
 	>;
 
 	issues?: Promise<
-		{
-			id: string;
-			title: string;
-			url: string;
-			state: Omit<Issue['state'], 'merged'>;
-		}[]
+		| {
+				id: string;
+				title: string;
+				url: string;
+				state: Omit<Issue['state'], 'merged'>;
+		  }[]
+		| undefined
 	>;
 
 	worktree?: {
 		name: string;
+		path: string;
 		uri: string;
 		isDefault: boolean;
 	};
@@ -209,17 +227,45 @@ export interface GetOverviewBranch {
 
 export type OverviewRepository = RepositoryShape;
 
-// TODO: look at splitting off selected repo
-export type GetActiveOverviewResponse =
+// ============================================================
+// Overview Branch (sync fields only — no enrichment)
+// ============================================================
+
+// Re-export shared overview types for convenience
+export type {
+	GetOverviewEnrichmentResponse,
+	GetOverviewWipResponse,
+	OverviewBranch,
+	OverviewBranchContributor,
+	OverviewBranchEnrichment,
+	OverviewBranchIssue,
+	OverviewBranchLaunchpadItem,
+	OverviewBranchMergeTarget,
+	OverviewBranchPullRequest,
+	OverviewBranchRemote,
+	OverviewBranchWip,
+} from '../shared/overviewBranches.js';
+
+export type GetOverviewBranchesResponse =
 	| {
 			repository: OverviewRepository;
-			active: GetOverviewBranch;
+			active: OverviewBranch[];
+			recent: OverviewBranch[];
+			stale?: OverviewBranch[];
 	  }
 	| undefined;
 
-export const GetActiveOverview = new IpcRequest<undefined, GetActiveOverviewResponse>(scope, 'overview/active');
+// ============================================================
+// Legacy monolithic responses (consumed by UI — built by webview from skeleton + wip + enrichment)
+// ============================================================
 
-// TODO: look at splitting off selected repo
+export type GetActiveOverviewResponse =
+	| {
+			repository: OverviewRepository;
+			active: GetOverviewBranch[];
+	  }
+	| undefined;
+
 export type GetInactiveOverviewResponse =
 	| {
 			repository: OverviewRepository;
@@ -228,95 +274,26 @@ export type GetInactiveOverviewResponse =
 	  }
 	| undefined;
 
-export const GetInactiveOverview = new IpcRequest<undefined, GetInactiveOverviewResponse>(scope, 'overview/inactive');
-
-export type GetOverviewFilterStateResponse = OverviewFilters;
-export const GetOverviewFilterState = new IpcRequest<void, GetOverviewFilterStateResponse>(scope, 'overviewFilter');
-
-export const ChangeOverviewRepositoryCommand = new IpcCommand<undefined>(scope, 'overview/repository/change');
-export const DidChangeOverviewRepository = new IpcNotification<undefined>(scope, 'overview/repository/didChange');
-
-// COMMANDS
-
-export const TogglePreviewEnabledCommand = new IpcCommand<void>(scope, 'previewEnabled/toggle');
-
-export interface CollapseSectionParams {
-	section: string;
-	collapsed: boolean;
-}
-export const CollapseSectionCommand = new IpcCommand<CollapseSectionParams>(scope, 'section/collapse');
-
-export const DismissWalkthroughSection = new IpcCommand<void>(scope, 'walkthrough/dismiss');
-
-export const DidChangeAiAllAccessBanner = new IpcNotification<boolean>(scope, 'ai/allAccess/didChange');
-export const DismissAiAllAccessBannerCommand = new IpcCommand<void>(scope, 'ai/allAccess/dismiss');
-
-export const SetOverviewFilter = new IpcCommand<OverviewFilters>(scope, 'overview/filter/set');
-
 export type OpenInGraphParams =
 	| { type: 'repo'; repoPath: string; branchId?: never }
 	| { type: 'branch'; repoPath: string; branchId: string }
 	| undefined;
-export const OpenInGraphCommand = new IpcCommand<OpenInGraphParams>(scope, 'openInGraph');
 
 export type OpenInTimelineParams =
 	| { type: 'repo'; repoPath: string; branchId?: never }
 	| { type: 'branch'; repoPath: string; branchId: string }
 	| undefined;
 
-// NOTIFICATIONS
+export type {
+	BranchAndTargetRefs,
+	BranchRef,
+	CreatePullRequestCommandArgs,
+	OpenWorktreeCommandArgs,
+} from '../shared/branchRefs.js';
 
-export interface DidCompleteDiscoveringRepositoriesParams {
-	discovering: boolean;
-	repositories: DidChangeRepositoriesParams;
-}
-
-export const DidCompleteDiscoveringRepositories = new IpcNotification<DidCompleteDiscoveringRepositoriesParams>(
-	scope,
-	'repositories/didCompleteDiscovering',
-);
-
-export interface DidChangePreviewEnabledParams {
-	previewEnabled: boolean;
-	previewCollapsed: boolean;
-	aiEnabled: boolean;
-}
-export const DidChangePreviewEnabled = new IpcNotification<DidChangePreviewEnabledParams>(
-	scope,
-	'previewEnabled/didChange',
-);
-
-export const DidChangeRepositoryWip = new IpcNotification<undefined>(scope, 'repository/wip/didChange');
-
-export interface DidChangeRepositoriesParams {
-	count: number;
-	openCount: number;
-	hasUnsafe: boolean;
-	trusted: boolean;
-}
-export const DidChangeRepositories = new IpcNotification<DidChangeRepositoriesParams>(scope, 'repositories/didChange');
-
-export interface DidChangeProgressParams {
-	progress: number;
-	doneCount: number;
-	allCount: number;
-}
-export const DidChangeWalkthroughProgress = new IpcNotification<DidChangeProgressParams>(
-	scope,
-	'walkthroughProgress/didChange',
-);
-
-export interface DidChangeIntegrationsParams {
-	hasAnyIntegrationConnected: boolean;
-	integrations: IntegrationState[];
-	ai: { model: AIModel | undefined };
-}
-export const DidChangeIntegrationsConnections = new IpcNotification<DidChangeIntegrationsParams>(
-	scope,
-	'integrations/didChange',
-);
-
-export const DidChangeLaunchpad = new IpcNotification<undefined>(scope, 'launchpad/didChange');
+// ============================================================
+// Legacy IPC (kept for shared contexts like promos.ts)
+// ============================================================
 
 export interface DidChangeSubscriptionParams {
 	subscription: Subscription;
@@ -324,44 +301,3 @@ export interface DidChangeSubscriptionParams {
 	organizationsCount: number;
 }
 export const DidChangeSubscription = new IpcNotification<DidChangeSubscriptionParams>(scope, 'subscription/didChange');
-
-export interface DidChangeOrgSettingsParams {
-	orgSettings: State['orgSettings'];
-}
-export const DidChangeOrgSettings = new IpcNotification<DidChangeOrgSettingsParams>(scope, 'org/settings/didChange');
-
-export interface DidChangeOwnerFilterParams {
-	filter: OverviewFilters;
-}
-export const DidChangeOverviewFilter = new IpcNotification<DidChangeOwnerFilterParams>(
-	scope,
-	'home/ownerFilter/didChange',
-);
-
-export const DidFocusAccount = new IpcNotification<undefined>(scope, 'account/didFocus');
-
-export interface BranchRef {
-	repoPath: string;
-	branchId: string;
-	branchName: string;
-	branchUpstreamName?: string;
-	worktree?: {
-		name: string;
-		isDefault: boolean;
-	};
-}
-
-export interface OpenWorktreeCommandArgs extends BranchRef {
-	location?: OpenWorkspaceLocation;
-}
-
-export interface BranchAndTargetRefs extends BranchRef {
-	mergeTargetId: string;
-	mergeTargetName: string;
-}
-
-export interface CreatePullRequestCommandArgs {
-	ref: BranchRef;
-	describeWithAI?: boolean;
-	source?: Source;
-}

@@ -1,10 +1,10 @@
 import type { Uri } from 'vscode';
 import { extensions } from 'vscode';
-import { ExtensionNotFoundError } from '../errors';
-import { Logger } from '../system/logger';
+import { Logger } from '@gitlens/utils/logger.js';
+import { ExtensionNotFoundError } from '../errors.js';
 
 export async function getRemoteHubApi(): Promise<RemoteHubApi>;
-// eslint-disable-next-line @typescript-eslint/unified-signatures
+// oxlint-disable-next-line typescript/unified-signatures
 export async function getRemoteHubApi(silent: false): Promise<RemoteHubApi>;
 export async function getRemoteHubApi(silent: boolean): Promise<RemoteHubApi | undefined>;
 export async function getRemoteHubApi(silent?: boolean): Promise<RemoteHubApi | undefined> {
@@ -13,7 +13,7 @@ export async function getRemoteHubApi(silent?: boolean): Promise<RemoteHubApi | 
 			extensions.getExtension<RemoteHubApi>('ms-vscode.remote-repositories') ??
 			extensions.getExtension<RemoteHubApi>('GitHub.remotehub');
 		if (extension == null) {
-			Logger.log('GitHub Repositories extension is not installed or enabled');
+			Logger.info('GitHub Repositories extension is not installed or enabled');
 			throw new ExtensionNotFoundError('GitHub Repositories', 'GitHub.remotehub');
 		}
 
@@ -35,12 +35,13 @@ export interface Provider {
 	readonly name: string;
 }
 
-export const enum HeadType {
-	Branch = 0,
-	RemoteBranch = 1,
-	Tag = 2,
-	Commit = 3,
-}
+export const HeadType = {
+	Branch: 0,
+	RemoteBranch: 1,
+	Tag: 2,
+	Commit: 3,
+} as const;
+export type HeadType = (typeof HeadType)[keyof typeof HeadType];
 
 export interface Metadata {
 	readonly provider: Provider;

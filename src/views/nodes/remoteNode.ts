@@ -1,24 +1,30 @@
-import { MarkdownString, ThemeIcon, TreeItem, TreeItemCollapsibleState } from 'vscode';
-import { GlyphChars } from '../../constants';
-import { GitUri } from '../../git/gitUri';
-import type { GitRemote } from '../../git/models/remote';
-import type { Repository } from '../../git/models/repository';
-import { getRemoteUpstreamDescription } from '../../git/utils/remote.utils';
-import { makeHierarchical } from '../../system/array';
-import { log } from '../../system/decorators/log';
-import type { ViewsWithRemotes } from '../viewBase';
-import { createViewDecorationUri } from '../viewDecorationProvider';
-import { ContextValues, getViewNodeId, ViewNode } from './abstract/viewNode';
-import { BranchNode } from './branchNode';
-import { BranchOrTagFolderNode } from './branchOrTagFolderNode';
-import { MessageNode } from './common';
+import { MarkdownString, ThemeIcon, TreeItem, TreeItemCollapsibleState, Uri } from 'vscode';
+import type { GitRemote } from '@gitlens/git/models/remote.js';
+import { getRemoteUpstreamDescription } from '@gitlens/git/utils/remote.utils.js';
+import { makeHierarchical } from '@gitlens/utils/array.js';
+import { debug } from '@gitlens/utils/decorators/log.js';
+import { GlyphChars } from '../../constants.js';
+import { GitUri } from '../../git/gitUri.js';
+import type { GlRepository } from '../../git/models/repository.js';
+import {
+	getRemoteIntegration,
+	remoteSupportsIntegration,
+	setRemoteAsDefault,
+} from '../../git/utils/-webview/remote.utils.js';
+import { configuration } from '../../system/-webview/configuration.js';
+import type { ViewsWithRemotes } from '../viewBase.js';
+import { createViewDecorationUri } from '../viewDecorationProvider.js';
+import { ContextValues, getViewNodeId, ViewNode } from './abstract/viewNode.js';
+import { BranchNode } from './branchNode.js';
+import { BranchOrTagFolderNode } from './branchOrTagFolderNode.js';
+import { MessageNode } from './common.js';
 
 export class RemoteNode extends ViewNode<'remote', ViewsWithRemotes> {
 	constructor(
 		uri: GitUri,
 		view: ViewsWithRemotes,
 		protected override readonly parent: ViewNode,
-		public readonly repo: Repository,
+		public readonly repo: GlRepository,
 		public readonly remote: GitRemote,
 		private readonly _options?: { expand?: boolean },
 	) {
@@ -44,7 +50,7 @@ export class RemoteNode extends ViewNode<'remote', ViewsWithRemotes> {
 		const branches = await this.repo.git.branches.getBranches({
 			// only show remote branches for this remote
 			filter: b => b.remote && b.name.startsWith(this.remote.name),
-			sort: true,
+			sort: { orderBy: configuration.get('sortBranchesBy') },
 		});
 		if (branches.values.length === 0) return [new MessageNode(this.view, this, 'No branches could be found.')];
 
@@ -94,23 +100,26 @@ export class RemoteNode extends ViewNode<'remote', ViewsWithRemotes> {
 		let tooltip;
 		if (this.remote.provider != null) {
 			const { provider } = this.remote;
+			const avatarUri = provider.avatarUri;
 
 			item.iconPath =
-				provider.avatarUri != null && this.view.config.avatars
-					? provider.avatarUri
+				avatarUri != null && this.view.config.avatars
+					? avatarUri
 					: provider.icon === 'remote'
 						? new ThemeIcon('cloud')
 						: {
-								dark: this.view.container.context.asAbsolutePath(
-									`images/dark/icon-${provider.icon}.svg`,
+								dark: Uri.file(
+									this.view.container.context.asAbsolutePath(`images/dark/icon-${provider.icon}.svg`),
 								),
-								light: this.view.container.context.asAbsolutePath(
-									`images/light/icon-${provider.icon}.svg`,
+								light: Uri.file(
+									this.view.container.context.asAbsolutePath(
+										`images/light/icon-${provider.icon}.svg`,
+									),
 								),
 							};
 
-			if (this.remote.supportsIntegration()) {
-				const integration = await this.remote.getIntegration();
+			if (remoteSupportsIntegration(this.remote)) {
+				const integration = await getRemoteIntegration(this.remote);
 				const connected = integration?.maybeConnected ?? (await integration?.isConnected());
 
 				item.contextValue = `${ContextValues.Remote}${connected ? '+connected' : '+disconnected'}`;
@@ -145,9 +154,9 @@ export class RemoteNode extends ViewNode<'remote', ViewsWithRemotes> {
 		return item;
 	}
 
-	@log()
+	@debug()
 	async setAsDefault(state: boolean = true): Promise<void> {
-		await this.remote.setAsDefault(state);
+		await setRemoteAsDefault(this.remote, state);
 		void this.triggerChange();
 	}
 }

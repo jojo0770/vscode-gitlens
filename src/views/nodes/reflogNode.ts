@@ -1,15 +1,15 @@
-import { TreeItem, TreeItemCollapsibleState } from 'vscode';
-import type { GitUri } from '../../git/gitUri';
-import type { GitReflog } from '../../git/models/reflog';
-import type { Repository } from '../../git/models/repository';
-import { debug } from '../../system/decorators/log';
-import type { RepositoriesView } from '../repositoriesView';
-import type { WorkspacesView } from '../workspacesView';
-import { CacheableChildrenViewNode } from './abstract/cacheableChildrenViewNode';
-import type { PageableViewNode, ViewNode } from './abstract/viewNode';
-import { ContextValues, getViewNodeId } from './abstract/viewNode';
-import { LoadMoreNode, MessageNode } from './common';
-import { ReflogRecordNode } from './reflogRecordNode';
+import { TreeItem, TreeItemCollapsibleState, Uri } from 'vscode';
+import type { GitReflog } from '@gitlens/git/models/reflog.js';
+import { trace } from '@gitlens/utils/decorators/log.js';
+import type { GitUri } from '../../git/gitUri.js';
+import type { GlRepository } from '../../git/models/repository.js';
+import type { RepositoriesView } from '../repositoriesView.js';
+import type { WorkspacesView } from '../workspacesView.js';
+import { CacheableChildrenViewNode } from './abstract/cacheableChildrenViewNode.js';
+import type { PageableViewNode, ViewNode } from './abstract/viewNode.js';
+import { ContextValues, getViewNodeId } from './abstract/viewNode.js';
+import { LoadMoreNode, MessageNode } from './common.js';
+import { ReflogRecordNode } from './reflogRecordNode.js';
 
 export class ReflogNode
 	extends CacheableChildrenViewNode<'reflog', RepositoriesView | WorkspacesView>
@@ -21,7 +21,7 @@ export class ReflogNode
 		uri: GitUri,
 		view: RepositoriesView | WorkspacesView,
 		parent: ViewNode,
-		public readonly repo: Repository,
+		public readonly repo: GlRepository,
 	) {
 		super('reflog', uri, view, parent);
 
@@ -46,7 +46,7 @@ export class ReflogNode
 			children.push(...reflog.records.map(r => new ReflogRecordNode(this.view, this, r)));
 
 			if (reflog.hasMore) {
-				children.push(new LoadMoreNode(this.view, this, children[children.length - 1]));
+				children.push(new LoadMoreNode(this.view, this, children.at(-1)!));
 			}
 
 			this.children = children;
@@ -60,14 +60,14 @@ export class ReflogNode
 		item.contextValue = ContextValues.Reflog;
 		item.description = 'experimental';
 		item.iconPath = {
-			dark: this.view.container.context.asAbsolutePath('images/dark/icon-activity.svg'),
-			light: this.view.container.context.asAbsolutePath('images/light/icon-activity.svg'),
+			dark: Uri.file(this.view.container.context.asAbsolutePath('images/dark/icon-activity.svg')),
+			light: Uri.file(this.view.container.context.asAbsolutePath('images/light/icon-activity.svg')),
 		};
 
 		return item;
 	}
 
-	@debug()
+	@trace()
 	override refresh(reset?: boolean): void | { cancel: boolean } | Promise<void | { cancel: boolean }> {
 		if (reset) {
 			this._reflog = undefined;
@@ -77,12 +77,10 @@ export class ReflogNode
 
 	private _reflog: GitReflog | undefined;
 	private async getReflog() {
-		if (this._reflog === undefined) {
-			this._reflog = await this.repo.git.commits.getIncomingActivity?.({
-				all: true,
-				limit: this.limit ?? this.view.config.defaultItemLimit,
-			});
-		}
+		this._reflog ??= await this.repo.git.commits.getIncomingActivity?.({
+			all: true,
+			limit: this.limit ?? this.view.config.defaultItemLimit,
+		});
 
 		return this._reflog;
 	}

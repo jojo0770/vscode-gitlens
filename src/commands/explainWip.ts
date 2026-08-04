@@ -1,23 +1,24 @@
 import type { TextEditor, Uri } from 'vscode';
 import { ProgressLocation } from 'vscode';
-import type { Container } from '../container';
-import { uncommitted, uncommittedStaged } from '../git/models/revision';
-import { showGenericErrorMessage } from '../messages';
-import { command } from '../system/-webview/command';
-import { createMarkdownCommandLink } from '../system/commands';
-import { Logger } from '../system/logger';
-import { capitalize } from '../system/string';
-import type { CommandContext } from './commandContext';
+import { uncommitted, uncommittedStaged } from '@gitlens/git/models/revision.js';
+import { Logger } from '@gitlens/utils/logger.js';
+import { capitalize } from '@gitlens/utils/string.js';
+import type { Container } from '../container.js';
+import { showGenericErrorMessage } from '../messages.js';
+import { command } from '../system/-webview/command.js';
+import { createMarkdownCommandLink } from '../system/commands.js';
+import type { CommandContext } from './commandContext.js';
 import {
 	isCommandContextViewNodeHasRepoPath,
 	isCommandContextViewNodeHasRepository,
 	isCommandContextViewNodeHasWorktree,
-} from './commandContext.utils';
-import type { ExplainBaseArgs } from './explainBase';
-import { ExplainCommandBase } from './explainBase';
+} from './commandContext.utils.js';
+import type { ExplainBaseArgs } from './explainBase.js';
+import { ExplainCommandBase } from './explainBase.js';
 
 export interface ExplainWipCommandArgs extends ExplainBaseArgs {
 	staged?: boolean;
+	prompt?: string;
 }
 
 @command()
@@ -38,15 +39,15 @@ export class ExplainWipCommand extends ExplainCommandBase {
 			args = { ...args };
 			args.repoPath = context.node.worktree.repoPath;
 			args.worktreePath = context.node.worktree.path;
-			args.source = args.source ?? { source: 'view', type: 'wip' };
+			args.source = args.source ?? { source: 'view', context: { type: 'wip' } };
 		} else if (isCommandContextViewNodeHasRepository(context)) {
 			args = { ...args };
 			args.repoPath = context.node.repo.path;
-			args.source = args.source ?? { source: 'view', type: 'wip' };
+			args.source = args.source ?? { source: 'view', context: { type: 'wip' } };
 		} else if (isCommandContextViewNodeHasRepoPath(context)) {
 			args = { ...args };
 			args.repoPath = context.node.repoPath;
-			args.source = args.source ?? { source: 'view', type: 'wip' };
+			args.source = args.source ?? { source: 'view', context: { type: 'wip' } };
 		}
 
 		return this.execute(context.editor, context.uri, args);
@@ -94,15 +95,16 @@ export class ExplainWipCommand extends ExplainCommandBase {
 			}
 
 			// Call the AI service to explain the changes
-			const result = await this.container.ai.explainChanges(
+			const result = await this.container.ai.actions.explainChanges(
 				{
 					diff: diff.contents,
 					message: `${capitalize(label)} changes in ${repoName}`,
+					instructions: args.prompt,
 				},
 				{
 					...args.source,
 					source: args.source?.source ?? 'commandPalette',
-					type: 'wip',
+					context: { type: 'wip' },
 				},
 				{
 					progress: {
@@ -119,7 +121,8 @@ export class ExplainWipCommand extends ExplainCommandBase {
 				return;
 			}
 
-			this.openDocument(result, `/explain/wip/${svc.path}/${result.model.id}`, {
+			const { promise, model } = result;
+			this.openDocument(promise, `/explain/wip/${svc.path}/${model.id}`, model, 'explain-wip', {
 				header: {
 					title: `${capitalize(label)} Changes Summary`,
 					subtitle: `${capitalize(label)} Changes (${repoName})`,

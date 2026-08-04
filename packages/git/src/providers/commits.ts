@@ -1,0 +1,174 @@
+import type { Uri } from '@gitlens/utils/uri.js';
+import type { GitCommit, GitStashCommit } from '../models/commit.js';
+import type { GitDiffFilter } from '../models/diff.js';
+import type { GitFileChange } from '../models/fileChange.js';
+import type { GitLog } from '../models/log.js';
+import type { GitReflog } from '../models/reflog.js';
+import type { GitRevisionRange } from '../models/revision.js';
+import type { SearchQuery } from '../models/search.js';
+import type { CommitSignature, SshSignedCommit } from '../models/signature.js';
+import type { GitUser } from '../models/user.js';
+import type { GitCommandPriority } from '../run.types.js';
+import type { DiffRange } from './types.js';
+
+export interface LeftRightCommitCountResult {
+	left: number;
+	right: number;
+}
+
+export interface SearchCommitsResult {
+	readonly search: SearchQuery;
+	readonly log: GitLog | undefined;
+}
+
+interface GitLogOptionsBase {
+	cursor?: string;
+	limit?: number;
+	ordering?: 'date' | 'author-date' | 'topo' | null;
+	/** Similarity threshold for rename detection (0-100). `null` means use Git's default. */
+	similarityThreshold?: number | null;
+}
+
+export interface GitLogOptions extends GitLogOptionsBase {
+	all?: boolean;
+	authors?: GitUser[];
+	/** Whether to include file details in commit results. Defaults to `true`. */
+	includeFiles?: boolean;
+	merges?: boolean | 'first-parent';
+	since?: number | string;
+	stashes?: boolean | Map<string, GitStashCommit>;
+	until?: number | string;
+}
+
+export interface GitLogForPathOptions extends Omit<GitLogOptions, 'stashes'> {
+	filters?: GitDiffFilter[];
+	isFolder?: boolean;
+	range?: DiffRange;
+	renames?: boolean;
+}
+
+export interface GitLogShasOptions extends GitLogOptionsBase {
+	all?: boolean;
+	authors?: GitUser[];
+	merges?: boolean | 'first-parent';
+	pathOrUri?: string | Uri;
+	reverse?: boolean;
+	since?: number | string;
+}
+
+export interface GitSearchCommitsOptions extends GitLogOptionsBase {
+	skip?: number;
+	/** Telemetry source metadata — passed by callers, ignored by library implementations. */
+	source?: { source: string; detail?: string };
+}
+
+export interface IncomingActivityOptions extends GitLogOptionsBase {
+	all?: boolean;
+	branch?: string;
+	skip?: number;
+}
+
+export interface GitCommitReachability {
+	readonly partial?: boolean;
+	readonly refs: (
+		| { readonly refType: 'branch'; readonly name: string; readonly remote: boolean; readonly current?: boolean }
+		| { readonly refType: 'tag'; readonly name: string; readonly current?: never }
+	)[];
+}
+
+export interface GitCommitsSubProvider {
+	getCommit(repoPath: string, rev: string, cancellation?: AbortSignal): Promise<GitCommit | undefined>;
+	getCommitCount(repoPath: string, rev: string, cancellation?: AbortSignal): Promise<number | undefined>;
+	/** Whether `rev` has any commits not reachable from any remote-tracking ref (i.e. unpushed/unpublished).
+	 *  Cheap early-exit probe (`rev-list --not --remotes <rev> -n 1`) — it does NOT count them. Returns
+	 *  `undefined` when it can't be determined. */
+	hasUnpublishedCommits?(repoPath: string, rev: string, cancellation?: AbortSignal): Promise<boolean | undefined>;
+	/** Batched form of {@link hasUnpublishedCommits}: returns the subset of `shas` with commits not reachable
+	 *  from any remote-tracking ref, in ONE walk rather than a spawn per sha. Pass tips from any worktrees of
+	 *  the same repo — the object store and `refs/remotes` are shared, so a single `repoPath` covers them all.
+	 *  Callers should skip this when the repo has no remotes (every local commit would qualify). */
+	filterUnpublishedShas?(
+		repoPath: string,
+		shas: readonly string[],
+		options?: { priority?: GitCommandPriority },
+		cancellation?: AbortSignal,
+	): Promise<Set<string>>;
+	/** Cheap author/committer date lookup for a single revision. Skips the full commit parse (no files, parents, or message) — use when only the dates are needed. Pass a full SHA so caching stays correct (commits are immutable; refs are not). */
+	getCommitDates?(
+		repoPath: string,
+		rev: string,
+		cancellation?: AbortSignal,
+	): Promise<{ authorDate: Date; committerDate: Date } | undefined>;
+	getCommitFiles(repoPath: string, rev: string, cancellation?: AbortSignal): Promise<GitFileChange[]>;
+	getCommitForFile(
+		repoPath: string,
+		pathOrUri: string | Uri,
+		rev?: string,
+		options?: { firstIfNotFound?: boolean },
+		cancellation?: AbortSignal,
+	): Promise<GitCommit | undefined>;
+	getIncomingActivity?(
+		repoPath: string,
+		options?: IncomingActivityOptions,
+		cancellation?: AbortSignal,
+	): Promise<GitReflog | undefined>;
+	getInitialCommitSha?(repoPath: string, cancellation?: AbortSignal): Promise<string | undefined>;
+	getLeftRightCommitCount(
+		repoPath: string,
+		range: GitRevisionRange,
+		options?: { authors?: GitUser[]; excludeMerges?: boolean },
+		cancellation?: AbortSignal,
+	): Promise<LeftRightCommitCountResult | undefined>;
+	getLog(
+		repoPath: string,
+		rev?: string,
+		options?: GitLogOptions,
+		cancellation?: AbortSignal,
+	): Promise<GitLog | undefined>;
+	getLogForPath(
+		repoPath: string,
+		pathOrUri: string | Uri,
+		rev?: string,
+		options?: GitLogForPathOptions,
+		cancellation?: AbortSignal,
+	): Promise<GitLog | undefined>;
+	getLogShas(
+		repoPath: string,
+		rev?: string,
+		options?: GitLogShasOptions,
+		cancellation?: AbortSignal,
+	): Promise<Iterable<string>>;
+	getOldestUnpushedShaForPath(
+		repoPath: string,
+		pathOrUri: string | Uri,
+		cancellation?: AbortSignal,
+	): Promise<string | undefined>;
+	isAncestorOf(repoPath: string, rev1: string, rev2: string, cancellation?: AbortSignal): Promise<boolean>;
+	hasCommitBeenPushed(repoPath: string, rev: string, cancellation?: AbortSignal): Promise<boolean>;
+	searchCommits(
+		repoPath: string,
+		search: SearchQuery,
+		options?: GitSearchCommitsOptions,
+		cancellation?: AbortSignal,
+	): Promise<SearchCommitsResult>;
+
+	createUnreachableCommitFromTree?(
+		repoPath: string,
+		tree: string,
+		parent: string,
+		message: string,
+		cancellation?: AbortSignal,
+	): Promise<string>;
+	getCommitReachability?(
+		repoPath: string,
+		rev: string,
+		cancellation?: AbortSignal,
+	): Promise<GitCommitReachability | undefined>;
+	getCommitSignature?(repoPath: string, sha: string): Promise<CommitSignature | undefined>;
+	/**
+	 * For the given commits that are SSH-signed, extracts the signer's full SSH public key and raw committer identity,
+	 * reading all commit objects in a single batched `git` invocation. Keyed by commit SHA (unsigned commits omitted).
+	 */
+	getCommitsSshSigners?(repoPath: string, shas: string[]): Promise<Map<string, SshSignedCommit>>;
+	isCommitSigned?(repoPath: string, sha: string): Promise<boolean>;
+}

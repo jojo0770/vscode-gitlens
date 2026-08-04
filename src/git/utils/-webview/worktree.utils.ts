@@ -1,12 +1,16 @@
-import type { CancellationToken } from 'vscode';
-import { filterMap } from '../../../system/iterable';
-import { PageableResult } from '../../../system/paging';
-import type { GitBranch } from '../../models/branch';
-import type { Repository } from '../../models/repository';
-import type { GitWorktree } from '../../models/worktree';
+import type { GitBranch } from '@gitlens/git/models/branch.js';
+import type { GitStatus } from '@gitlens/git/models/status.js';
+import type { GitWorktree } from '@gitlens/git/models/worktree.js';
+import type { GitCommandPriority } from '@gitlens/git/run.types.js';
+import { filterMap } from '@gitlens/utils/iterable.js';
+import { PageableResult } from '@gitlens/utils/paging.js';
+import { normalizePath } from '@gitlens/utils/path.js';
+import { getSettledValue } from '@gitlens/utils/promise.js';
+import type { Container } from '../../../container.js';
+import type { GlRepository } from '../../models/repository.js';
 
 export function getOpenedWorktreesByBranch(
-	worktreesByBranch: Map<string, GitWorktree> | undefined,
+	worktreesByBranch: ReadonlyMap<string, GitWorktree> | undefined,
 ): Set<string> | undefined {
 	let openedWorktreesByBranch: Set<string> | undefined;
 	if (worktreesByBranch?.size) {
@@ -19,7 +23,7 @@ export function getOpenedWorktreesByBranch(
 }
 
 export async function getWorktreeForBranch(
-	repo: Repository,
+	repo: GlRepository,
 	branchName: string,
 	upstreamNames?: string | string[],
 	worktrees?: GitWorktree[],
@@ -71,15 +75,104 @@ export async function getWorktreeForBranch(
 	return undefined;
 }
 
+/**
+ * Returns the worktrees — other than the one at `repoPath` — whose HEAD reaches `sha`, i.e. the
+ * worktrees that hold a working copy of the commit's files on a branch that contains the commit.
+ * Used to surface the "(Worktree)" file actions for commits whose branch lives in a sibling worktree.
+ */
+export async function getReachableWorktrees(
+	container: Container,
+	repoPath: string,
+	sha: string,
+	cancellation?: AbortSignal,
+): Promise<GitWorktree[]> {
+	const worktrees = await container.git.getRepository(repoPath)?.git.worktrees?.getWorktrees(cancellation);
+	if (worktrees == null || worktrees.length <= 1) return [];
+
+	const normalizedRepoPath = normalizePath(repoPath);
+	const candidates = worktrees.filter(
+		wt => wt.type !== 'bare' && wt.sha != null && normalizePath(wt.path) !== normalizedRepoPath,
+	);
+	if (!candidates.length) return [];
+
+	const svc = container.git.getRepositoryService(repoPath);
+
+	// A worktree's checked-out branch tip IS its HEAD, so the set of refs containing the commit answers
+	// every branch worktree at once — one cached `for-each-ref --contains` instead of a `merge-base
+	// --is-ancestor` subprocess per worktree, which doesn't scale (a repo with ~100 worktrees spent
+	// longer spawning those than the rest of the details fetch took). Detached worktrees carry no branch,
+	// so they still need the per-worktree check — there are rarely any.
+	// Trust the ref set only when it's non-empty: `for-each-ref` runs with `errors: 'ignore'`, so a FAILED
+	// command resolves with empty stdout instead of throwing — an empty set is indistinguishable from a git
+	// failure, and reporting a reachable commit as unreachable would silently drop the "(Worktree)" actions.
+	// Falling back costs nothing in practice: a commit contained by no ref at all is rare (dangling or
+	// stash-only), whereas every commit in the graph is contained by at least its own branch.
+	const reachability = await svc.commits.getCommitReachability?.(sha, cancellation);
+	if (reachability?.refs.length) {
+		const reachableBranches = new Set(
+			reachability.refs.filter(r => r.refType === 'branch' && !r.remote).map(r => r.name),
+		);
+
+		const detached = candidates.filter(wt => wt.branch == null);
+		const reachableDetached = new Set<GitWorktree>();
+		if (detached.length) {
+			const results = await Promise.allSettled(
+				detached.map(wt => svc.commits.isAncestorOf(sha, wt.sha!, cancellation)),
+			);
+			for (const [i, wt] of detached.entries()) {
+				if (getSettledValue(results[i]) === true) {
+					reachableDetached.add(wt);
+				}
+			}
+		}
+
+		return candidates.filter(wt =>
+			wt.branch != null ? reachableBranches.has(wt.branch.name) : reachableDetached.has(wt),
+		);
+	}
+
+	// No usable ref set (unsupported provider, failed lookup, or a commit no ref contains) — fall back.
+	const results = await Promise.allSettled(
+		candidates.map(wt => svc.commits.isAncestorOf(sha, wt.sha!, cancellation)),
+	);
+	return candidates.filter((_wt, i) => getSettledValue(results[i]) === true);
+}
+
+/**
+ * Names of the branches checked out in worktrees other than `repoPath` — the git-free counterpart to
+ * {@link getReachableWorktrees}. A checked-out branch's tip IS that worktree's HEAD, so a commit whose
+ * reachable refs include one of these branches is necessarily an ancestor of that worktree's HEAD.
+ * Detached worktrees have no branch and so can't be answered this way (they need the git check).
+ */
+export function getSiblingWorktreeBranches(
+	worktrees: GitWorktree[] | undefined,
+	repoPath: string,
+): string[] | undefined {
+	if (worktrees == null || worktrees.length <= 1) return undefined;
+
+	const normalizedRepoPath = normalizePath(repoPath);
+
+	const branches: string[] = [];
+	for (const wt of worktrees) {
+		// Mirror `getReachableWorktrees`' candidate filter (incl. `sha != null`, which drops prunable
+		// worktrees) — otherwise the two can disagree about which worktrees are even eligible.
+		if (wt.type !== 'branch' || wt.branch == null || wt.sha == null) continue;
+		if (normalizePath(wt.path) === normalizedRepoPath) continue;
+
+		branches.push(wt.branch.name);
+	}
+	return branches.length ? branches : undefined;
+}
+
 export async function getWorktreesByBranch(
-	repos: Repository | Repository[] | undefined,
+	repos: GlRepository | GlRepository[] | undefined,
 	options?: { includeDefault?: boolean },
-	cancellation?: CancellationToken,
+	cancellation?: AbortSignal,
 ): Promise<Map<string, GitWorktree>> {
 	const worktreesByBranch = new Map<string, GitWorktree>();
 	if (repos == null) return worktreesByBranch;
 
-	async function addWorktrees(repo: Repository) {
+	async function addWorktrees(repo: GlRepository) {
 		if (repo.git.worktrees == null) return;
 
 		groupWorktreesByBranch(await repo.git.worktrees.getWorktrees(cancellation), {
@@ -111,4 +204,24 @@ export function groupWorktreesByBranch(
 	}
 
 	return worktreesByBranch;
+}
+
+export async function getWorktreeStatus(container: Container, worktree: GitWorktree): Promise<GitStatus | undefined> {
+	if (worktree.type === 'bare') return undefined;
+	return container.git.getRepositoryService(worktree.uri.fsPath).status.getStatus();
+}
+
+export async function getWorktreeHasWorkingChanges(
+	container: Container,
+	worktree: GitWorktree,
+	options?: {
+		staged?: boolean;
+		unstaged?: boolean;
+		untracked?: boolean;
+		throwOnError?: boolean;
+		priority?: GitCommandPriority;
+	},
+): Promise<boolean | undefined> {
+	if (worktree.type === 'bare') return undefined;
+	return container.git.getRepositoryService(worktree.uri.fsPath).status?.hasWorkingChanges(options);
 }

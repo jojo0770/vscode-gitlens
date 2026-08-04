@@ -1,20 +1,20 @@
 import type { TextEditor } from 'vscode';
 import { Disposable, TreeItem, TreeItemCollapsibleState, window, workspace } from 'vscode';
-import type { RepositoriesChangeEvent } from '../../git/gitProviderService';
-import { GitUri, unknownGitUri } from '../../git/gitUri';
-import { gate } from '../../system/decorators/-webview/gate';
-import { debug } from '../../system/decorators/log';
-import { weakEvent } from '../../system/event';
-import { szudzikPairing } from '../../system/function';
-import { debounce } from '../../system/function/debounce';
-import { Logger } from '../../system/logger';
-import type { ViewsWithRepositoriesNode } from '../viewBase';
-import { createViewDecorationUri } from '../viewDecorationProvider';
-import { SubscribeableViewNode } from './abstract/subscribeableViewNode';
-import type { ViewNode } from './abstract/viewNode';
-import { ContextValues } from './abstract/viewNode';
-import { MessageNode } from './common';
-import { RepositoryNode } from './repositoryNode';
+import { debounce } from '@gitlens/utils/debounce.js';
+import { trace } from '@gitlens/utils/decorators/log.js';
+import { weakEvent } from '@gitlens/utils/event.js';
+import { szudzikPairing } from '@gitlens/utils/function.js';
+import { Logger } from '@gitlens/utils/logger.js';
+import type { RepositoriesChangeEvent } from '../../git/gitProviderService.js';
+import { GitUri, unknownGitUri } from '../../git/gitUri.js';
+import { gate } from '../../system/decorators/gate.js';
+import type { ViewsWithRepositoriesNode } from '../viewBase.js';
+import { createViewDecorationUri } from '../viewDecorationProvider.js';
+import { SubscribeableViewNode } from './abstract/subscribeableViewNode.js';
+import type { ViewNode } from './abstract/viewNode.js';
+import { ContextValues } from './abstract/viewNode.js';
+import { MessageNode } from './common.js';
+import { RepositoryNode } from './repositoryNode.js';
 
 export class RepositoriesNode extends SubscribeableViewNode<
 	'repositories',
@@ -68,7 +68,7 @@ export class RepositoriesNode extends SubscribeableViewNode<
 	}
 
 	@gate()
-	@debug()
+	@trace()
 	override async refresh(reset: boolean = false): Promise<void> {
 		const hasChildren = this.children != null;
 		await super.refresh(reset);
@@ -106,7 +106,7 @@ export class RepositoriesNode extends SubscribeableViewNode<
 		void this.ensureSubscription();
 	}
 
-	@debug()
+	@trace()
 	protected subscribe(): Disposable {
 		const subscriptions = [
 			weakEvent(this.view.container.git.onDidChangeRepositories, this.onRepositoriesChanged, this),
@@ -125,7 +125,7 @@ export class RepositoriesNode extends SubscribeableViewNode<
 		return szudzikPairing(this.view.container.git.etag, this.view.container.subscription.etag);
 	}
 
-	@debug({ args: false })
+	@trace({ args: false })
 	private onActiveEditorChanged(editor: TextEditor | undefined) {
 		if (editor == null || this.children == null || this.children.length === 1) {
 			return;
@@ -133,7 +133,7 @@ export class RepositoriesNode extends SubscribeableViewNode<
 
 		try {
 			const uri = editor.document.uri;
-			const node = this.children.find(n => n instanceof RepositoryNode && n.repo.containsUri(uri)) as
+			const node = this.children.find(n => n instanceof RepositoryNode && n.repo.git.containsUri(uri)) as
 				| RepositoryNode
 				| undefined;
 			if (node == null) return;
@@ -152,7 +152,7 @@ export class RepositoriesNode extends SubscribeableViewNode<
 		}
 	}
 
-	@debug()
+	@trace()
 	private onRepositoriesChanged(_e: RepositoriesChangeEvent) {
 		void this.triggerChange(true);
 	}

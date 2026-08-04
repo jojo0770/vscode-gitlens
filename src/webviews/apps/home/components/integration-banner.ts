@@ -1,22 +1,26 @@
+import { SignalWatcher } from '@lit-labs/signals';
 import { consume } from '@lit/context';
 import { css, html, LitElement, nothing } from 'lit';
 import { customElement, query, state } from 'lit/decorators.js';
-import type { ConnectCloudIntegrationsCommandArgs } from '../../../../commands/cloudIntegrations';
-import { createCommandLink } from '../../../../system/commands';
-import type { State } from '../../../home/protocol';
-import { CollapseSectionCommand } from '../../../home/protocol';
-import type { GlButton } from '../../shared/components/button';
-import { ipcContext } from '../../shared/contexts/ipc';
-import type { HostIpc } from '../../shared/ipc';
-import { stateContext } from '../context';
-import '../../shared/components/button';
-import '../../shared/components/button-container';
-import '../../shared/components/card/card';
+import type { ConnectCloudIntegrationsCommandArgs } from '../../../../commands/cloudIntegrations.js';
+import { createCommandLink } from '../../../../system/commands.js';
+import type { GlButton } from '../../shared/components/button.js';
+import type { IntegrationsState } from '../../shared/contexts/integrations.js';
+import { integrationsContext } from '../../shared/contexts/integrations.js';
+import type { OnboardingState } from '../../shared/contexts/onboarding.js';
+import { onboardingContext } from '../../shared/contexts/onboarding.js';
+import '../../shared/components/button.js';
+import '../../shared/components/button-container.js';
+import '../../shared/components/card/card.js';
 
-export const integrationBannerTagName = 'gl-integration-banner';
+declare global {
+	interface HTMLElementTagNameMap {
+		['gl-integration-banner']: GlIntegrationBanner;
+	}
+}
 
-@customElement(integrationBannerTagName)
-export class GlIntegrationBanner extends LitElement {
+@customElement('gl-integration-banner')
+export class GlIntegrationBanner extends SignalWatcher(LitElement) {
 	static override shadowRootOptions: ShadowRootInit = {
 		...LitElement.shadowRootOptions,
 		delegatesFocus: true,
@@ -25,18 +29,16 @@ export class GlIntegrationBanner extends LitElement {
 	static override styles = [
 		css`
 			gl-card::part(base) {
-				margin-block-end: 1.2rem;
+				margin-block-end: var(--gl-space-12);
 			}
 		`,
 	];
 
-	@consume<State>({ context: stateContext, subscribe: true })
-	@state()
-	private _state!: State;
+	@consume({ context: integrationsContext })
+	private _integrations!: IntegrationsState;
 
-	@consume<HostIpc>({ context: ipcContext, subscribe: true })
-	@state()
-	private _ipc!: HostIpc;
+	@consume({ context: onboardingContext })
+	private _onboarding!: OnboardingState;
 
 	@state()
 	private closed = false;
@@ -45,7 +47,11 @@ export class GlIntegrationBanner extends LitElement {
 	private _button!: GlButton;
 
 	override render(): unknown {
-		if (this.closed || this._state.hasAnyIntegrationConnected || this._state.integrationBannerCollapsed) {
+		if (
+			this.closed ||
+			this._integrations.hasAnyIntegrationConnected.get() ||
+			this._onboarding.banners.integrationBanner
+		) {
 			return nothing;
 		}
 
@@ -77,19 +83,10 @@ export class GlIntegrationBanner extends LitElement {
 	private onClose() {
 		this.closed = true;
 
-		this._ipc.sendCommand(CollapseSectionCommand, {
-			section: 'integrationBanner',
-			collapsed: true,
-		});
+		this._onboarding.dismiss('integrationBanner');
 	}
 
 	override focus(): void {
 		this._button.focus();
-	}
-}
-
-declare global {
-	interface HTMLElementTagNameMap {
-		[integrationBannerTagName]: GlIntegrationBanner;
 	}
 }

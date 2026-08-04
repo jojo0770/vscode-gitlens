@@ -1,24 +1,24 @@
 import type { TreeCheckboxChangeEvent } from 'vscode';
 import { Disposable, ThemeIcon, TreeItem, TreeItemCheckboxState, TreeItemCollapsibleState, window } from 'vscode';
-import { md5 } from '@env/crypto';
-import type { StoredNamedRef } from '../../constants.storage';
-import type { FilesComparison } from '../../git/actions/commit';
-import { GitUri } from '../../git/gitUri';
-import type { GitUser } from '../../git/models/user';
-import type { CommitsQueryResults, FilesQueryResults } from '../../git/queryResults';
-import { getAheadBehindFilesQuery, getCommitsQuery, getFilesQuery } from '../../git/queryResults';
-import { createRevisionRange, shortenRevision } from '../../git/utils/revision.utils';
-import { gate } from '../../system/decorators/-webview/gate';
-import { debug, log } from '../../system/decorators/log';
-import { weakEvent } from '../../system/event';
-import { pluralize } from '../../system/string';
-import type { SearchAndCompareView } from '../searchAndCompareView';
-import type { View } from '../viewBase';
-import { SubscribeableViewNode } from './abstract/subscribeableViewNode';
-import type { ViewNode } from './abstract/viewNode';
-import { ContextValues, getViewNodeId } from './abstract/viewNode';
-import { ResultsCommitsNode } from './resultsCommitsNode';
-import { ResultsFilesNode } from './resultsFilesNode';
+import type { GitUser } from '@gitlens/git/models/user.js';
+import { createRevisionRange, shortenRevision } from '@gitlens/git/utils/revision.utils.js';
+import { md5 } from '@gitlens/utils/crypto.js';
+import { debug, trace } from '@gitlens/utils/decorators/log.js';
+import { weakEvent } from '@gitlens/utils/event.js';
+import { pluralize } from '@gitlens/utils/string.js';
+import type { StoredNamedRef } from '../../constants.storage.js';
+import type { FilesComparison } from '../../git/actions/commit.js';
+import { GitUri } from '../../git/gitUri.js';
+import type { CommitsQueryResults, FilesQueryResults } from '../../git/queryResults.js';
+import { getAheadBehindFilesQuery, getCommitsQuery, getFilesQuery } from '../../git/queryResults.js';
+import { gate } from '../../system/decorators/gate.js';
+import type { SearchAndCompareView } from '../searchAndCompareView.js';
+import type { View } from '../viewBase.js';
+import { SubscribeableViewNode } from './abstract/subscribeableViewNode.js';
+import type { ViewNode } from './abstract/viewNode.js';
+import { ContextValues, getViewNodeId } from './abstract/viewNode.js';
+import { ResultsCommitsNode } from './resultsCommitsNode.js';
+import { ResultsFilesNode } from './resultsFilesNode.js';
 
 type State = {
 	filterCommits: GitUser[] | undefined;
@@ -42,6 +42,7 @@ export class CompareResultsNode extends SubscribeableViewNode<
 
 		this.updateContext({
 			comparisonId: `${_ref.ref}+${_compareWith.ref}`,
+			repoPath: repoPath,
 			storedComparisonId: this.getStorageId(),
 		});
 		this._uniqueId = getViewNodeId(this.type, this.context);
@@ -100,7 +101,7 @@ export class CompareResultsNode extends SubscribeableViewNode<
 		return authors;
 	}
 
-	@debug()
+	@trace()
 	protected override subscribe(): Disposable | Promise<Disposable | undefined> | undefined {
 		return Disposable.from(
 			weakEvent(this.view.onDidChangeNodesCheckedState, this.onNodesCheckedStateChanged, this),
@@ -231,7 +232,7 @@ export class CompareResultsNode extends SubscribeableViewNode<
 	}
 
 	@gate()
-	@debug()
+	@trace()
 	async getDiffRefs(): Promise<[string, string]> {
 		return Promise.resolve<[string, string]>([this._compareWith.ref, this._ref.ref]);
 	}
@@ -242,13 +243,13 @@ export class CompareResultsNode extends SubscribeableViewNode<
 		return node?.getFilesComparison();
 	}
 
-	@log()
+	@debug()
 	clearReviewed(): void {
 		resetComparisonCheckedFiles(this.view, this.getStorageId());
 		void this.store().catch();
 	}
 
-	@log()
+	@debug()
 	async swap(): Promise<void> {
 		if (this._ref.ref === '') {
 			void window.showErrorMessage('Cannot swap comparisons with the working tree');
@@ -267,7 +268,7 @@ export class CompareResultsNode extends SubscribeableViewNode<
 
 		this.children = undefined;
 		this.view.triggerNodeChange(this.parent);
-		queueMicrotask(() => this.view.reveal(this, { expand: true, focus: true, select: true }));
+		void this.view.reveal(this, { expand: true, focus: true, select: true });
 	}
 
 	private async getAheadFilesQuery(): Promise<FilesQueryResults> {

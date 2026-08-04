@@ -1,10 +1,11 @@
+import { exhaustiveArray } from '@gitlens/utils/array.js';
+
 export const launchpadActionCategories = [
 	'mergeable',
 	'unassigned-reviewers',
 	'failed-checks',
 	'conflicts',
 	'needs-my-review',
-	'code-suggestions',
 	'changes-requested',
 	'reviewer-commented',
 	'waiting-for-review',
@@ -27,12 +28,12 @@ export const launchpadGroups = [
 ] as const;
 export type LaunchpadGroup = (typeof launchpadGroups)[number];
 
-export const launchpadPriorityGroups = [
+export const launchpadPriorityGroups = exhaustiveArray<LaunchpadPriorityGroup>()([
 	'mergeable',
 	'blocked',
 	'follow-up',
 	'needs-review',
-] satisfies readonly LaunchpadPriorityGroup[] as readonly LaunchpadGroup[];
+]) as readonly LaunchpadGroup[];
 export type LaunchpadPriorityGroup = Extract<LaunchpadGroup, 'mergeable' | 'blocked' | 'follow-up' | 'needs-review'>;
 
 export const launchpadGroupIconMap = new Map<LaunchpadGroup, `$(${string})`>([
@@ -67,7 +68,6 @@ export const launchpadCategoryToGroupMap = new Map<LaunchpadActionCategory, Laun
 	['failed-checks', 'blocked'],
 	['unassigned-reviewers', 'blocked'],
 	['needs-my-review', 'needs-review'],
-	['code-suggestions', 'follow-up'],
 	['changes-requested', 'follow-up'],
 	['reviewer-commented', 'follow-up'],
 	['waiting-for-review', 'waiting-for-review'],
@@ -93,17 +93,11 @@ export type LaunchpadAction =
 	| 'open'
 	| 'soft-open'
 	| 'switch'
-	| 'switch-and-code-suggest'
 	| 'open-worktree'
-	| 'code-suggest'
+	| 'start-review'
 	| 'show-overview'
 	| 'open-changes'
 	| 'open-in-graph';
-
-export type LaunchpadTargetAction = {
-	action: 'open-suggestion';
-	target: string;
-};
 
 export const prActionsMap = new Map<LaunchpadActionCategory, LaunchpadAction[]>([
 	['mergeable', ['merge']],
@@ -111,7 +105,6 @@ export const prActionsMap = new Map<LaunchpadActionCategory, LaunchpadAction[]>(
 	['failed-checks', ['open']],
 	['conflicts', ['open']],
 	['needs-my-review', ['open']],
-	['code-suggestions', ['open']],
 	['changes-requested', ['open']],
 	['reviewer-commented', ['open']],
 	['waiting-for-review', ['open']],
@@ -125,7 +118,6 @@ export const actionGroupMap = new Map<LaunchpadActionCategory, string[]>([
 	['failed-checks', ['Failed Checks', 'You need to resolve the failing checks']],
 	['conflicts', ['Resolve Conflicts', 'You need to resolve merge conflicts']],
 	['needs-my-review', ['Needs Your Review', `\${author} requested your review`]],
-	['code-suggestions', ['Code Suggestions', 'Code suggestions have been made on this pull request']],
 	['changes-requested', ['Changes Requested', 'Reviewers requested changes before this can be merged']],
 	['reviewer-commented', ['Reviewers Commented', 'Reviewers have commented on this pull request']],
 	['waiting-for-review', ['Waiting for Review', 'Waiting for reviewers to approve this pull request']],

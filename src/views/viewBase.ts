@@ -14,6 +14,15 @@ import type {
 	ViewBadge,
 } from 'vscode';
 import { EventEmitter, MarkdownString, TreeItemCollapsibleState, window } from 'vscode';
+import { areEqual } from '@gitlens/utils/array.js';
+import { debounce } from '@gitlens/utils/debounce.js';
+import { debug, trace } from '@gitlens/utils/decorators/log.js';
+import { once } from '@gitlens/utils/event.js';
+import { first } from '@gitlens/utils/iterable.js';
+import type { Lazy } from '@gitlens/utils/lazy.js';
+import { Logger } from '@gitlens/utils/logger.js';
+import { getScopedLogger } from '@gitlens/utils/logger.scoped.js';
+import { cancellable, defer, isPromise, PromiseCancelledError } from '@gitlens/utils/promise.js';
 import type {
 	BranchesViewConfig,
 	CommitsViewConfig,
@@ -31,41 +40,68 @@ import type {
 	ViewsCommonConfig,
 	ViewsConfigKeys,
 	WorktreesViewConfig,
-} from '../config';
-import { viewsCommonConfigKeys, viewsConfigKeys } from '../config';
-import type { TreeViewCommandSuffixesByViewType } from '../constants.commands';
-import type { TrackedUsageFeatures } from '../constants.telemetry';
-import type { TreeViewIds, TreeViewTypes, WebviewViewTypes } from '../constants.views';
-import type { Container } from '../container';
-import { executeCoreCommand } from '../system/-webview/command';
-import { configuration } from '../system/-webview/configuration';
-import { getViewFocusCommand } from '../system/-webview/vscode/views';
-import { debug, log } from '../system/decorators/log';
-import { once } from '../system/event';
-import { debounce } from '../system/function/debounce';
-import { first } from '../system/iterable';
-import type { Lazy } from '../system/lazy';
-import { Logger } from '../system/logger';
-import { getLogScope } from '../system/logger.scope';
-import { cancellable, defer, isPromise } from '../system/promise';
-import type { BranchesView } from './branchesView';
-import type { CommitsView } from './commitsView';
-import type { ContributorsView } from './contributorsView';
-import type { DraftsView } from './draftsView';
-import type { FileHistoryView } from './fileHistoryView';
-import type { LaunchpadView } from './launchpadView';
-import type { LineHistoryView } from './lineHistoryView';
-import type { PageableViewNode, ViewNode } from './nodes/abstract/viewNode';
-import { isPageableViewNode } from './nodes/abstract/viewNode';
-import { GroupedHeaderNode } from './nodes/common';
-import type { PullRequestView } from './pullRequestView';
-import type { RemotesView } from './remotesView';
-import type { RepositoriesView } from './repositoriesView';
-import type { SearchAndCompareView } from './searchAndCompareView';
-import type { StashesView } from './stashesView';
-import type { TagsView } from './tagsView';
-import type { WorkspacesView } from './workspacesView';
-import type { WorktreesView } from './worktreesView';
+} from '../config.js';
+import { viewsCommonConfigKeys, viewsConfigKeys } from '../config.js';
+import type { GlTreeViewCommandSuffixesByViewType } from '../constants.commands.js';
+import type { RepositoryFilterValue } from '../constants.storage.js';
+import type { TrackedUsageFeatures } from '../constants.telemetry.js';
+import type { TreeViewIds, TreeViewTypes, WebviewViewTypes } from '../constants.views.js';
+import type { Container } from '../container.js';
+import type { GlRepository } from '../git/models/repository.js';
+import { groupRepositories } from '../git/utils/-webview/repository.utils.js';
+import { sortRepositories, sortRepositoriesGrouped } from '../git/utils/-webview/sorting.js';
+import { createDirectiveQuickPickItem, Directive } from '../quickpicks/items/directive.js';
+import { showRepositoriesPicker2 } from '../quickpicks/repositoryPicker.js';
+import { toAbortSignal } from '../system/-webview/cancellation.js';
+import { executeCoreCommand } from '../system/-webview/command.js';
+import { configuration } from '../system/-webview/configuration.js';
+import type { StorageChangeEvent } from '../system/-webview/storage.js';
+import { getViewFocusCommand } from '../system/-webview/vscode/views.js';
+import type { BranchesView } from './branchesView.js';
+import type { CommitsView } from './commitsView.js';
+import type { ContributorsView } from './contributorsView.js';
+import type { DraftsView } from './draftsView.js';
+import type { FileHistoryView } from './fileHistoryView.js';
+import type { LaunchpadView } from './launchpadView.js';
+import type { LineHistoryView } from './lineHistoryView.js';
+import type { PageableViewNode, ViewNode } from './nodes/abstract/viewNode.js';
+import { isPageableViewNode } from './nodes/abstract/viewNode.js';
+import { GroupedHeaderNode } from './nodes/common.js';
+import type { PullRequestView } from './pullRequestView.js';
+import type { RemotesView } from './remotesView.js';
+import type { RepositoriesView } from './repositoriesView.js';
+import type { SearchAndCompareView } from './searchAndCompareView.js';
+import type { StashesView } from './stashesView.js';
+import type { TagsView } from './tagsView.js';
+import type { WorkspacesView } from './workspacesView.js';
+import type { WorktreesView } from './worktreesView.js';
+
+/**
+ * VS Code debounces onDidChangeTreeData events for 200ms before processing.
+ * We need to wait for this debounce to complete before revealing nodes,
+ * otherwise the reveal and refresh race to register the same node IDs.
+ * See: https://github.com/microsoft/vscode/issues/192055
+ */
+const onDidChangeTreeDebounceMs = 200;
+const revealBufferMs = 50; // Safety margin for timer drift
+
+const treeViewTypesSupportsRepositoryFilter: TreeViewTypes[] = [
+	'branches',
+	'commits',
+	'contributors',
+	'remotes',
+	'stashes',
+	'tags',
+	'worktrees',
+];
+const treeViewTypesSupportsWorktreeCollapsing: TreeViewTypes[] = [
+	'branches',
+	'contributors',
+	'remotes',
+	'stashes',
+	'tags',
+	'worktrees',
+];
 
 export type View =
 	| BranchesView
@@ -125,8 +161,6 @@ export type WebviewViewByType = {
 		? CommitsView
 		: T extends 'graph'
 		? CommitsView
-		: T extends 'graphDetails'
-		? CommitsView
 		: T extends 'home'
 		? CommitsView
 		: T extends 'patchDetails'
@@ -168,24 +202,24 @@ export interface GroupedViewContext {
 }
 
 export abstract class ViewBase<
-		Type extends TreeViewTypes,
-		RootNode extends ViewNode,
-		ViewConfig extends
-			| BranchesViewConfig
-			| CommitsViewConfig
-			| ContributorsViewConfig
-			| DraftsViewConfig
-			| FileHistoryViewConfig
-			| LaunchpadViewConfig
-			| LineHistoryViewConfig
-			| PullRequestViewConfig
-			| RemotesViewConfig
-			| RepositoriesViewConfig
-			| SearchAndCompareViewConfig
-			| StashesViewConfig
-			| TagsViewConfig
-			| WorktreesViewConfig,
-	>
+	Type extends TreeViewTypes,
+	RootNode extends ViewNode,
+	ViewConfig extends
+		| BranchesViewConfig
+		| CommitsViewConfig
+		| ContributorsViewConfig
+		| DraftsViewConfig
+		| FileHistoryViewConfig
+		| LaunchpadViewConfig
+		| LineHistoryViewConfig
+		| PullRequestViewConfig
+		| RemotesViewConfig
+		| RepositoriesViewConfig
+		| SearchAndCompareViewConfig
+		| StashesViewConfig
+		| TagsViewConfig
+		| WorktreesViewConfig,
+>
 	implements TreeDataProvider<ViewNode>, Disposable
 {
 	is<T extends keyof TreeViewByType>(type: T): this is TreeViewByType[T] {
@@ -193,7 +227,7 @@ export abstract class ViewBase<
 	}
 
 	isAny<T extends (keyof TreeViewByType)[]>(...types: T): this is TreeViewByType[T[number]] {
-		return types.includes(this.type as unknown as T[number]);
+		return types.includes(this.type);
 	}
 
 	private _cancellation: CancellationToken | undefined;
@@ -208,6 +242,11 @@ export abstract class ViewBase<
 
 	get id(): TreeViewIds<Type> {
 		return `gitlens.views.${this.type}`;
+	}
+
+	private _onDidChangeRepositoryFilter = new EventEmitter<void>();
+	get onDidChangeRepositoryFilter(): Event<void> {
+		return this._onDidChangeRepositoryFilter.event;
 	}
 
 	private _onDidChangeSelection = new EventEmitter<TreeViewSelectionChangeEvent<ViewNode>>();
@@ -277,12 +316,12 @@ export abstract class ViewBase<
 				if (typeof item.tooltip === 'string') {
 					item.tooltip = `${item.tooltip}\n\n---\ncontext: ${
 						item.contextValue
-					}\nnode: ${node.toString()}\nparent: ${parent?.toString()}\nid: ${node.id}`;
+					}\nnode: ${Logger.toLoggable(node)}\nparent: ${Logger.toLoggable(parent)}\nid: ${node.id}`;
 				} else {
 					item.tooltip.appendMarkdown(
 						`\n\n---\n\ncontext: \`${
 							item.contextValue
-						}\`\\\nnode: \`${node.toString()}\` \\\nparent: \`${parent?.toString()}\` \\\nid: \`${node.id}\``,
+						}\`\\\nnode: \`${Logger.toLoggable(node)}\` \\\nparent: \`${Logger.toLoggable(parent)}\` \\\nid: \`${node.id}\``,
 					);
 				}
 			}
@@ -365,7 +404,38 @@ export abstract class ViewBase<
 		return this._nodeState;
 	}
 
+	get repositoryFilter(): RepositoryFilterValue {
+		return this.container.storage.getWorkspace(`views:${this.type}:repositoryFilter`);
+	}
+	set repositoryFilter(value: RepositoryFilterValue) {
+		const current = this.repositoryFilter;
+		if (value === current || (Array.isArray(value) && Array.isArray(current) && areEqual(value, current))) return;
+
+		for (const type of treeViewTypesSupportsRepositoryFilter) {
+			void this.container.storage.storeWorkspace(
+				`views:${type}:repositoryFilter`,
+				Array.isArray(value) ? (value.length ? value : 'all') : (value ?? 'all'),
+			);
+		}
+	}
+
 	protected get showCollapseAll(): boolean {
+		return true;
+	}
+
+	get supportsRepositoryFilter(): boolean {
+		return this.isAny(...treeViewTypesSupportsRepositoryFilter);
+	}
+
+	get supportsWorktreeCollapsing(): boolean {
+		if (
+			!this.isAny(...treeViewTypesSupportsWorktreeCollapsing) ||
+			!configuration.get('views.collapseWorktreesWhenPossible')
+		) {
+			return false;
+		}
+		if (this.is('contributors') && !configuration.get('views.contributors.showAllBranches')) return false;
+
 		return true;
 	}
 
@@ -428,9 +498,106 @@ export abstract class ViewBase<
 	}
 
 	getQualifiedCommand(
-		command: TreeViewCommandSuffixesByViewType<Type>,
-	): `gitlens.views.${Type}.${TreeViewCommandSuffixesByViewType<Type>}` {
+		command: GlTreeViewCommandSuffixesByViewType<Type>,
+	): `gitlens.views.${Type}.${GlTreeViewCommandSuffixesByViewType<Type>}` {
 		return `gitlens.views.${this.type}.${command}` as const;
+	}
+
+	getFilteredRepositories(): GlRepository[] {
+		let repos = this.container.git.openRepositories;
+
+		const filter = this.repositoryFilter;
+		if (repos.length > 1 && filter != null && filter !== 'all') {
+			if (filter === 'exclude-worktrees') {
+				const grouped = groupRepositories(repos);
+				repos = sortRepositories([...grouped.keys()]);
+				return repos;
+			}
+
+			if (filter.length) {
+				const filtered = repos.filter(r => filter.includes(r.id));
+				repos = filtered.length ? filtered : repos;
+			}
+		}
+
+		if (repos.length > 1) {
+			const grouped = groupRepositories(repos);
+			if (this.supportsWorktreeCollapsing) {
+				repos = sortRepositories([...grouped.keys()]);
+			} else {
+				repos = sortRepositoriesGrouped(grouped);
+			}
+		}
+
+		return repos;
+	}
+
+	isRepositoryFilterActive(): boolean {
+		const filter = this.repositoryFilter;
+		return Array.isArray(filter) && filter.length > 0
+			? this.container.git.openRepositories.some(r => filter.includes(r.id))
+			: false;
+	}
+
+	isRepositoryFilterExcludingWorktreesActive(): boolean {
+		return this.supportsRepositoryFilter && this.repositoryFilter === 'exclude-worktrees';
+	}
+
+	canFilterRepositories(): boolean {
+		if (!this.supportsRepositoryFilter) return false;
+
+		const { openRepositories: repos } = this.container.git;
+
+		// If there's an active filter, always allow filtering (to clear/modify it)
+		const filter = this.repositoryFilter;
+		if (filter != null && filter !== 'all') return true;
+
+		// Otherwise, only allow filtering if there's more than 1 repo/group
+		if (repos.length <= 1) return false;
+
+		if (this.supportsWorktreeCollapsing) {
+			const grouped = groupRepositories(repos);
+			if (grouped.size <= 1) return false;
+		}
+
+		return true;
+	}
+
+	async filterRepositories(): Promise<void> {
+		if (!this.supportsRepositoryFilter) return;
+
+		const { openRepositories: repos } = this.container.git;
+		const isExcludeWorktrees = this.isRepositoryFilterExcludingWorktreesActive();
+		const filter = this.repositoryFilter;
+		const isFiltered = Array.isArray(filter) && filter.length > 0;
+
+		// Get picked repos directly from filter IDs to avoid extra groupRepositories call
+		const picked = isFiltered ? repos.filter(r => filter.includes(r.id)) : undefined;
+
+		const result = await showRepositoriesPicker2(
+			this.container,
+			`Select Repositories or Worktrees to Show`,
+			`Choose which repositories or worktrees to show`,
+			repos,
+			{
+				additionalItems: [
+					createDirectiveQuickPickItem(Directive.ReposAll, !isFiltered && !isExcludeWorktrees),
+					createDirectiveQuickPickItem(Directive.ReposAllExceptWorktrees, isExcludeWorktrees),
+				],
+				picked: picked,
+			},
+		);
+
+		// Only update filter if user made a selection (not cancelled)
+		// Note: No explicit triggerNodeChange() needed - the storage change event
+		// already triggers view refresh via onDidChangeRepositoryFilter subscription
+		if (result.directive === Directive.ReposAll) {
+			this.repositoryFilter = 'all';
+		} else if (result.directive === Directive.ReposAllExceptWorktrees) {
+			this.repositoryFilter = 'exclude-worktrees';
+		} else if (result.value != null) {
+			this.repositoryFilter = result.value.length ? result.value.map(r => r.id) : 'all';
+		}
 	}
 
 	protected abstract getRoot(): RootNode;
@@ -448,6 +615,7 @@ export abstract class ViewBase<
 			this.tree = window.createTreeView<ViewNode>(this.id, { ...options, treeDataProvider: this });
 			this.disposables.push(this.tree);
 		}
+		this._defaultSelection = [];
 
 		this.disposables.push(
 			configuration.onDidChange(e => {
@@ -461,6 +629,7 @@ export abstract class ViewBase<
 			this.tree.onDidChangeCheckboxState(this.onCheckboxStateChanged, this),
 			this.tree.onDidCollapseElement(this.onElementCollapsed, this),
 			this.tree.onDidExpandElement(this.onElementExpanded, this),
+			this.container.storage.onDidChange(this.onStorageChanged, this),
 		);
 
 		if (this._title != null) {
@@ -485,10 +654,10 @@ export abstract class ViewBase<
 		return this.root;
 	}
 
-	/** Tracks whether the view has been initialized and should avoid a duplicate refresh */
-	private _skipNextVisibilityChange: boolean = false;
-
 	private _loadingPromise: Promise<any> | undefined;
+
+	/** Tracks the last time onDidChangeTreeData was fired */
+	private _lastTreeDataChangeAt = 0;
 
 	private trackAsLoading<T>(promise: T | Promise<T>): T | Promise<T> {
 		if (!isPromise(promise)) return promise;
@@ -506,27 +675,97 @@ export abstract class ViewBase<
 		return promise;
 	}
 
+	/**
+	 * Waits for any pending loading operations to complete, with timeout protection.
+	 * After timeout, clears the loading state to prevent indefinite hangs.
+	 */
+	private async waitUntilLoaded(context: string): Promise<void> {
+		const timeoutMs = 30000; // 30 seconds
+
+		while (this._loadingPromise != null) {
+			try {
+				await cancellable(this._loadingPromise, timeoutMs, undefined, {
+					onDidCancel: resolve => {
+						Logger.warn(
+							`[${this.type}] ${context}: loading timed out after ${timeoutMs}ms, forcing continue`,
+						);
+						this._loadingPromise = undefined;
+						resolve(undefined);
+					},
+				});
+			} catch (ex) {
+				if (!(ex instanceof PromiseCancelledError)) {
+					Logger.error(ex, `[${this.type}] ${context}: loading promise rejected`);
+				}
+			}
+		}
+	}
+
+	/**
+	 * Waits for VS Code's internal tree data debounce period to complete.
+	 * This prevents race conditions between refresh and reveal operations.
+	 * Waits if a tree data change was fired recently, or if this is the first load
+	 * (to allow VS Code time to process initial tree data).
+	 */
+	private async waitForTreeDataDebounce(): Promise<void> {
+		const cooldownMs = onDidChangeTreeDebounceMs + revealBufferMs;
+
+		// On first load (_lastTreeDataChangeAt is 0), wait the full debounce time
+		// to allow VS Code to finish processing initial tree data
+		if (this._lastTreeDataChangeAt === 0) {
+			await new Promise<void>(resolve => setTimeout(resolve, cooldownMs));
+			return;
+		}
+
+		const elapsed = performance.now() - this._lastTreeDataChangeAt;
+		if (elapsed < cooldownMs) {
+			await new Promise<void>(resolve => setTimeout(resolve, cooldownMs - elapsed));
+		}
+	}
+
 	private addHeaderNode(node: ViewNode, promise: ViewNode[] | Promise<ViewNode[]>): ViewNode[] | Promise<ViewNode[]> {
-		if (!this.grouped || node !== this.root) return promise;
+		if (node !== this.root) return promise;
+
+		const { openRepositories: repos } = this.container.git;
+
+		// If we are not grouped and we are either not filterable or there aren't multiple repos open, then just return the promise
+		if (!this.grouped && (!this.isAny(...treeViewTypesSupportsRepositoryFilter) || repos.length <= 1)) {
+			return promise;
+		}
 
 		const ensureGroupedHeaderNode = (children: ViewNode[]): ViewNode[] => {
 			if (!children.length) return children;
 
 			const index = children.findIndex(n => n instanceof GroupedHeaderNode);
-			if (index === 0) return children.length === 1 ? [] : children;
+			if (index === 0) {
+				this._defaultSelection = this.grouped ? [children[0]] : [];
+				return children.length === 1 ? [] : children;
+			}
 
+			let header: ViewNode | undefined;
 			if (index === -1) {
-				children.unshift(new GroupedHeaderNode(this as unknown as View, node));
+				header = new GroupedHeaderNode(this as unknown as View, node);
 			} else if (index > 0) {
-				children.unshift(children.splice(index, 1)[0]);
+				header = children.splice(index, 1)[0];
+			}
+			if (header != null) {
+				this._defaultSelection = this.grouped ? [header] : [];
+				children.unshift(header);
 			}
 
 			return children;
 		};
 
-		if (!isPromise(promise)) return ensureGroupedHeaderNode(promise);
+		if (!this.grouped && this.supportsWorktreeCollapsing) {
+			const grouped = groupRepositories(repos);
+			if (grouped.size <= 1) return promise;
 
-		return promise.then(c => ensureGroupedHeaderNode(c));
+			return isPromise(promise)
+				? promise.then(c => ensureGroupedHeaderNode(c))
+				: ensureGroupedHeaderNode(promise);
+		}
+
+		return isPromise(promise) ? promise.then(c => ensureGroupedHeaderNode(c)) : ensureGroupedHeaderNode(promise);
 	}
 
 	getChildren(node?: ViewNode): ViewNode[] | Promise<ViewNode[]> {
@@ -534,9 +773,6 @@ export abstract class ViewBase<
 			node.splatted ??= true;
 			return this.trackAsLoading(this.addHeaderNode(node, node.getChildren()));
 		}
-
-		// If we are already visible, then skip the next visibility change event otherwise we end up refreshing twice
-		this._skipNextVisibilityChange = this.tree?.visible ?? false;
 
 		const root = this.ensureRoot();
 		root.splatted ??= true;
@@ -606,17 +842,18 @@ export abstract class ViewBase<
 		this.notifySelections();
 	}
 
+	private onStorageChanged(e: StorageChangeEvent): void {
+		if (e.type === 'workspace' && e.keys.includes(`views:${this.type}:repositoryFilter`)) {
+			this._onDidChangeRepositoryFilter.fire();
+		}
+	}
+
 	protected onVisibilityChanged(e: TreeViewVisibilityChangeEvent): void {
 		if (e.visible) {
 			void this.container.usage.track(`${this.trackingFeature}:shown`).catch();
 		}
 
-		const skip = this._skipNextVisibilityChange;
-		this._skipNextVisibilityChange = false;
-
-		if (!skip || !e.visible) {
-			this._onDidChangeVisibility.fire(e);
-		}
+		this._onDidChangeVisibility.fire(e);
 
 		if (e.visible) {
 			this.notifySelections();
@@ -666,21 +903,22 @@ export abstract class ViewBase<
 		return this.tree.selection[0];
 	}
 
+	private _defaultSelection: readonly ViewNode[] = [];
 	get selection(): readonly ViewNode[] {
 		if (this.tree == null || this.root == null) return [];
 
-		return this.tree.selection;
+		return this.tree.selection.length === 0 ? this._defaultSelection : this.tree.selection;
 	}
 
 	get visible(): boolean {
 		return this.tree?.visible ?? false;
 	}
 
-	@log<ViewBase<Type, RootNode, ViewConfig>['findNode']>({
-		args: {
-			0: '<function>',
-			1: opts => `options=${JSON.stringify({ ...opts, canTraverse: undefined, token: undefined })}`,
-		},
+	@debug({
+		args: (_predicate, options) => ({
+			predicate: '<function>',
+			options: `options=${JSON.stringify({ ...options, canTraverse: undefined, token: undefined })}`,
+		}),
 	})
 	async findNode(
 		predicate: (node: ViewNode) => boolean,
@@ -691,7 +929,7 @@ export abstract class ViewBase<
 			token?: CancellationToken;
 		},
 	): Promise<ViewNode | undefined> {
-		const scope = getLogScope();
+		const scope = getScopedLogger();
 
 		async function find(this: ViewBase<Type, RootNode, ViewConfig>) {
 			try {
@@ -706,7 +944,7 @@ export abstract class ViewBase<
 
 				return node;
 			} catch (ex) {
-				Logger.error(ex, scope);
+				scope?.error(ex);
 				return undefined;
 			}
 		}
@@ -780,9 +1018,14 @@ export abstract class ViewBase<
 
 						await this.loadMoreNodeChildren(node, defaultPageSize);
 
-						pagedChildren = await cancellable(Promise.resolve(node.getChildren()), 60000, token, {
-							onDidCancel: resolve => resolve([]),
-						});
+						pagedChildren = await cancellable(
+							Promise.resolve(node.getChildren()),
+							60000,
+							toAbortSignal(token),
+							{
+								onDidCancel: resolve => resolve([]),
+							},
+						);
 
 						child = pagedChildren.find(predicate);
 						if (child != null) return child;
@@ -806,7 +1049,7 @@ export abstract class ViewBase<
 		return this._expandedNodes.has(node);
 	}
 
-	@debug()
+	@trace()
 	async refresh(reset: boolean = false): Promise<void> {
 		// If we are resetting, make sure to clear any saved node state
 		if (reset) {
@@ -818,7 +1061,7 @@ export abstract class ViewBase<
 		this.triggerNodeChange();
 	}
 
-	@debug<ViewBase<Type, RootNode, ViewConfig>['refreshNode']>({ args: { 0: n => n.toString() } })
+	@trace()
 	async refreshNode(node: ViewNode, reset: boolean = false, force: boolean = false): Promise<void> {
 		const result = await node.refresh?.(reset);
 		if (!force && result?.cancel === true) return;
@@ -826,7 +1069,7 @@ export abstract class ViewBase<
 		this.triggerNodeChange(node);
 	}
 
-	@log<ViewBase<Type, RootNode, ViewConfig>['reveal']>({ args: { 0: n => n.toString() } })
+	@debug()
 	async reveal(node: ViewNode, options?: RevealOptions): Promise<void> {
 		if (this.initialized.pending) {
 			await this.initialized.promise;
@@ -837,11 +1080,8 @@ export abstract class ViewBase<
 
 	async revealDeep(node: ViewNode, options?: RevealOptions): Promise<void>;
 	async revealDeep(node: ViewNode, parents: ViewNode[], options?: RevealOptions): Promise<void>;
-	@log<ViewBase<Type, RootNode, ViewConfig>['revealDeep']>({
-		args: {
-			0: n => n.toString(),
-			1: false,
-		},
+	@debug({
+		args: (node, _parents, options) => ({ node: node, options: options }),
 	})
 	async revealDeep(
 		node: ViewNode,
@@ -877,48 +1117,45 @@ export abstract class ViewBase<
 	private async revealCore(node: ViewNode, root: ViewNode | undefined, options?: RevealOptions): Promise<void> {
 		if (this.tree == null) return;
 
-		const scope = getLogScope();
+		const scope = getScopedLogger();
 
 		try {
-			while (this._loadingPromise != null) {
-				await this._loadingPromise;
-			}
-
+			await this.waitUntilLoaded('revealCore');
+			// Wait for VS Code's tree data debounce to prevent race conditions
+			await this.waitForTreeDataDebounce();
 			await this.tree?.reveal(node, options);
 		} catch (ex) {
 			if (!node.id || root == null) {
-				Logger.error(ex, scope);
+				scope?.error(ex);
 				debugger;
 			}
 		}
 	}
 
-	@log()
+	@debug()
 	async show(options?: { preserveFocus?: boolean }): Promise<void> {
-		const scope = getLogScope();
+		const scope = getScopedLogger();
 
 		try {
 			const command = getViewFocusCommand(this.grouped ? 'gitlens.views.scm.grouped' : this.id);
 			// If we haven't been initialized, the focus command will show the view, but won't focus it, so wait until it's initialized and then focus again
-			if (this.initialized.pending) {
+			if (!options?.preserveFocus && this.initialized.pending) {
 				void executeCoreCommand(command, options);
 				await this.initialized.promise;
 			}
 
 			void (await executeCoreCommand(command, options));
 		} catch (ex) {
-			Logger.error(ex, scope);
+			scope?.error(ex);
 		}
 	}
 
-	// @debug({ args: { 0: (n: ViewNode) => n.toString() }, singleLine: true })
+	// @debug({ args: { 0: (n: ViewNode) => n.toString() }, onlyExit: true })
 	getNodeLastKnownLimit(node: PageableViewNode): number | undefined {
 		return this._lastKnownLimits.get(node.id);
 	}
 
-	@debug<ViewBase<Type, RootNode, ViewConfig>['loadMoreNodeChildren']>({
-		args: { 0: n => n.toString(), 2: n => n?.toString() },
-	})
+	@trace()
 	async loadMoreNodeChildren(
 		node: ViewNode & PageableViewNode,
 		limit: number | { until: string | undefined } | undefined,
@@ -933,10 +1170,7 @@ export abstract class ViewBase<
 		this._lastKnownLimits.set(node.id, node.limit);
 	}
 
-	@debug<ViewBase<Type, RootNode, ViewConfig>['resetNodeLastKnownLimit']>({
-		args: { 0: n => n.toString() },
-		singleLine: true,
-	})
+	@trace({ onlyExit: true })
 	resetNodeLastKnownLimit(node: PageableViewNode): void {
 		this._lastKnownLimits.delete(node.id);
 	}
@@ -944,7 +1178,7 @@ export abstract class ViewBase<
 	private _pendingNodeChanges = new Set<ViewNode | undefined>();
 	private _processingNodeChanges = false;
 
-	@debug<ViewBase<Type, RootNode, ViewConfig>['triggerNodeChange']>({ args: { 0: n => n?.toString() } })
+	@trace()
 	triggerNodeChange(node?: ViewNode): void {
 		// Since the root node won't actually refresh, force everything
 		const target = node != null && node !== this.root ? node : undefined;
@@ -969,25 +1203,27 @@ export abstract class ViewBase<
 	}
 
 	private async processNextNodeChange(): Promise<void> {
-		while (this._pendingNodeChanges.size > 0) {
-			const target = first(this._pendingNodeChanges.values());
+		try {
+			while (this._pendingNodeChanges.size > 0) {
+				const target = first(this._pendingNodeChanges.values());
 
-			// Wait until all loading is complete (avoids Element with id '...' already exists errors)
-			while (this._loadingPromise != null) {
-				await this._loadingPromise;
+				// Wait until all loading is complete (avoids Element with id '...' already exists errors)
+				await this.waitUntilLoaded('processNextNodeChange');
+
+				// Clear all pending changes if this was a full-refresh
+				if (target == null) {
+					this._pendingNodeChanges.clear();
+				} else {
+					this._pendingNodeChanges.delete(target);
+				}
+
+				this._onDidChangeTreeData.fire(target);
+				// Record when we fired so reveals can wait for VS Code's debounce
+				this._lastTreeDataChangeAt = performance.now();
 			}
-
-			// Clear all pending changes if this was a full-refresh
-			if (target == null) {
-				this._pendingNodeChanges.clear();
-			} else {
-				this._pendingNodeChanges.delete(target);
-			}
-
-			this._onDidChangeTreeData.fire(target);
+		} finally {
+			this._processingNodeChanges = false;
 		}
-
-		this._processingNodeChanges = false;
 	}
 
 	protected abstract readonly configKey: ViewsConfigKeys;
@@ -997,7 +1233,7 @@ export abstract class ViewBase<
 		if (this._config == null) {
 			const cfg = { ...configuration.get('views') };
 			for (const view of viewsConfigKeys) {
-				// eslint-disable-next-line @typescript-eslint/no-dynamic-delete
+				// oxlint-disable-next-line typescript/no-dynamic-delete
 				delete cfg[view];
 			}
 
@@ -1135,14 +1371,10 @@ export class ViewNodeState implements Disposable {
 	storeState<T>(id: string, key: string, value: T, sticky?: boolean): void {
 		let store;
 		if (sticky) {
-			if (this._stickyStore == null) {
-				this._stickyStore = new Map();
-			}
+			this._stickyStore ??= new Map();
 			store = this._stickyStore;
 		} else {
-			if (this._store == null) {
-				this._store = new Map();
-			}
+			this._store ??= new Map();
 			store = this._store;
 		}
 

@@ -1,0 +1,505 @@
+---
+name: live-inspect
+description: Use for one-off / single-question inspection of the running GitLens extension — examining UI state, reading logs, checking feature flags, dispatching a command, or asking "what does the live DOM look like right now". Reference for `vscode-inspector` MCP primitives. For iterative debug-and-fix loops on UI bugs (sweep → fix → re-verify), use `/live-exercise` instead.
+---
+
+# /live-inspect — Live Extension Inspection
+
+Launch a real VS Code instance with GitLens loaded, then inspect UI elements, read logs, interact with views, and evaluate runtime values — all programmatically via Playwright.
+
+## MCP Server (Preferred for Iterative Inspection)
+
+The `vscode-inspector` MCP server provides a **persistent, interactive** session. It launches VS Code once and exposes tools for screenshot/click/inspect/rebuild cycles — much faster than the batch CLI for agentic feedback loops.
+
+The server is auto-discovered via `.mcp.json` when Claude Code starts in this repo. When connected, these MCP tools are available:
+
+| Tool                  | Purpose                                                                               |
+| --------------------- | ------------------------------------------------------------------------------------- |
+| `launch`              | Start VS Code with GitLens loaded (persistent session)                                |
+| `teardown`            | Close VS Code and clean up                                                            |
+| `get_status`          | Check if session is running                                                           |
+| `screenshot`          | Capture window or webview as inline image (capped at 1920px)                          |
+| `execute_command`     | Run any VS Code command by ID                                                         |
+| `set_account`         | Simulate a subscription so Pro-gated features unlock (`plan: "pro"`, … `"none"`)      |
+| `sign_in`             | Sign in to a real GitKraken account (needs a persisted `session`; human-in-the-loop)  |
+| `click`               | Click element by CSS selector (main UI or webview)                                    |
+| `type_text`           | Type text into inputs                                                                 |
+| `press_key`           | Press keyboard shortcuts                                                              |
+| `inspect_dom`         | Query DOM elements for text/HTML/attributes/shadowDOM                                 |
+| `aria_snapshot`       | Get accessibility tree as YAML (supports webview iframes)                             |
+| `evaluate`            | Run JS in extension host with vscode API                                              |
+| `evaluate_in_webview` | Run JS in webview renderer (DOM, shadow DOM, computed styles)                         |
+| `list_webviews`       | Discover all open webviews with titles, dimensions, content status                    |
+| `wait_for_webview`    | Wait for a webview to finish loading and Lit hydration                                |
+| `read_logs`           | Search extension output logs                                                          |
+| `read_console`        | Read browser console messages/errors from the main process                            |
+| `resize_window`       | Resize VS Code window content area — only for explicit responsive-breakpoint testing  |
+| `rebuild_and_reload`  | Build extension + restart extension host (**kills the evaluator bridge** — see below) |
+
+### Reading host logs (gotchas)
+
+- **`read_logs` uses `pattern`, NOT `filter`.** A wrong/unknown arg is silently ignored and it falls back to `pattern: "GitLens"` — so you only ever see the activation banner and wrongly conclude "no logs". Always: `read_logs({ pattern: "<tag>", last_n })`.
+- `read_logs` DOES capture extension-**host** `console.log/warn/error` and GitLens `Logger.warn`/`info`/`error` (info+). It reads the GitLens **LogOutputChannel**, also on disk at `.vscode-test/user-data/logs/<TS>/window1/exthost/eamodio.gitlens/GitLens.log`. `read_console` is webview-only (does not see host logs).
+- **`@debug`/`@trace` decorator logs are filtered out.** The channel defaults to `info`; GitLens' rich tracing is `debug`/`trace`. Console-mirroring (`Logger.isDebugging`) is gated on `ExtensionMode.Development`, but the inspector runs in **Test** mode → off. `gitlens.enableDebugLogging` (which runs `workbench.action.output.activeOutputLogLevel.debug`) does NOT take headless. So for ad-hoc host tracing, **instrument with `Logger.warn('[tag] …')`** (info+, always written) and read via `read_logs({ pattern: "[tag]" })`. `gitlens.outputLevel` is deprecated — don't rely on it.
+
+### Typical Workflow
+
+1. Call `launch` (once per session — takes ~10s)
+2. Call `execute_command` to open the view you want to inspect
+3. Call `list_webviews` to discover open webviews and their exact titles
+4. Call `wait_for_webview { webview_title: "<title>" }` to wait for Lit hydration
+5. Call `screenshot { target: "webview", webview_title: "<title>" }` or `aria_snapshot { webview_title: "<title>" }` to see the current state
+6. Make code changes, then rebuild and reload (see below)
+7. Call `screenshot` again to verify changes
+8. Repeat steps 6-7 as needed
+9. Call `teardown` when done
+
+### Rebuilding After Code Changes
+
+**Extension host code** (commands, providers, services, models, parsers — anything under `src/` outside `src/webviews/apps/`):
+
+```
+rebuild_and_reload { build_command: "pnpm run build:extension" }
+```
+
+This restarts the extension host with the new code on the same VS Code instance. **The evaluator bridge does not survive it** — it's the `--extensionTestsPath` entry point, which VS Code invokes only at workbench startup, so the restarted host never re-runs it or re-announces its (ephemeral) port. Screenshot/click/DOM tools keep working, but `evaluate`, `set_account` and `execute_command`'s fast path go with it. When you need those after an extension-host change, `teardown` + `launch` instead.
+
+**Webview code** (Lit components, CSS, templates under `src/webviews/apps/`): No extension host restart needed. Build the webviews, then use the view's refresh command:
+
+```
+rebuild_and_reload { build_command: "pnpm run build:webviews" }
+execute_command { command: "gitlens.views.home.refresh" }
+```
+
+Every GitLens webview has a `gitlens.views.<name>.refresh` command (e.g. `gitlens.views.welcome.refresh`, `gitlens.views.graph.refresh`, `gitlens.views.commitDetails.refresh`). These fully reload the webview with fresh JS/CSS.
+
+**Both changed**: Use `pnpm run build:quick` (builds extension + webviews, no linting), then refresh the relevant view.
+
+### Quick Examples
+
+Extension host code change:
+
+```
+launch {}
+execute_command { command: "gitlens.showHomeView" }
+screenshot {}
+# ... edit extension host code ...
+rebuild_and_reload { build_command: "pnpm run build:extension" }
+screenshot {}
+teardown
+```
+
+Webview code change:
+
+```
+launch {}
+execute_command { command: "gitlens.showWelcomeView" }
+inspect_dom { selector: "h1", in_webview: true }
+# ... edit webview code ...
+rebuild_and_reload { build_command: "pnpm run build:webviews" }
+execute_command { command: "gitlens.views.welcome.refresh" }
+inspect_dom { selector: "h1", in_webview: true }
+teardown
+```
+
+## Batch CLI (Fallback for One-Shot Inspection)
+
+`scripts/e2e-dev-inspect.mjs` — a general-purpose CLI that supports ordered, repeatable actions. Use this when the MCP server is not available or for quick one-off inspections.
+
+### Two Modes
+
+| Mode                  | Flag               | ExtensionMode | `container.debugging` | `gitkraken.env` | `evaluate()` |
+| --------------------- | ------------------ | ------------- | --------------------- | --------------- | ------------ |
+| Development (default) | _(none)_           | Development   | `true`                | ✅ respected    | ❌           |
+| Test                  | `--with-evaluator` | Test          | `false`               | ❌ ignored      | ✅           |
+
+Use **Development mode** when you need `gitkraken.env` (e.g. testing feature flags against dev API).
+Use **Test mode** when you need `evaluate()` to inspect runtime values (e.g. `vscode.env.machineId`).
+
+## Common Recipes
+
+### Inspect any view's DOM content
+
+```bash
+node scripts/e2e-dev-inspect.mjs --command gitlens.showWelcomeView --query-frame h1
+```
+
+The `--query-frame` action searches all frames (including nested webview iframes) for matching elements and prints their text content.
+
+### Get the full accessibility tree of a view
+
+```bash
+node scripts/e2e-dev-inspect.mjs --command gitlens.showHomeView --aria
+```
+
+### Inspect a specific DOM element
+
+```bash
+node scripts/e2e-dev-inspect.mjs --command gitlens.showWelcomeView --aria-selector "[class*='header']"
+```
+
+### Click something, then inspect the result
+
+```bash
+node scripts/e2e-dev-inspect.mjs \
+  --command gitlens.showHomeView \
+  --click-frame "button.start-work" \
+  --pause 2000 \
+  --query-frame ".dialog-content h2"
+```
+
+### Read runtime values (requires --with-evaluator)
+
+```bash
+node scripts/e2e-dev-inspect.mjs --with-evaluator \
+  --eval "vscode.env.machineId" \
+  --eval "vscode.version" \
+  --eval "vscode.env.appName"
+```
+
+### Check feature flag behavior with dev environment
+
+```bash
+node scripts/e2e-dev-inspect.mjs --env dev \
+  --command gitlens.showWelcomeView \
+  --query-frame h1 \
+  --logs FeatureFlagService
+```
+
+### Search extension logs for any pattern
+
+```bash
+node scripts/e2e-dev-inspect.mjs --logs "error"
+node scripts/e2e-dev-inspect.mjs --env dev --logs ConfigCat
+```
+
+### Take a screenshot
+
+```bash
+node scripts/e2e-dev-inspect.mjs --command gitlens.showGraphView --screenshot /tmp/graph.png
+```
+
+### Keep VS Code open for manual interaction
+
+```bash
+node scripts/e2e-dev-inspect.mjs --env dev --keep-open
+```
+
+### Add custom settings
+
+```bash
+node scripts/e2e-dev-inspect.mjs \
+  --setting "gitlens.currentLine.enabled=true" \
+  --setting "gitlens.hovers.currentLine.over=line" \
+  --command gitlens.showWelcomeView --aria
+```
+
+## WSL / SSH / Headless Linux
+
+If VS Code is not installed natively in your Linux environment, use `--download-vscode`
+to download a portable binary. Xvfb is started automatically if no `$DISPLAY` is set.
+
+```bash
+node scripts/e2e-dev-inspect.mjs --download-vscode --command gitlens.showHomeView --aria
+```
+
+Requires `xvfb` package for headless environments: `sudo apt-get install xvfb`
+
+## How AI Agents Should Use This
+
+**Prefer the MCP server** for iterative work. Call `launch` once (use `download_vscode: true` on WSL/SSH/headless Linux), then use tools in a loop. No output parsing needed — tools return structured results directly.
+
+### Token & round-trip discipline
+
+How you drive inspection decides whether it's cheap or ruinous. Internalize these defaults:
+
+- **Prefer text/measured evidence over screenshots.** A full-window screenshot costs ~1.7K image tokens (image cost scales with resolution) and is re-shipped on every later turn, so it compounds. Answer "what is the state / is it correct" with `evaluate_in_webview` (geometry via `getBoundingClientRect()`, computed styles, text, counts) or `aria_snapshot({ selector })`. Reserve `screenshot` for when the _pixels themselves_ are the question (visual polish, overlap, alignment), and scope it to a webview.
+- **Batch probes into one call.** Don't fire N `evaluate_in_webview` calls reading one field each — return a structured object in a single call: `evaluate_in_webview({ expression: "(() => { const el = document.querySelector('gl-graph-app').shadowRoot.querySelector('…'); return { top: el.getBoundingClientRect().top, color: getComputedStyle(el).color, count: … }; })()" })`. Project only the fields you need (returns are soft-capped at 20K chars); never return whole `innerHTML`.
+- **Filter every read.** `read_console({ level: "error", last_n })` and `read_logs({ pattern: "<tag>", last_n })` — the arg is `pattern`, NOT `filter` (a wrong key silently dumps everything). Both default-cap at 200 lines; use `read_console({ clear: true })` as a cursor so the next read only sees new messages.
+- **Fold setup into launch.** `launch({ commands: ["gitlens.showGraphView", …], account: "pro", log_level: "info" })` opens views and unlocks Pro features inside the launch call (saves a round-trip each) and keeps on-disk logs small.
+- **Reuse the session.** `launch` once, then drive in a loop — it persists. For webview-only edits, `build:webviews` + the view's `.refresh` is ~3–5× cheaper than anything that restarts the host.
+- **Extension-host code changes cost a relaunch.** `rebuild_and_reload` restarts the host, but the evaluator bridge does **not** come back: it's the `--extensionTestsPath` entry point, which VS Code runs only at workbench startup, so the restarted host never re-announces its port. Everything bridge-backed (`evaluate`, `set_account`, `execute_command`'s fast path) degrades or dies afterwards, and the tool now says so explicitly instead of failing silently. Use `teardown` + `launch` when you need a live bridge after an extension-host change. (`workbench.action.reloadWindow` is not a workaround — under `--extensionTestsPath` the host exit reads as "tests finished" and the whole instance quits.)
+
+### Delegate the driving to a Sonnet driver (default)
+
+When the session model is Opus or Fable, **default to dispatching the mechanical driving to the `inspector-driver` subagent (pinned to Sonnet 5)** — it costs ~1/5 per token and a smoke test showed quality parity on mechanical inspection (DOM reads, extension-host API reads, measurements). You stay the orchestrator: you decide the probe list, you interpret the returned evidence, you decide fixes.
+
+- **Dispatch:** `Agent({ subagent_type: "inspector-driver", model: "sonnet", prompt: <setup + the exact probes/steps> })`. The agent's system prompt already encodes the driving discipline above, so give it a concrete step list, not a vague goal.
+- **You own the instance lifecycle.** Launch once yourself (or in the first dispatch), keep it alive, and tell drivers **not** to `launch`/`teardown` — they reuse your running instance. Teardown yourself when done.
+- **Batch the ask.** One dispatch should collect evidence across _many_ states/probes — that's what amortizes the subagent's fixed overhead (~35K tokens). Don't dispatch a driver for a single trivial probe; run that inline.
+- **Screenshots stay with you.** A driver can't hand an image back. For pixel judgment, either take the screenshot yourself, or have the driver return the _measurable_ facts (bounding rects, computed styles, overflow booleans) and judge those.
+- **Haiku for pure evidence collection.** For a fixed probe list with no screenshots (DOM/API reads, measurements, filtered logs), drop the driver to `model: "haiku"` — validated at parity with Sonnet and ~1/3 cheaper. Keep Sonnet (the default) when the driver may hit fine on-screen text, an ambiguous probe, or any visual call; Haiku reliably makes coarse visual calls ("rendered vs empty/broken") but misreads small text.
+
+### Choosing the right tool
+
+| I want to...                           | MCP tool                                                    | CLI flag                         |
+| -------------------------------------- | ----------------------------------------------------------- | -------------------------------- |
+| Discover open webviews                 | `list_webviews`                                             | _(N/A)_                          |
+| Wait for a webview to load             | `wait_for_webview`                                          | _(N/A)_                          |
+| Read text from a webview               | `inspect_dom` with `in_webview: true`                       | `--query-frame <selector>`       |
+| See all UI elements and their states   | `aria_snapshot` with `in_webview: true`                     | `--aria`                         |
+| Inspect Lit shadow DOM content         | `inspect_dom` with `property: "shadowDOM"` and `in_webview` | _(N/A)_                          |
+| Run JS in a webview (DOM/styles/state) | `evaluate_in_webview`                                       | _(N/A)_                          |
+| Read text from the main VS Code UI     | `inspect_dom`                                               | `--query <selector>`             |
+| Click a button/link in a webview       | `click` with `in_webview: true`                             | `--click-frame <selector>`       |
+| Read a runtime value (extension host)  | `evaluate`                                                  | `--with-evaluator --eval "expr"` |
+| Execute a VS Code command              | `execute_command`                                           | `--command <id>`                 |
+| Check extension logs                   | `read_logs`                                                 | `--logs <pattern>`               |
+| Check main process console errors      | `read_console { level: "error" }`                           | _(N/A)_                          |
+| See what the UI looks like             | `screenshot`                                                | `--screenshot <path>`            |
+| Test a specific responsive breakpoint  | `resize_window`                                             | _(N/A)_                          |
+
+### GitLens Webview Reference
+
+| Command                         | Webview Title        | Root Element            | Refresh Command                       |
+| ------------------------------- | -------------------- | ----------------------- | ------------------------------------- |
+| `gitlens.showHomeView`          | Home                 | `gl-home-app`           | `gitlens.views.home.refresh`          |
+| `gitlens.showWelcomeView`       | Welcome              | `gl-welcome-page`       | _(N/A)_                               |
+| `gitlens.showGraphPage`         | Commit Graph         | `gl-graph-app`          | `gitlens.graph.refresh`               |
+| `gitlens.showGraphView`         | Commit Graph         | `gl-graph-app`          | `gitlens.views.graph.refresh`         |
+| `gitlens.showCommitDetailsView` | Inspect              | `gl-commit-details-app` | `gitlens.views.commitDetails.refresh` |
+| _(sidebar)_                     | Commit Graph Inspect | `gl-commit-details-app` | `gitlens.views.graphDetails.refresh`  |
+| `gitlens.showTimelinePage`      | Visual History       | `gl-timeline-app`       | `gitlens.timeline.refresh`            |
+| `gitlens.showTimelineView`      | Visual File History  | `gl-timeline-app`       | `gitlens.views.timeline.refresh`      |
+| `gitlens.showPatchDetailsPage`  | Patch                | `gl-patch-details-app`  | `gitlens.patchDetails.refresh`        |
+| `gitlens.showSettingsPage`      | GitLens Settings     | `gl-settings-app`       | `gitlens.settings.refresh`            |
+
+Root element tag convention: `gl-<name>-app`. Use these for `inspect_dom` selectors and `evaluate_in_webview` queries.
+
+### Inspecting Webview Content
+
+GitLens webviews use **Lit web components** with Shadow DOM. Here's the recommended approach:
+
+1. **Discover**: `list_webviews` to find open webviews. Output includes `index`, `id` (e.g. `gitlens.views.commitDetails`), `title`, `url`, dimensions, and content status. (Or use the reference table above.)
+2. **Wait**: `wait_for_webview { webview_title: "Home" }` to ensure Lit hydration is complete
+3. **Structure**: `aria_snapshot { webview_title: "Home" }` for the accessibility tree
+4. **Shadow DOM**: `inspect_dom { selector: "gl-home-app", property: "shadowDOM", in_webview: true, webview_title: "Home" }` to see rendered Lit templates
+5. **JS state**: `evaluate_in_webview { expression: "document.querySelector('gl-home-app').shadowRoot.querySelector('.my-element').textContent" }` to read shadow DOM content. Use `.shadowRoot.querySelector()` to reach elements inside Lit shadow roots — plain `document.querySelector()` cannot cross shadow boundaries.
+6. **Styles**: `evaluate_in_webview { expression: "getComputedStyle(document.querySelector('gl-home-app').shadowRoot.querySelector('.my-element')).color" }` for computed styles
+7. **Errors**: `read_console { level: "error" }` to check for JS errors in the main process. For webview-specific errors, use `evaluate_in_webview` to inspect state directly.
+
+#### Targeting a specific webview when multiple are open
+
+When more than one webview is visible (e.g. Graph + Commit Details), `webview_title` matching can silently fail because outer-frame titles are often empty for unfocused webviews, and the tool falls back to "first webview with content" — which is usually the wrong one. All webview-targeting tools (`evaluate_in_webview`, `wait_for_webview`, `inspect_dom`, `aria_snapshot`, `screenshot`, `click`) accept three matchers:
+
+- `webview_title` — outer-frame title (best when titles are reliable; matches the table above)
+- `webview_url` — case-insensitive substring of the webview URL. Matches the `id`/`purpose`/`extensionId` query params in `vscode-webview://` URLs. Use a fragment like `"commitDetails"` or `"graph"`.
+- `webview_index` — 0-based index from `list_webviews`. Deterministic fallback when title and URL matching are insufficient.
+
+Precedence: `index` → `url` → `title` → first-with-content. Pick `webview_url` first (intent-revealing); fall back to `webview_index` if needed.
+
+```
+list_webviews
+# returns [{ index: 0, id: "gitlens.views.graph", ... }, { index: 1, id: "gitlens.views.commitDetails", ... }]
+evaluate_in_webview { webview_url: "commitDetails", expression: "performance.now()" }
+```
+
+### Screenshot Best Practices
+
+**Always target a specific webview** instead of taking full-window screenshots:
+
+```
+screenshot { target: "webview", webview_title: "Home" }
+```
+
+This captures just the webview content instead of the entire VS Code window. Screenshots are downscaled to 1280px longest side and WebP-compressed by default (image cost scales with resolution); raise `max_dimension` (up to 1920) or pass `format: "png"` only when you need fine pixel detail. **Better still, skip the screenshot** when a text/geometry answer will do — see "Token & round-trip discipline" above.
+
+Use `resize_window` only when explicitly testing a responsive breakpoint — it resizes the actual Electron window and is clamped by the host display. For larger headless render surfaces, use `launch({ screen_resolution })` instead.
+
+### Troubleshooting
+
+**Webview frame access fails / "not found" errors**: Try `launch { disable_site_isolation: true }`. This disables OOPIF site isolation so Playwright can access webview iframes directly. Note: CORS/CSP are also disabled, so webview behavior may differ slightly from production.
+
+**Headless screenshots too small**: Use `launch { screen_resolution: "2560x1440x24" }` for a larger Xvfb display (default: 1920x1080x24).
+
+## All Options
+
+| Flag                          | Description                                      |
+| ----------------------------- | ------------------------------------------------ |
+| `--env <env>`                 | Set `gitkraken.env` (e.g. `dev`, `staging`)      |
+| `--with-evaluator`            | Enable HTTP evaluator bridge (Test mode)         |
+| `--keep-open`                 | Keep VS Code running (Ctrl+C to stop)            |
+| `--setting <key=value>`       | Custom VS Code setting (repeatable)              |
+| `--wait <ms>`                 | Default wait between actions (default 3000)      |
+| `--activation-wait <ms>`      | Wait time for GitLens activation (default 8000)  |
+| `--workspace <path>`          | Path to open as workspace                        |
+| `--vscode-path <path>`        | Path to VS Code Electron binary                  |
+| `--download-vscode`           | Download a portable VS Code binary (WSL/SSH/CI)  |
+| `--flavor <stable\|insiders>` | VS Code variant to auto-detect (default: stable) |
+| `--command <cmd>`             | Execute VS Code command                          |
+| `--aria`                      | Print full window aria snapshot                  |
+| `--aria-selector <sel>`       | Print aria snapshot of specific element          |
+| `--query <sel>`               | Print textContent matching selector              |
+| `--query-frame <sel>`         | Search all frames for selector                   |
+| `--click <sel>`               | Click element                                    |
+| `--click-frame <sel>`         | Click inside webview iframe                      |
+| `--screenshot <path>`         | Save screenshot                                  |
+| `--logs [pattern]`            | Search extension logs                            |
+| `--eval <expr>`               | Evaluate JS expression in extension host         |
+| `--pause <ms>`                | Wait specified duration                          |
+
+## Exercising Pro-gated features
+
+Pro-gated features (the Commit Graph beyond local repos, Launchpad, Worktrees beyond 1, Cloud Patches, Composer, all AI features, Drafts, Workspaces, etc.) check the user's subscription before unlocking. You can't exercise these without a Paid/Trial subscription on the session.
+
+The extension ships a **subscription simulator** in DEBUG builds that overrides the session's subscription state without touching the real account. Drive it with the `set_account` tool.
+
+### Setup
+
+```
+set_account { plan: "pro" }
+```
+
+That's the whole setup for most Pro-feature testing. Onboarding is pre-dismissed by default (`dismiss_onboarding`) — every tour/banner (composer welcome, home walkthrough, MCP banner, rebase-editor warning, integration banner, SCM-grouped welcome) is a full-screen overlay that intercepts clicks during automation. The tool reports the resulting account, so you can confirm the gate actually opened instead of assuming it.
+
+You can also bootstrap at launch, saving a round-trip:
+
+```
+launch { session: "dev", account: "pro" }
+```
+
+### Plan reference
+
+| `plan`                                                           | What it simulates                                              |
+| ---------------------------------------------------------------- | -------------------------------------------------------------- |
+| `"pro"`, `"advanced"`, `"business"`, `"enterprise"`, `"student"` | Active paid subscription — unlocks all Pro features            |
+| `"trial"`, `"trial-advanced"`, `"trial-student"`                 | Active trial — unlocks all Pro features for the trial duration |
+| `"community"`                                                    | No account, Community tier (Pro features locked)               |
+| `"trial-expired"`                                                | Account exists, trial used up, no longer eligible              |
+| `"trial-reactivatable"`                                          | Account exists, trial used up, eligible to reactivate          |
+| `"paid-expired"`                                                 | Expired paid (downgrades to Community at the gate)             |
+| `"verification-required"`                                        | Account created but email not verified                         |
+| `"none"`                                                         | Ends simulation, restoring the session's real subscription     |
+
+Modifiers: `reactivated: true` (trial plans only — reactivated rather than fresh); `feature_preview_day` / `feature_preview_seconds` (`community` only — the Pro Preview window; day 0 = day 1, 1 = day 2, 2 = day 3, 3 = expired). Both are rejected with a clear error if paired with a plan they don't apply to.
+
+### Common recipes
+
+**Community gate (paywall UX):** `set_account { plan: "community" }`
+
+**Feature-preview countdown:** `set_account { plan: "community", feature_preview_day: 0 }`
+
+**Plan-tier differences:** `set_account { plan: "business" }` (note: "Business" is `teams` on the wire — the tool handles that mapping)
+
+### Stop simulation (mandatory teardown)
+
+```
+set_account { plan: "none" }
+```
+
+Restores the prior subscription, feature previews, and any onboarding flags that were pre-dismissed. Re-calling with another plan also clears any prior simulation state.
+
+> **Don't hand-roll the payload.** The underlying command (`gitlens.plus.simulate.subscription`) takes a numeric `SubscriptionState` const enum, and nothing coerces names to numbers. `execute_command` with `{ "state": "Paid" }` returns `true` and silently lands you on **trial-expired** — verified, not theoretical. `set_account` owns the name→number mapping; use it.
+
+### Using a real account instead
+
+For real entitlements and organizations rather than a simulated plan, launch a **persisted session** and sign in once:
+
+```
+launch { session: "dev" }
+sign_in {}
+```
+
+The session's VS Code user data lives under `.vscode-test/agent-sessions/<name>/` and survives teardown, so later `launch { session: "dev" }` calls start already signed in. `sign_in` is human-in-the-loop and needs a visible window: it opens a browser, and because the `vscode://` callback resolves against the default user-data-dir it usually lands in the user's main VS Code, leaving GitLens' "paste the authorization code" input box as the way to finish. Ask the user to complete it, then wait. It refuses on a throwaway session, where the account would be discarded on teardown.
+
+## Exercising AI features
+
+GitLens AI features (Generate Commit Message, Explain \*, Generate Changelog, Composer, Review Changes, Generate Search Query) cannot use real provider calls during automated inspection — they cost money, require keys, and produce non-deterministic outputs you can't assert against. The extension ships a **deterministic AI simulator** in DEBUG builds that you control via VS Code commands.
+
+AI features are also Pro-gated, so two simulators must be enabled in order:
+
+1. **Subscription simulator** — see [Exercising Pro-gated features](#exercising-pro-gated-features) above. Use `set_account { plan: "pro" }`.
+2. **AI simulator** (`gitlens.plus.simulate.ai`) — replaces the AI provider with a stub that returns content the agent injects. Suppresses the first-run ToS modal and the AI All-Access promo notification automatically.
+
+The AI simulator dispatches on a discriminated `op` arg: `enable`, `disable`, `inject`, `clear`, `lastMessages`. Calling without args opens a QuickPick.
+
+### Setup (one-time per session)
+
+```
+set_account { plan: "pro" }
+execute_command { command: "gitlens.plus.simulate.ai", args: [{ "op": "enable" }] }
+```
+
+`set_account` already pre-dismisses onboarding, so the AI simulator doesn't need `dismissOnboarding` as well. Both share the same snapshot/restore pattern.
+
+### Inject-then-trigger pattern
+
+The agent authors the response content, pushes it onto the simulator's stash, then triggers the AI command. The next `sendRequest` for that action consumes the inject:
+
+```
+execute_command { command: "gitlens.plus.simulate.ai", args: [{
+  "op": "inject",
+  "action": "generate-commitMessage",
+  "content": "<summary>Stable test summary</summary><body>Deterministic body content.</body>"
+}] }
+execute_command { command: "gitlens.ai.generateCommitMessage:scm" }
+# read SCM input — assert it contains "Stable test summary"
+```
+
+`inject` payload: `{ op: "inject"; action?: AIActionType; content: string; sticky?: boolean }`. Omit `action` to inject for the next call regardless of action. Set `sticky: true` to keep the same content for every call of that action.
+
+### Authoring response content
+
+| Action                                                                                                                               | Format the content must satisfy                                                                                                                                                                                                                                    |
+| ------------------------------------------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `generate-commitMessage`, `generate-stashMessage`, `generate-changelog`, `generate-create-{cloudPatch\|codeSuggestion\|pullRequest}` | `<summary>...</summary><body>...</body>`                                                                                                                                                                                                                           |
+| `explain-changes` (commit / branch / stash / wip / unpushed)                                                                         | Same summary/body XML                                                                                                                                                                                                                                              |
+| `generate-searchQuery`                                                                                                               | Plain string (the search query)                                                                                                                                                                                                                                    |
+| `review-changes`                                                                                                                     | `<overview>...</overview>` followed by `<area severity="..." files="..."><label>...</label><rationale>...</rationale><findings><finding severity="..." file="..." lines="..."><title>...</title><description>...</description></finding></findings></area>` blocks |
+| `generate-commits` (Composer)                                                                                                        | JSON tool-call output that conserves hunk indices from the prompt — see "Composer authoring" below                                                                                                                                                                 |
+
+The schemas are enforced in [packages/plus/ai/src/utils/results.utils.ts](packages/plus/ai/src/utils/results.utils.ts) — read it once for the canonical tag set. The simulator returns a sensible default per action when no inject is queued, so smoke calls without explicit injects still produce predictable output.
+
+### Mode shortcuts (negative-path UX)
+
+Without injecting per-call, you can globally force a failure mode by re-enabling with a different `mode`:
+
+```
+execute_command { command: "gitlens.plus.simulate.ai", args: [{ "op": "enable", "mode": "error" }] }    # provider error UX
+execute_command { command: "gitlens.plus.simulate.ai", args: [{ "op": "enable", "mode": "cancel" }] }   # cancellation UX
+execute_command { command: "gitlens.plus.simulate.ai", args: [{ "op": "enable", "mode": "slow" }] }     # progress-indicator UX
+execute_command { command: "gitlens.plus.simulate.ai", args: [{ "op": "enable", "mode": "invalid" }] }  # composer 4-attempt validation-failure UX
+```
+
+Mode `invalid` only triggers retry behavior for `generate-commits` (the Composer) — other actions tolerate malformed content and just render it.
+
+### Composer authoring (reflection workflow)
+
+The Composer's `generate-commits` validator demands every input hunk index appear exactly once in the response. The agent can't author a valid response without first seeing the hunks the prompt sent:
+
+1. Trigger Composer with no inject queued (default response will fail validation predictably)
+2. Read the messages the simulator received:
+   ```
+   execute_command { command: "gitlens.plus.simulate.ai", args: [{ "op": "lastMessages" }] }
+   ```
+   Returns `AIChatMessage[]`. Parse the user message's `hunks` JSON to learn the hunk index space.
+3. Author a valid `{"commits":[{"message":"...","explanation":"...","hunks":[{"hunk":0},{"hunk":1},...]}, ...]}` response covering every hunk index exactly once
+4. Inject for action `generate-commits`. The Composer's automatic 4-attempt retry loop will consume the inject on the next attempt.
+
+### Cleanup
+
+Mandatory between scenarios — leftover injects from one test will leak into the next:
+
+```
+execute_command { command: "gitlens.plus.simulate.ai", args: [{ "op": "clear" }] }
+```
+
+Mandatory teardown (restores the prior `gitlens.ai.model`, `gitlens.ai.enabled`, and AI All-Access flags):
+
+```
+execute_command { command: "gitlens.plus.simulate.ai", args: [{ "op": "disable" }] }
+```
+
+`{op: "enable"}` always clears the stash first, so re-enabling between tests is also safe.
+
+### Build requirement (both simulators)
+
+Both simulators are DEBUG-only (`gitlens:debugging` context). Standard dev launch via `launch {}` and `pnpm run build:extension` includes them. Production bundles strip them.
+
+## Related skills
+
+- `/live-exercise` — agent-driven iterative working rhythm for UI-bearing work (audit + fix loop), which uses this skill's tools as its primitive.
+- `/live-perf` — agent-driven performance measurement + improvement skill, also built on these primitives.
+- `/live-pair` — user-driven interactive pair-programming session; the user gives feedback, the agent edits/rebuilds/refreshes live.
+
+Use `/live-exercise`, `/live-perf`, or `/live-pair` when touching UI; use this skill on its own for one-off inspection.

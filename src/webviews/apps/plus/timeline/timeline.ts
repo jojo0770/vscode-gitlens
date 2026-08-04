@@ -1,155 +1,240 @@
 import './timeline.scss';
-import { html, LitElement, nothing } from 'lit';
-import { customElement, query, state } from 'lit/decorators.js';
-import { ifDefined } from 'lit/directives/if-defined.js';
-import type { GitReference } from '../../../../git/models/reference';
-import { setAbbreviatedShaLength } from '../../../../git/utils/revision.utils';
-import { isSubscriptionPaid } from '../../../../plus/gk/utils/subscription.utils';
-import type { Deferrable } from '../../../../system/function/debounce';
-import { debounce } from '../../../../system/function/debounce';
-import { dirname } from '../../../../system/path';
-import type { State, TimelinePeriod, TimelineScopeType } from '../../../plus/timeline/protocol';
-import {
-	ChoosePathRequest,
-	ChooseRefRequest,
-	SelectDataPointCommand,
-	UpdateConfigCommand,
-	UpdateScopeCommand,
-} from '../../../plus/timeline/protocol';
-import { GlAppHost } from '../../shared/appHost';
-import type { Checkbox } from '../../shared/components/checkbox/checkbox';
-import type { GlRefButton } from '../../shared/components/ref-button';
-import type { HostIpc } from '../../shared/ipc';
-import { linkStyles, ruleStyles } from '../shared/components/vscode.css';
-import type { CommitEventDetail, GlTimelineChart } from './components/chart';
-import { TimelineStateProvider } from './stateProvider';
-import { timelineBaseStyles, timelineStyles } from './timeline.css';
-import './components/chart';
-import '../../shared/components/breadcrumbs';
-import '../../shared/components/button';
-import '../../shared/components/checkbox/checkbox';
-import '../../shared/components/code-icon';
-import '../../shared/components/copy-container';
-import '../../shared/components/feature-badge';
-import '../../shared/components/feature-gate';
-import '../../shared/components/menu/menu-label';
-import '../../shared/components/progress';
-import '../../shared/components/overlays/popover';
-import '../../shared/components/ref-button';
-import '../../shared/components/ref-name';
-import '../../shared/components/repo-button-group';
+import type { Remote } from '@eamodio/supertalk';
+import { html, nothing } from 'lit';
+import { customElement, property, query } from 'lit/decorators.js';
+import { isSubscriptionPaid } from '../../../../plus/gk/utils/subscription.utils.js';
+import type {
+	TimelineDatasetResult,
+	TimelinePeriod,
+	TimelineScopeType,
+	TimelineServices,
+	TimelineSliceBy,
+} from '../../../plus/timeline/protocol.js';
+import { periodToMs } from '../../../plus/timeline/utils/period.js';
+import { SignalWatcherWebviewApp } from '../../shared/appBase.js';
+import { compactBreadcrumbsConsumerStyles } from '../../shared/components/breadcrumbs.js';
+import { featureGateContentStyles } from '../../shared/components/feature-gate.css.js';
+import { getHost } from '../../shared/host/context.js';
+import { RpcController } from '../../shared/rpc/rpcController.js';
+import type { Resource } from '../../shared/state/resource.js';
+import { createResource } from '../../shared/state/resource.js';
+import { linkStyles, ruleStyles } from '../shared/components/vscode.css.js';
+import { TimelineActions } from './actions.js';
+import type { CommitEventDetail, GlTimelineChart } from './components/chart.js';
+import type { SubscriptionActions } from './events.js';
+import { setupSubscriptions } from './events.js';
+import type { TimelineState } from './state.js';
+import { createTimelineState } from './state.js';
+import { timelineBaseStyles, timelineStyles } from './timeline.css.js';
+import './components/chart.js';
+import './components/header.js';
+import '../../shared/components/button.js';
+import '../../shared/components/code-icon.js';
+import '../../shared/components/feature-badge.js';
+import '../../shared/components/feature-gate.js';
+import '../../shared/components/file-icon/file-icon.js';
+import '../../shared/components/gl-error-banner.js';
+import '../../shared/components/progress.js';
 
 @customElement('gl-timeline-app')
-export class GlTimelineApp extends GlAppHost<State> {
-	static override shadowRootOptions: ShadowRootInit = {
-		...LitElement.shadowRootOptions,
-		delegatesFocus: true,
-	};
+export class GlTimelineApp extends SignalWatcherWebviewApp {
+	static override styles = [
+		linkStyles,
+		ruleStyles,
+		featureGateContentStyles,
+		timelineBaseStyles,
+		timelineStyles,
+		compactBreadcrumbsConsumerStyles,
+	];
 
-	static override styles = [linkStyles, ruleStyles, timelineBaseStyles, timelineStyles];
+	@property({ type: String, noAccessor: true })
+	private context!: string;
 
 	@query('#chart')
 	private _chart?: GlTimelineChart;
 
-	protected override createStateProvider(state: State, ipc: HostIpc): TimelineStateProvider {
-		return new TimelineStateProvider(this, state, ipc);
-	}
+	private _host = getHost();
 
-	protected override onPersistState(state: State): void {
-		this._ipc.setPersistedState({ config: state.config, scope: state.scope });
-	}
+	/**
+	 * Instance-owned state — created here with persistence support, passed to actions as a parameter.
+	 */
+	private _state: TimelineState = createTimelineState(this._host.storage);
+
+	private _actions?: TimelineActions;
+	private _datasetResource?: Resource<TimelineDatasetResult | undefined>;
+	private _unsubscribeEvents?: () => void;
+	private _stopAutoPersist?: () => void;
+	private _chartDataset?: TimelineDatasetResult['dataset'];
+	private _chartDataPromise?: Promise<TimelineDatasetResult['dataset']>;
+
+	private _rpc = new RpcController<TimelineServices>(this, {
+		rpcOptions: {
+			webviewId: () => this._webview?.webviewId,
+			webviewInstanceId: () => this._webview?.webviewInstanceId,
+			endpoint: () => this._host.createEndpoint(),
+		},
+		onReady: services => this._onRpcReady(services),
+		onError: error => this._state.error.set(error.message),
+	});
 
 	override connectedCallback(): void {
 		super.connectedCallback?.();
 
-		setAbbreviatedShaLength(this.state.config.abbreviatedShaLength);
+		const context = this.context;
+		this.context = undefined!;
+		this.initWebviewContext(context);
 	}
 
-	@state()
-	private _loading = false;
+	override disconnectedCallback(): void {
+		this._unsubscribeEvents?.();
+		this._unsubscribeEvents = undefined;
 
-	get allowed() {
-		return this.state.access?.allowed ?? false;
+		this._stopAutoPersist?.();
+		this._stopAutoPersist = undefined;
+
+		this._datasetResource?.dispose();
+		this._datasetResource = undefined;
+		this._chartDataset = undefined;
+		this._chartDataPromise = undefined;
+
+		this._actions?.dispose();
+		this._actions = undefined;
+
+		this._state.resetAll();
+		this._state.dispose();
+
+		super.disconnectedCallback?.();
 	}
 
-	get base() {
-		return this.scope?.base ?? this.repository?.ref;
+	private async _onRpcReady(services: Remote<TimelineServices>): Promise<void> {
+		const s = this._state;
+
+		// Resolve the timeline sub-service and domain sub-services
+		const [timeline, repositories, repository, subscription, config] = await Promise.all([
+			services.timeline,
+			services.repositories,
+			services.repository,
+			services.subscription,
+			services.config,
+		]);
+
+		// Create dataset resource — fetcher reads current state signals via closure. `loadedSpanMs`
+		// is what powers progressive load-more: when the user zooms past the loaded oldest, the
+		// chart fires `gl-load-more`, the action bumps `loadedSpanMs` by a chunk, and this fetcher
+		// re-runs with the wider span. `loadedSpanMs == null` means "use period-derived span" —
+		// the initial state and after period changes.
+		const datasetResource = createResource<TimelineDatasetResult | undefined>(async signal => {
+			const currentScope = s.scope.get();
+			if (currentScope == null) return undefined;
+
+			return timeline.getDataset(
+				currentScope,
+				{
+					period: s.period.get(),
+					showAllBranches: s.showAllBranches.get(),
+					sliceBy: s.sliceBy.get(),
+					loadedSpanMs: s.loadedSpanMs.get() ?? undefined,
+				},
+				signal,
+			);
+		});
+		this._datasetResource = datasetResource;
+
+		const actions = new TimelineActions(s, services, timeline, repository, datasetResource);
+		this._actions = actions;
+
+		// Start auto-persistence before any state changes from host
+		this._stopAutoPersist = s.startAutoPersist();
+
+		// Subscribe to events FIRST (so we don't miss events during initial fetch).
+		const subActions: SubscriptionActions = {
+			onScopeChanged: event => actions.onScopeChanged(event),
+			onRepoChanged: e => actions.onRepoChanged(e),
+			onDataChanged: () => void actions.fetchTimeline(),
+			onConfigChanged: () => void actions.fetchDisplayConfig(),
+			onRepoCountChanged: () => void actions.fetchRepoCount(),
+		};
+		this._unsubscribeEvents = await setupSubscriptions(
+			{ timeline: timeline, repositories: repositories, subscription: subscription, config: config },
+			subActions,
+		);
+
+		// Cancel pending RPC requests on hide (responses would be silently dropped
+		// by VS Code); re-fetch data on visibility restore
+		const onVisibilityChange = (): void => {
+			if (document.visibilityState !== 'visible') {
+				actions.cancelPendingRequests();
+				return;
+			}
+
+			// Visibility restored — re-fetch if we have a scope
+			if (s.scope.get() != null) {
+				void actions.fetchTimeline();
+			}
+		};
+		document.addEventListener('visibilitychange', onVisibilityChange);
+		this.disposables.push({ dispose: () => document.removeEventListener('visibilitychange', onVisibilityChange) });
+
+		await actions.populateInitialState();
 	}
 
-	get config() {
-		return this.state.config;
+	override updated(changedProperties: Map<PropertyKey, unknown>): void {
+		super.updated?.(changedProperties);
+		this._actions?.pushTelemetryContext();
 	}
 
-	get head() {
-		return this.scope?.head ?? this.repository?.ref;
+	private onChartCommitSelected(e: CustomEvent<CommitEventDetail>) {
+		if (e.detail.id == null) return;
+
+		this._actions?.selectDataPoint(e.detail);
 	}
 
-	get repository() {
-		return this.state.repository;
-	}
+	private onChartLoadMore = (): void => {
+		this._actions?.extendTimeline();
+	};
 
-	get scope() {
-		return this.state.scope;
-	}
+	private onChartVisibleRangeChanged = (e: CustomEvent<{ oldest: number; newest: number }>): void => {
+		this._state.visibleSpanMs.set(e.detail.newest - e.detail.oldest);
+	};
 
-	get isShowAllBranchesSupported() {
-		return !this.repository?.virtual;
-	}
-
-	get isSliceBySupported() {
-		return !this.repository?.virtual && (this.scope?.type === 'file' || this.scope?.type === 'folder');
-	}
-
-	get sliceBy() {
-		return this.isSliceBySupported && this.config.showAllBranches ? this.config.sliceBy : 'author';
-	}
-
-	get subscription() {
-		return this.state.access?.subscription?.current;
-	}
-
-	private renderGate() {
-		if (this.placement === 'editor') {
-			return html`<gl-feature-gate
-				?hidden=${this.allowed !== false}
-				.source=${{ source: 'timeline' as const, detail: 'gate' }}
-				.state=${this.subscription?.state}
-				><p slot="feature">
-					<a href="https://help.gitkraken.com/gitlens/gitlens-features/#visual-file-history-pro"
-						>Visual History</a
-					>
-					<gl-feature-badge></gl-feature-badge>
-					&mdash; visualize the evolution of a repository, branch, folder, or file and identify when the most
-					impactful changes were made and by whom. Quickly see unmerged changes in files or folders, when
-					slicing by branch.
-				</p></gl-feature-gate
-			>`;
-		}
-
-		return html`<gl-feature-gate
-			?hidden=${this.allowed !== false}
-			.source=${{ source: 'timeline' as const, detail: 'gate' }}
-			.state=${this.subscription?.state}
-			><p slot="feature">
-				<a href="https://help.gitkraken.com/gitlens/gitlens-features/#visual-file-history-pro"
-					>Visual File History</a
-				>
-				<gl-feature-badge></gl-feature-badge>
-				&mdash; visualize the evolution of a file and quickly identify when the most impactful changes were made
-				and by whom. Quickly see unmerged changes in files or folders, when slicing by branch.
-			</p></gl-feature-gate
-		>`;
-	}
 	override render(): unknown {
+		const s = this._state;
+		const datasetLoading = this._datasetResource?.loading.get() ?? false;
+		const scope = s.scope.get();
+		const repo = s.repository.get();
+		const access = s.access.get();
+		const subscription = access?.subscription?.current;
 		return html`${this.renderGate()}
 			<div class="container">
-				<progress-indicator ?active=${this._loading}></progress-indicator>
-				<header class="header" ?hidden=${!this.scope}>
-					<span class="details">${this.renderBreadcrumbs()} ${this.renderTimeframe()}</span>
-					<span class="toolbox">
-						${this.renderConfigPopover()}
-						${this.placement === 'view'
+				<gl-error-banner .error=${s.error}></gl-error-banner>
+				<progress-indicator ?active=${datasetLoading}></progress-indicator>
+				<gl-timeline-header
+					?hidden=${!scope}
+					placement=${this.placement}
+					host="timeline"
+					.repository=${repo}
+					.repositoryCount=${s.repositories.get().openCount}
+					.headRef=${s.head.get()}
+					.scopeType=${scope?.type ?? 'repo'}
+					.relativePath=${scope?.relativePath ?? ''}
+					.period=${s.period.get()}
+					.visibleSpanMs=${s.visibleSpanMs.get()}
+					.sliceBy=${s.effectiveSliceBy.get()}
+					.showAllBranches=${s.showAllBranches.get()}
+					.showAllBranchesSupported=${!repo?.virtual}
+					.sliceBySupported=${s.isSliceBySupported.get()}
+					@gl-timeline-header-period-change=${this.onHeaderPeriodChange}
+					@gl-timeline-header-slice-by-change=${this.onHeaderSliceByChange}
+					@gl-timeline-header-show-all-branches-change=${this.onHeaderShowAllBranchesChange}
+					@gl-timeline-header-choose-head-ref=${this.onHeaderChooseHeadRef}
+					@gl-timeline-header-choose-path=${this.onHeaderChoosePath}
+					@gl-timeline-header-clear-scope=${this.onHeaderClearScope}
+					@gl-timeline-header-change-scope=${this.onHeaderChangeScope}
+				>
+					${
+						this.placement === 'view'
 							? html`<gl-button
+									slot="toolbox"
 									appearance="toolbar"
 									href="command:gitlens.views.timeline.openInTab"
 									tooltip="Open in Editor"
@@ -157,535 +242,190 @@ export class GlTimelineApp extends GlAppHost<State> {
 								>
 									<code-icon icon="link-external"></code-icon>
 								</gl-button>`
-							: nothing}
-						${this.subscription == null || !isSubscriptionPaid(this.subscription)
+							: nothing
+					}
+					${
+						subscription == null || !isSubscriptionPaid(subscription)
 							? html`<gl-feature-badge
+									slot="toolbox"
 									placement="bottom"
 									.source=${{ source: 'timeline' as const, detail: 'badge' }}
-									.subscription=${this.subscription}
+									.subscription=${subscription}
 								></gl-feature-badge>`
-							: nothing}
-					</span>
-				</header>
+							: nothing
+					}
+				</gl-timeline-header>
 
 				<main class="timeline">${this.renderChart()}</main>
 			</div> `;
 	}
 
-	private renderBreadcrumbs() {
-		return html`<gl-breadcrumbs>
-			${this.renderRepositoryBreadcrumbItem()}
-			${this.renderBranchBreadcrumbItem()}${this.renderBreadcrumbPathItems()}
-			${this.placement === 'editor'
-				? html`<gl-button
-						appearance="toolbar"
-						density="compact"
-						@click=${this.onChoosePath}
-						tooltip="Choose File or Folder to Visualize..."
-						aria-label="Choose File or Folder to Visualize..."
-						><code-icon slot="prefix" icon="folder-opened"></code-icon>Choose File / Folder...</gl-button
-					>`
-				: nothing}
-		</gl-breadcrumbs>`;
-	}
+	private onHeaderPeriodChange = (e: CustomEvent<{ period: TimelinePeriod }>): void => {
+		this._actions?.changePeriod(e.detail.period);
+	};
 
-	private renderRepositoryBreadcrumbItem() {
-		const repo = this.state.repository;
-		if (repo == null) return nothing;
+	private onHeaderSliceByChange = (e: CustomEvent<{ sliceBy: TimelineSliceBy }>): void => {
+		this._actions?.changeSliceBy(e.detail.sliceBy);
+	};
 
-		return html`<gl-breadcrumb-item
-			collapsibleState="${this.state.scope?.relativePath ? 'collapsed' : 'expanded'}"
-			icon="repo"
-			shrink="10000000"
-			type="repo"
-		>
-			<gl-repo-button-group
-				aria-label="Visualize Repository History"
-				.connectIcon=${false}
-				.hasMultipleRepositories=${false /* TODO support repositories switching */}
-				.icon=${false}
-				.repository=${repo}
-				.source=${{ source: 'timeline' } as const}
-				@gl-click=${this.onChangeScope}
-				><span slot="tooltip">
-					Visualize Repository History
-					<hr />
-					${repo.name}
-				</span></gl-repo-button-group
-			>
-		</gl-breadcrumb-item>`;
-	}
+	private onHeaderShowAllBranchesChange = (e: CustomEvent<{ showAllBranches: boolean }>): void => {
+		this._actions?.changeShowAllBranches(e.detail.showAllBranches);
+	};
 
-	private renderBranchBreadcrumbItem() {
-		const {
-			head,
-			config: { showAllBranches },
-		} = this;
+	private onHeaderChooseHeadRef = (e: CustomEvent<{ location?: string }>): void => {
+		void this._actions?.chooseHeadRef(e.detail.location ?? null);
+	};
 
-		return html`<gl-breadcrumb-item
-			collapsibleState="expanded"
-			icon="${showAllBranches ? 'git-branch' : getRefIcon(head)}"
-			shrink="100000"
-			type="ref"
-		>
-			<gl-ref-button .ref=${showAllBranches ? undefined : head} @click=${this.onChooseHeadRef}
-				><span slot="empty">All Branches</span
-				><span slot="tooltip"
-					>Change Reference...
-					<hr />
-					${showAllBranches
-						? 'Showing All Branches'
-						: html`<gl-ref-name icon .ref=${head}></gl-ref-name>`}</span
-				></gl-ref-button
-			>
-		</gl-breadcrumb-item>`;
-	}
+	private onHeaderChoosePath = (e: CustomEvent<{ detached: boolean }>): void => {
+		void this._actions?.choosePath(e.detail.detached);
+	};
 
-	private renderBreadcrumbPathItems() {
-		const path = this.state.scope?.relativePath;
-		if (!path) return nothing;
+	private onHeaderClearScope = (): void => {
+		this._actions?.changeScope('repo', null, false);
+	};
 
-		const breadcrumbs = [];
+	private onHeaderChangeScope = (
+		e: CustomEvent<{ type: TimelineScopeType; value: string | undefined; detached: boolean }>,
+	): void => {
+		this._actions?.changeScope(e.detail.type, e.detail.value ?? null, e.detail.detached);
+	};
 
-		const parts = path.split('/');
-		const basePart = parts.pop() || '';
-		const folders = parts.length;
+	private onSwitchRepos = (): void => {
+		void this._actions?.pickAndNavigateRepo();
+	};
 
-		// Add folder parts if any
-		if (folders) {
-			const rootPart = parts.shift()!;
-			let fullPath = rootPart;
+	private renderGate() {
+		const s = this._state;
+		// Mount the gate only while access is denied — mount/unmount drives the modal's open/teardown,
+		// the same way the Commit Graph gate is conditionally rendered.
+		if (s.allowed.get() !== false) return nothing;
 
-			const folderItem = html`
-				<gl-breadcrumb-item
-					collapsibleState="expanded"
-					icon="folder"
-					type="${'folder' satisfies TimelineScopeType}"
-					value="${rootPart}"
-				>
-					<gl-button
-						appearance="toolbar"
-						@click=${this.onChangeScope}
-						aria-label="Visualize folder history of ${rootPart}"
-						>${rootPart}<span slot="tooltip"
-							>Visualize Folder History
-							<hr />
-							${rootPart}</span
-						></gl-button
-					>
-
-					${parts.length
-						? html`<span slot="children" class="breadcrumb-item-children">
-								${parts.map(part => {
-									fullPath = `${fullPath}/${part}`;
-									return html`<gl-breadcrumb-item-child
-										type="${'folder' satisfies TimelineScopeType}"
-										value="${fullPath}"
-									>
-										<gl-button
-											appearance="toolbar"
-											@click=${this.onChangeScope}
-											aria-label="Visualize folder history of ${fullPath}"
-											>${part}<span slot="tooltip"
-												>Visualize Folder History
-												<hr />
-												${fullPath}</span
-											></gl-button
-										>
-									</gl-breadcrumb-item-child>`;
-								})}
-							</span>`
-						: nothing}
-				</gl-breadcrumb-item>
-			`;
-
-			breadcrumbs.push(folderItem);
+		const sub = s.access.get()?.subscription?.current;
+		if (this.placement === 'editor') {
+			return html`<gl-feature-gate
+				?allowRepoSwitch=${s.allowRepoSwitch.get()}
+				featureRestriction="private-repos"
+				.source=${{ source: 'timeline' as const, detail: 'gate' }}
+				.state=${sub?.state}
+				@gl-switch-repos=${this.onSwitchRepos}
+				><section slot="feature" class="feature">
+					<header class="feature__header">
+						<div class="icon-cube feature__feature-icon"><code-icon icon="gl-gitlens"></code-icon></div>
+						<hgroup>
+							<h2 class="feature__title">
+								<span>Visual History</span>
+								<gl-feature-badge></gl-feature-badge>
+							</h2>
+							<p class="feature__lede">See how any file, folder, or branch evolved &mdash; at a glance</p>
+						</hgroup>
+					</header>
+					<p>
+						Visualize the evolution of a repository, branch, folder, or file and identify when the most
+						impactful changes were made and by whom. Quickly see unmerged changes in files or folders, when
+						slicing by branch.
+						<a href="https://help.gitkraken.com/gitlens/gitlens-features/#visual-file-history-pro"
+							>Learn More</a
+						>
+					</p>
+				</section>
+			</gl-feature-gate>`;
 		}
 
-		// Add base item
-		breadcrumbs.push(html`
-			<gl-breadcrumb-item
-				collapsibleState="none"
-				icon="${ifDefined(this.scope?.type === 'folder' ? (folders ? undefined : 'folder') : 'file')}"
-				shrink="0"
-				tooltip="${path}"
-				type="${(this.scope?.type === 'folder' ? 'folder' : 'file') satisfies TimelineScopeType}"
-				value="${path}"
-			>
-				<gl-copy-container
-					tabindex="0"
-					copyLabel="Copy Path&#10;&#10;${path}"
-					.content=${path}
-					placement="bottom"
-				>
-					<span>${basePart}</span>
-				</gl-copy-container>
-			</gl-breadcrumb-item>
-		`);
-
-		return breadcrumbs;
+		return html`<gl-feature-gate
+			?allowRepoSwitch=${s.allowRepoSwitch.get()}
+			featureRestriction="private-repos"
+			.source=${{ source: 'timeline' as const, detail: 'gate' }}
+			.state=${sub?.state}
+			@gl-switch-repos=${this.onSwitchRepos}
+			><section slot="feature" class="feature">
+				<header class="feature__header">
+					<div class="icon-cube feature__feature-icon"><code-icon icon="gl-gitlens"></code-icon></div>
+					<hgroup>
+						<h2 class="feature__title">
+							<span>Visual History</span>
+							<gl-feature-badge></gl-feature-badge>
+						</h2>
+						<p class="feature__lede">See how any file, folder, or branch evolved &mdash; at a glance</p>
+					</hgroup>
+				</header>
+				<p>
+					Visualize the evolution of a repository, branch, folder, or file and identify when the most
+					impactful changes were made and by whom. Quickly see unmerged changes in files or folders, when
+					slicing by branch.
+					<a href="https://help.gitkraken.com/gitlens/gitlens-features/#visual-file-history-pro"
+						>Learn More</a
+					>
+				</p>
+			</section></gl-feature-gate
+		>`;
 	}
 
 	private renderChart() {
-		if (!this.scope && this.placement === 'view') {
+		const s = this._state;
+		if (!s.scope.get() && this.placement === 'view') {
 			return html`<div class="timeline__empty">
 				<p>There are no editors open that can provide file history information.</p>
 			</div>`;
 		}
 
+		const datasetResult = this._datasetResource?.value.get();
+		const dataPromise = this.getChartDataPromise(datasetResult?.dataset);
+
+		const emptySlot = html`<div slot="empty">
+			${
+				s.scope.get() == null
+					? html`<p>Something went wrong</p>
+							<p>Please close this tab and try again</p>`
+					: html`<p>No commits found for the specified time period</p>`
+			}
+		</div>`;
+
+		const datasetLoading = this._datasetResource?.loading.get() ?? false;
+		const isLoadingMore = s.loadingMore.get();
+		// `loading` (full-canvas) only applies to the initial fetch; once we're extending the
+		// dataset via `gl-load-more` the chart switches to its edge-gradient affordance and
+		// keeps existing rows interactive. `windowSpanMs` makes the period the initial viewport
+		// (matching the embedded Graph timeline) so the user can zoom out past it to fire
+		// load-more, paging in older history without re-loading what's already on screen.
 		return html`<gl-timeline-chart
 			id="chart"
 			placement="${this.placement}"
-			dateFormat="${this.state.config.dateFormat}"
-			.dataPromise=${this.state.dataset}
-			head="${this.head?.ref ?? 'HEAD'}"
-			.scope=${this.scope}
-			shortDateFormat="${this.state.config.shortDateFormat}"
-			sliceBy="${this.sliceBy}"
+			currentUserNameStyle="${s.displayConfig.get().currentUserNameStyle}"
+			dateFormat="${s.displayConfig.get().dateFormat}"
+			.dataPromise=${dataPromise}
+			?loading=${datasetLoading && !isLoadingMore}
+			?loadingMore=${isLoadingMore}
+			?hasMore=${s.hasMore.get()}
+			head="${s.head.get()?.ref ?? 'HEAD'}"
+			.scope=${s.scope.get()}
+			shortDateFormat="${s.displayConfig.get().shortDateFormat}"
+			sliceBy="${s.effectiveSliceBy.get()}"
+			.windowSpanMs=${periodToMs(s.period.get())}
 			@gl-commit-select=${this.onChartCommitSelected}
+			@gl-load-more=${this.onChartLoadMore}
+			@gl-visible-range-changed=${this.onChartVisibleRangeChanged}
 			@gl-loading=${(e: CustomEvent<Promise<void>>) => {
-				this._loading = true;
-				void e.detail.finally(() => (this._loading = false));
+				void e.detail;
 			}}
 		>
-			<div slot="empty">
-				${this.scope == null
-					? html`<p>Something went wrong</p>
-							<p>Please close this tab and try again</p>`
-					: html`<p>No commits found for the specified time period</p>
-							${this.renderPeriodSelect(this.state.config.period)}`}
-			</div>
+			${emptySlot}
 		</gl-timeline-chart>`;
 	}
 
-	private renderConfigPopover() {
-		const {
-			config: { period },
-		} = this;
-
-		return html`<gl-popover class="config" placement="bottom" trigger="hover focus click" hoist>
-			<gl-button slot="anchor" appearance="toolbar">
-				<code-icon icon="settings"></code-icon>
-			</gl-button>
-			<div slot="content" class="config__content">
-				<menu-label>View Options</menu-label>
-				${this.renderConfigHead()} ${this.renderConfigBase()} ${this.renderConfigShowAllBranches()}
-				${this.renderPeriodSelect(period)} ${this.renderConfigSliceBy()}
-			</div>
-		</gl-popover>`;
-	}
-
-	private renderConfigHead() {
-		const { head } = this;
-		const disabled = this.config.showAllBranches && this.sliceBy !== 'branch';
-
-		return html`<section>
-			<label for="head" ?disabled=${disabled}>Branch</label>
-			<gl-ref-button
-				name="head"
-				?disabled=${disabled}
-				icon
-				.ref=${head}
-				location="config"
-				@click=${this.onChooseHeadRef}
-				><span slot="tooltip"
-					>Change Reference...
-					<hr />
-					${this.config.showAllBranches
-						? 'Showing All Branches'
-						: html`<gl-ref-name icon .ref=${head}></gl-ref-name>`}</span
-				></gl-ref-button
-			>
-		</section>`;
-
-		// Commenting out for now, until base is ready
-
-		// const {
-		// 	head,
-		// 	config: { showAllBranches },
-		// } = this;
-		// return html`<section>
-		// 	<label for="head" ?disabled=${showAllBranches}>Head</label>
-		// 	<gl-ref-button
-		// 		name="head"
-		// 		?disabled=${showAllBranches}
-		// 		icon
-		// 		tooltip="Change Head Reference"
-		// 		.ref=${head}
-		// 		location="config"
-		// 		@click=${this.onChooseHeadRef}
-		// 	></gl-ref-button>
-		// </section>`;
-	}
-
-	private renderConfigBase() {
-		// Commenting out for now, as its not yet ready
-		return nothing;
-		// if (this.repository?.virtual) return nothing;
-
-		// const {
-		// 	head,
-		// 	base,
-		// 	config: { showAllBranches },
-		// } = this;
-		// return html`<section>
-		// 	<label for="base" ?disabled=${showAllBranches}>Base</label>
-		// 	<gl-ref-button
-		// 		name="base"
-		// 		?disabled=${showAllBranches}
-		// 		icon
-		// 		tooltip="Change Base Reference"
-		// 		.ref=${base?.ref === head?.ref ? undefined : base}
-		// 		location="config"
-		// 		@click=${this.onChooseBaseRef}
-		// 		><span slot="empty">&lt;choose base&gt;</span></gl-ref-button
-		// 	>
-		// </section>`;
-	}
-
-	private renderConfigShowAllBranches() {
-		if (this.repository?.virtual) return nothing;
-		const {
-			config: { showAllBranches },
-		} = this;
-		return html`<section>
-			<gl-checkbox
-				value="all"
-				.checked=${showAllBranches}
-				@gl-change-value=${(e: CustomEvent<void>) => {
-					this._ipc.sendCommand(UpdateConfigCommand, {
-						changes: { showAllBranches: (e.target as Checkbox).checked },
-					});
-				}}
-				>View All Branches</gl-checkbox
-			>
-		</section>`;
-	}
-
-	private renderPeriodSelect(period: TimelinePeriod) {
-		return html`<section>
-			<span class="select-container">
-				<label for="periods">Timeframe</label>
-				<select class="select" name="periods" position="below" .value=${period} @change=${this.onPeriodChanged}>
-					<option value="7|D" ?selected=${period === '7|D'}>1 week</option>
-					<option value="1|M" ?selected=${period === '1|M'}>1 month</option>
-					<option value="3|M" ?selected=${period === '3|M'}>3 months</option>
-					<option value="6|M" ?selected=${period === '6|M'}>6 months</option>
-					<option value="9|M" ?selected=${period === '9|M'}>9 months</option>
-					<option value="1|Y" ?selected=${period === '1|Y'}>1 year</option>
-					<option value="2|Y" ?selected=${period === '2|Y'}>2 years</option>
-					<option value="4|Y" ?selected=${period === '4|Y'}>4 years</option>
-					<option value="all" ?selected=${period === 'all'}>Full history</option>
-				</select>
-			</span>
-		</section>`;
-	}
-
-	private renderConfigSliceBy() {
-		if (!this.isSliceBySupported) return nothing;
-
-		const { sliceBy } = this;
-
-		return html`<section>
-			<span class="select-container"
-				><label for="sliceBy">Slice By</label>
-				<select
-					class="select"
-					name="sliceBy"
-					position="below"
-					.value=${sliceBy}
-					@change=${this.onSliceByChanged}
-				>
-					<option value="author" ?selected=${sliceBy === 'author'}>Author</option>
-					<option value="branch" ?selected=${sliceBy === 'branch'}>Branch</option>
-				</select></span
-			>
-		</section>`;
-	}
-
-	private renderTimeframe() {
-		let label;
-		switch (this.config.period) {
-			case '7|D':
-				label = 'Up to 1wk ago';
-				break;
-			case '1|M':
-				label = 'Up to 1mo ago';
-				break;
-			case '3|M':
-				label = 'Up to 3mo ago';
-				break;
-			case '6|M':
-				label = 'Up to 6mo ago';
-				break;
-			case '9|M':
-				label = 'Up to 9mo ago';
-				break;
-			case '1|Y':
-				label = 'Up to 1yr ago';
-				break;
-			case '2|Y':
-				label = 'Up to 2yr ago';
-				break;
-			case '4|Y':
-				label = 'Up to 4yr ago';
-				break;
-			case 'all':
-				label = 'All time';
-				break;
-			default:
-				return nothing;
+	private getChartDataPromise(
+		dataset: TimelineDatasetResult['dataset'] | undefined,
+	): Promise<TimelineDatasetResult['dataset']> | undefined {
+		if (dataset == null) {
+			this._chartDataset = undefined;
+			this._chartDataPromise = undefined;
+			return undefined;
 		}
 
-		return html`<span class="details__timeframe" tabindex="0">${label}</span>`;
-	}
-
-	private onChooseBaseRef = async (e: MouseEvent) => {
-		if ((e.target as GlRefButton).disabled) return;
-
-		const result = await this._ipc.sendRequest(ChooseRefRequest, { scope: this.scope!, type: 'base' });
-		if (result?.ref == null) return;
-
-		this._ipc.sendCommand(UpdateScopeCommand, { scope: this.scope!, changes: { base: result.ref } });
-	};
-
-	private onChooseHeadRef = async (e: MouseEvent) => {
-		if ((e.target as GlRefButton).disabled) return;
-
-		const location = (e.target as GlRefButton).getAttribute('location');
-
-		const result = await this._ipc.sendRequest(ChooseRefRequest, { scope: this.scope!, type: 'head' });
-		if (result?.ref === null) {
-			if (!this.config.showAllBranches) {
-				this._ipc.sendCommand(UpdateConfigCommand, { changes: { showAllBranches: true } });
-			}
-
-			return;
-		}
-		if (result?.ref == null) return;
-
-		if (location === 'config') {
-			this._ipc.sendCommand(UpdateScopeCommand, {
-				scope: this.scope!,
-				changes: { head: result.ref, base: this.config.showAllBranches ? null : undefined },
-			});
-
-			return;
+		if (this._chartDataset !== dataset || this._chartDataPromise == null) {
+			this._chartDataset = dataset;
+			this._chartDataPromise = Promise.resolve(dataset);
 		}
 
-		this._ipc.sendCommand(UpdateScopeCommand, {
-			scope: this.scope!,
-			changes: { head: result.ref, base: null },
-		});
-		if (this.config.showAllBranches) {
-			this._ipc.sendCommand(UpdateConfigCommand, { changes: { showAllBranches: false } });
-		}
-	};
-
-	private onChoosePath = async (e: MouseEvent) => {
-		e.stopImmediatePropagation();
-		if (this.repository == null || this.scope == null) return;
-
-		const result = await this._ipc.sendRequest(ChoosePathRequest, {
-			repoUri: this.repository.uri,
-			ref: this.head,
-			title: 'Select a File or Folder to Visualize',
-			initialPath: this.scope.type === 'file' ? dirname(this.scope.relativePath) : this.scope.relativePath,
-		});
-		if (result?.picked == null) return;
-
-		this._ipc.sendCommand(UpdateScopeCommand, {
-			scope: this.scope,
-			changes: { type: result.picked.type, relativePath: result.picked.relativePath },
-			altOrShift: e.altKey || e.shiftKey,
-		});
-	};
-
-	private onChangeScope = (e: MouseEvent) => {
-		const el =
-			(e.target as HTMLElement)?.closest('gl-breadcrumb-item-child') ??
-			(e.target as HTMLElement)?.closest('gl-breadcrumb-item');
-
-		const type = el?.getAttribute('type') as TimelineScopeType;
-		if (type == null) return;
-
-		if (type === 'repo') {
-			this._ipc.sendCommand(UpdateScopeCommand, {
-				scope: this.scope!,
-				changes: { type: 'repo' },
-				altOrShift: e.altKey || e.shiftKey,
-			});
-			return;
-		}
-
-		const value = el?.getAttribute('value');
-		if (value == null) return;
-
-		this._ipc.sendCommand(UpdateScopeCommand, {
-			scope: this.scope!,
-			changes: { type: type, relativePath: value },
-			altOrShift: e.altKey || e.shiftKey,
-		});
-	};
-
-	private onChartCommitSelected(e: CustomEvent<CommitEventDetail>) {
-		if (e.detail.id == null) return;
-
-		this.fireSelectDataPoint(e.detail);
-	}
-
-	private onPeriodChanged(e: Event) {
-		const element = e.target as HTMLSelectElement;
-		const value = element.options[element.selectedIndex].value;
-		assertPeriod(value);
-
-		this._ipc.sendCommand(UpdateConfigCommand, { changes: { period: value } });
-	}
-
-	private onSliceByChanged(e: Event) {
-		const element = e.target as HTMLSelectElement;
-		const value = element.options[element.selectedIndex].value;
-		assertSliceBy(value);
-
-		this._ipc.sendCommand(UpdateConfigCommand, { changes: { sliceBy: value } });
-	}
-
-	private _fireSelectDataPointDebounced: Deferrable<(e: CommitEventDetail) => void> | undefined;
-	private fireSelectDataPoint(e: CommitEventDetail) {
-		const { scope } = this;
-		if (scope == null) return;
-
-		this._fireSelectDataPointDebounced ??= debounce(
-			(e: CommitEventDetail) => this._ipc.sendCommand(SelectDataPointCommand, { scope: scope, ...e }),
-			250,
-			{ maxWait: scope.type === 'file' ? 500 : undefined },
-		);
-		this._fireSelectDataPointDebounced(e);
-	}
-}
-
-function assertPeriod(period: string): asserts period is State['config']['period'] {
-	if (period === 'all') return;
-
-	const [value, unit] = period.split('|');
-	if (isNaN(Number(value)) || (unit !== 'D' && unit !== 'M' && unit !== 'Y')) {
-		throw new Error(`Invalid period: ${period}`);
-	}
-}
-
-function assertSliceBy(sliceBy: string): asserts sliceBy is State['config']['sliceBy'] {
-	if (sliceBy !== 'author' && sliceBy !== 'branch') {
-		throw new Error(`Invalid slice by: ${sliceBy}`);
-	}
-}
-
-function getRefIcon(ref: GitReference | undefined): string {
-	switch (ref?.refType) {
-		case 'branch':
-			return 'git-branch';
-		case 'tag':
-			return 'tag';
-		default:
-			return 'git-commit';
+		return this._chartDataPromise;
 	}
 }

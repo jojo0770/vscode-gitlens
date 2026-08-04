@@ -6,56 +6,16 @@ export const previewBadge = 'ᴘʀᴇᴠɪᴇᴡ';
 export const proBadge = 'ᴘʀᴏ';
 export const proBadgeSuperscript = 'ᴾᴿᴼ';
 
+export const whitespaceRegex = /\s/;
+
 export type AnnotationStatus = 'computing' | 'computed';
 
-export const enum CharCode {
-	/**
-	 * The `#` character.
-	 */
-	Hash = 35,
-	/**
-	 * The `/` character.
-	 */
-	Slash = 47,
-	Digit0 = 48,
-	Digit1 = 49,
-	Digit2 = 50,
-	Digit3 = 51,
-	Digit4 = 52,
-	Digit5 = 53,
-	Digit6 = 54,
-	Digit7 = 55,
-	Digit8 = 56,
-	Digit9 = 57,
-	/**
-	 * The `\` character.
-	 */
-	Backslash = 92,
-	A = 65,
-	B = 66,
-	C = 67,
-	D = 68,
-	E = 69,
-	F = 70,
-	Z = 90,
-	a = 97,
-	b = 98,
-	c = 99,
-	d = 100,
-	e = 101,
-	f = 102,
-	z = 122,
-}
-
-export type GitConfigKeys =
-	| `branch.${string}.vscode-merge-base`
-	| `branch.${string}.gk-merge-base`
-	| `branch.${string}.gk-merge-target`
-	| `branch.${string}.gk-merge-target-user`
-	| `branch.${string}.gk-associated-issues`
-	| `branch.${string}.github-pr-owner-number`;
-
-export type DeprecatedGitConfigKeys = `branch.${string}.gk-target-base`;
+export type {
+	DeprecatedGkConfigKeys,
+	GitConfigKeys,
+	GitCoreConfigKeys,
+	GkConfigKeys,
+} from '@gitlens/git/providers/config.js';
 
 export const enum GlyphChars {
 	AngleBracketLeftHeavy = '\u2770',
@@ -138,6 +98,7 @@ export const enum Schemes {
 	GitHub = 'github',
 	GitLens = 'gitlens',
 	GitLensAIMarkdown = 'gitlens-ai-markdown',
+	GitLensVirtual = 'gitlens-virtual',
 	PRs = 'pr',
 	Remote = 'vscode-remote',
 	Vsls = 'vsls',
@@ -171,6 +132,8 @@ export const urls = Object.freeze({
 	security: `https://help.gitkraken.com/gitlens/security?${utm}`,
 	workspaces: `https://gitkraken.com/solutions/workspaces?${utm}`,
 
+	kepler: `https://www.gitkraken.com/kepler?${utm}`,
+
 	cli: `https://gitkraken.com/cli?${utm}`,
 	browserExtension: `https://gitkraken.com/browser-extension?${utm}`,
 	desktop: `https://gitkraken.com/git-client?${utm}`,
@@ -179,15 +142,22 @@ export const urls = Object.freeze({
 	githubDiscussions: `https://github.com/gitkraken/vscode-gitlens/discussions/?${utm}`,
 	helpCenter: `https://help.gitkraken.com/gitlens/gitlens-start-here/?${utm}`,
 	helpCenterHome: `https://help.gitkraken.com/gitlens/home-view/?${utm}`,
+	helpCenterMCP: `https://help.gitkraken.com/mcp/mcp-getting-started/?${utm}`,
 	releaseNotes: `https://help.gitkraken.com/gitlens/gitlens-release-notes-current/?${utm}`,
+	helpCenterAiHooks: `https://help.gitkraken.com/cli/cli-home/?${utm}#how-to-uninstall-gitkraken-cli-ai-hooks`,
 
 	acceleratePrReviews: `https://help.gitkraken.com/gitlens/gitlens-start-here/?${utm}#accelerate-pr-reviews`,
 	communityVsPro: `https://help.gitkraken.com/gitlens/gitlens-community-vs-gitlens-pro/?${utm}`,
 	homeView: `https://help.gitkraken.com/gitlens/home-view/?${utm}&utm_campaign=walkthrough`,
 	interactiveCodeHistory: `https://help.gitkraken.com/gitlens/gitlens-start-here/?${utm}#interactive-code-history`,
 	startIntegrations: `https://help.gitkraken.com/gitlens/gitlens-start-here/?${utm}#improve-workflows-with-integrations`,
-	streamlineCollaboration: `https://help.gitkraken.com/gitlens/gitlens-start-here/?${utm}#streamline-collaboration`,
 	aiFeatures: `https://help.gitkraken.com/gitlens/gl-gk-ai/?${utm}`,
+
+	getStarted: `https://help.gitkraken.com/gitlens/gitlens-home/?${utm}`,
+	welcomeInTrial: `https://help.gitkraken.com/gitlens/gitlens-home/?${utm}`,
+	welcomePaid: `https://help.gitkraken.com/gitlens/gitlens-home/?${utm}`,
+	welcomeTrialExpired: `https://help.gitkraken.com/gitlens/gitlens-community-vs-gitlens-pro/?${utm}`,
+	welcomeTrialReactivationEligible: `https://help.gitkraken.com/gitlens/gitlens-community-vs-gitlens-pro/?${utm}`,
 });
 
 export type WalkthroughSteps =
@@ -198,5 +168,4 @@ export type WalkthroughSteps =
 	| 'get-started-community'
 	| 'visualize-code-history'
 	| 'accelerate-pr-reviews'
-	| 'streamline-collaboration'
 	| 'improve-workflows-with-integrations';

@@ -1,29 +1,29 @@
 import { css, html, LitElement, nothing } from 'lit';
 import { customElement, property, query } from 'lit/decorators.js';
-import { linkStyles, ruleStyles } from '../../../plus/shared/components/vscode.css';
-import { handleUnsafeOverlayContent } from '../overlays/overlays.utils';
-import { focusOutline } from '../styles/lit/a11y.css';
-import '../overlays/popover';
-import '../overlays/tooltip';
-import '../code-icon';
+import { ifDefined } from 'lit/directives/if-defined.js';
+import { getAltKeySymbol } from '@env/platform.js';
+import { linkStyles, ruleStyles } from '../../../plus/shared/components/vscode.css.js';
+import { ModifierKeysController } from '../../controllers/modifier-keys.js';
+import { handleUnsafeOverlayContent } from '../overlays/overlays.utils.js';
+import { focusOutline } from '../styles/lit/a11y.css.js';
+import '../overlays/popover.js';
+import '../overlays/tooltip.js';
+import '../code-icon.js';
 
 @customElement('gl-action-chip')
 export class ActionChip extends LitElement {
-	static override shadowRootOptions: ShadowRootInit = {
-		...LitElement.shadowRootOptions,
-		delegatesFocus: true,
-	};
-
 	static override styles = [
 		linkStyles,
 		ruleStyles,
 		css`
 			:host {
 				display: inline-flex;
-				justify-content: center;
 				align-items: center;
+				justify-content: center;
+				min-width: 0;
+				max-width: 100%;
 				vertical-align: text-bottom;
-				border-radius: 0.5rem;
+				border-radius: var(--gl-radius-sm);
 			}
 
 			* {
@@ -47,23 +47,44 @@ export class ActionChip extends LitElement {
 				opacity: 0.5;
 			}
 
+			.chip__icon-active {
+				display: none;
+			}
+
+			.chip:hover:has(.chip__icon-active) .chip__icon,
+			.chip:focus-visible:has(.chip__icon-active) .chip__icon {
+				display: none;
+			}
+
+			.chip:hover .chip__icon-active,
+			.chip:focus-visible .chip__icon-active {
+				display: inline-flex;
+			}
+
 			.chip {
 				display: inline-flex;
-				justify-content: center;
+				gap: var(--gl-space-4);
 				align-items: center;
-				gap: 0.2rem;
-				vertical-align: middle;
-				color: inherit;
+				justify-content: center;
 				min-width: 2rem;
+				max-width: 100%;
 				height: 2rem;
+				padding: var(--gl-space-2);
+				overflow: hidden;
+				font: inherit;
+
+				/* vertical-align: middle; */
 				color: inherit;
-				padding: 0.2rem;
 				text-decoration: none;
 				cursor: pointer;
+				background: none;
+				border: none;
 			}
+
 			.chip:hover {
 				text-decoration: none;
 			}
+
 			.chip:focus {
 				outline: none;
 			}
@@ -73,59 +94,167 @@ export class ActionChip extends LitElement {
 			}
 
 			::slotted(*) {
-				padding-inline-end: 0.2rem;
+				padding-inline-end: var(--gl-space-2);
 				vertical-align: middle;
-				text-transform: capitalize;
+				text-transform: var(--chip-text-transform, capitalize);
+			}
+
+			/* Optically center the label against the icon — text sits slightly low in its line-box
+			   under flex centering, so nudge it up a hair. Excludes the suffix icon (centered fine). */
+			::slotted(:not([slot='suffix'])) {
+				margin-block-start: -0.1rem;
+			}
+
+			/* Drop the trailing inline padding for suffix-slotted icons — the asymmetric box
+	   shifts the rotation axis off the glyph's visual center, so a spinning loading
+	   codicon wobbles. Flex gap already spaces this from the preceding label. */
+			::slotted([slot='suffix']) {
+				padding-inline-end: 0;
+			}
+
+			:host([truncate]) {
+				min-width: 0;
+				max-width: 100%;
+			}
+
+			:host([truncate]) ::slotted(*) {
+				display: inline-block;
+				min-width: 0;
+				max-width: 100%;
+				overflow: hidden;
+				text-overflow: ellipsis;
+				vertical-align: middle;
+				white-space: nowrap;
 			}
 		`,
 	];
 
+	@property({ type: Boolean, reflect: true })
+	truncate = false;
+
 	@property()
 	href?: string;
+
+	@property({ attribute: 'alt-href' })
+	altHref?: string;
 
 	@property()
 	label?: string;
 
+	@property({ attribute: 'alt-label' })
+	altLabel?: string;
+
 	@property()
-	overlay: 'tooltip' | 'popover' = 'tooltip';
+	overlay: 'tooltip' | 'popover' | 'none' = 'tooltip';
 
 	@property()
 	icon = '';
 
+	@property()
+	iconFlip?: 'inline' | 'block';
+
+	@property({ attribute: 'alt-icon' })
+	altIcon?: string;
+
+	@property()
+	activeIcon?: string;
+
 	@property({ type: Boolean })
 	disabled = false;
 
-	@query('a')
-	private defaultFocusEl!: HTMLAnchorElement;
+	@query('.chip')
+	private defaultFocusEl!: HTMLElement;
+
+	private readonly _modifiers = new ModifierKeysController(this);
+
+	private get isAltKeyPressed(): boolean {
+		return this._modifiers.altKey || this._modifiers.shiftKey;
+	}
+
+	private get effectiveIcon(): string {
+		return this.isAltKeyPressed && this.altIcon ? this.altIcon : this.icon;
+	}
+
+	private get effectiveHref(): string | undefined {
+		return this.isAltKeyPressed && this.altHref ? this.altHref : this.href;
+	}
+
+	private get effectiveLabel(): string | undefined {
+		return this.isAltKeyPressed && this.altLabel ? this.altLabel : this.label;
+	}
+
+	private get effectiveTooltip(): string | undefined {
+		if (!this.label && !this.altLabel) return undefined;
+		if (this.altLabel) {
+			if (this.isAltKeyPressed) return this.altLabel;
+			return `${this.label}\n[${getAltKeySymbol()}] ${this.altLabel}`;
+		}
+		return this.label;
+	}
 
 	override render(): unknown {
-		if (!this.label) {
+		if (!this.label || this.overlay === 'none') {
 			return this.renderContent();
 		}
 
 		if (this.overlay === 'popover') {
-			return html`<gl-popover hoist
+			return html`<gl-popover
 				>${this.renderContent()}
 				<div slot="content">${handleUnsafeOverlayContent(this.label)}</div></gl-popover
 			>`;
 		}
 
-		return html`<gl-tooltip hoist content="${this.label}">${this.renderContent()}</gl-tooltip>`;
+		return html`<gl-tooltip content="${this.effectiveTooltip}">${this.renderContent()}</gl-tooltip>`;
 	}
 
 	private renderContent() {
+		const slot = this.overlay === 'popover' ? 'anchor' : nothing;
+		const icon = this.effectiveIcon;
+		const iconHtml = html`<code-icon
+				class="chip__icon"
+				part="icon"
+				icon="${icon}"
+				flip="${ifDefined(this.iconFlip)}"
+				modifier="${ifDefined(icon === 'loading' ? 'spin' : '')}"
+			></code-icon
+			>${
+				this.activeIcon
+					? html`<code-icon
+							class="chip__icon-active"
+							part="active-icon"
+							icon="${this.activeIcon}"
+						></code-icon>`
+					: nothing
+			}`;
+
+		const href = this.effectiveHref;
+		const ariaLabel = this.effectiveLabel;
+		if (href) {
+			return html`
+				<a
+					class="chip"
+					part="base"
+					?disabled=${this.disabled}
+					href=${href}
+					slot=${slot}
+					aria-label=${ifDefined(ariaLabel)}
+				>
+					${iconHtml}<slot></slot><slot name="suffix"></slot>
+				</a>
+			`;
+		}
+
 		return html`
-			<a
+			<button
 				class="chip"
 				part="base"
-				role="${!this.href ? 'button' : nothing}"
-				type="${!this.href ? 'button' : nothing}"
+				type="button"
 				?disabled=${this.disabled}
-				href=${this.href ?? nothing}
-				slot=${this.overlay === 'popover' ? 'anchor' : nothing}
+				slot=${slot}
+				aria-label=${ifDefined(ariaLabel)}
 			>
-				<code-icon part="icon" icon="${this.icon}"></code-icon><slot></slot>
-			</a>
+				${iconHtml}<slot></slot><slot name="suffix"></slot>
+			</button>
 		`;
 	}
 

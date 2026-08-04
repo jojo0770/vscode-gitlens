@@ -1,10 +1,11 @@
 import { env, window } from 'vscode';
-import type { Container } from '../container';
-import { shortenRevision } from '../git/utils/revision.utils';
-import { command } from '../system/-webview/command';
-import { openUrl } from '../system/-webview/vscode/uris';
-import { GlCommandBase } from './commandBase';
-import type { CommandContext } from './commandContext';
+import { shortenRevision } from '@gitlens/git/utils/revision.utils.js';
+import type { Container } from '../container.js';
+import { getBestRemoteWithIntegration, getRemoteIntegration } from '../git/utils/-webview/remote.utils.js';
+import { command } from '../system/-webview/command.js';
+import { openUrl } from '../system/-webview/vscode/uris.js';
+import { GlCommandBase } from './commandBase.js';
+import type { CommandContext } from './commandContext.js';
 
 export interface OpenPullRequestOnRemoteCommandArgs {
 	clipboard?: boolean;
@@ -35,12 +36,10 @@ export class OpenPullRequestOnRemoteCommand extends GlCommandBase {
 		if (args?.pr == null) {
 			if (args?.repoPath == null || args?.ref == null) return;
 
-			const remote = await this.container.git
-				.getRepositoryService(args.repoPath)
-				.remotes.getBestRemoteWithIntegration();
+			const remote = await getBestRemoteWithIntegration(args.repoPath);
 			if (remote == null) return;
 
-			const integration = await remote?.getIntegration();
+			const integration = await getRemoteIntegration(remote);
 			if (integration == null) return;
 
 			const pr = await integration.getPullRequestForCommit(remote.provider.repoDesc, args.ref);

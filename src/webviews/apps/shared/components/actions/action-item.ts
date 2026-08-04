@@ -1,9 +1,10 @@
 import { css, html, LitElement, nothing } from 'lit';
-import { customElement, property, query, state } from 'lit/decorators.js';
-import { getAltKeySymbol } from '@env/platform';
-import { focusOutline } from '../styles/lit/a11y.css';
-import '../overlays/tooltip';
-import '../code-icon';
+import { customElement, property, query } from 'lit/decorators.js';
+import { getAltKeySymbol } from '@env/platform.js';
+import { ModifierKeysController } from '../../controllers/modifier-keys.js';
+import { focusOutline } from '../styles/lit/a11y.css.js';
+import '../overlays/tooltip.js';
+import '../code-icon.js';
 
 @customElement('action-item')
 export class ActionItem extends LitElement {
@@ -16,28 +17,43 @@ export class ActionItem extends LitElement {
 		:host {
 			box-sizing: border-box;
 			display: inline-flex;
-			justify-content: center;
 			align-items: center;
+			justify-content: center;
 			width: 2rem;
 			height: 2rem;
-			border-radius: 0.5rem;
-			color: inherit;
-			padding: 0.2rem;
+			padding: var(--gl-space-2);
 			vertical-align: text-bottom;
+			color: var(--action-item-foreground, var(--vscode-icon-foreground));
 			text-decoration: none;
 			cursor: pointer;
+			border-radius: var(--gl-radius-sm);
+		}
+
+		.icon-wrapper {
+			position: relative;
+			display: inline-flex;
+			align-items: center;
+			justify-content: center;
+		}
+
+		code-icon[part~='icon-outline'] {
+			position: absolute;
+			inset: 0;
+			display: none;
+			pointer-events: none;
 		}
 
 		:host(:focus-within) {
 			${focusOutline}
 		}
 
-		:host(:hover) {
-			background-color: var(--vscode-toolbar-hoverBackground);
+		:host(:hover),
+		:host(:focus-within) {
+			background-color: var(--action-item-hover-background, var(--vscode-toolbar-hoverBackground));
 		}
 
 		:host(:active) {
-			background-color: var(--vscode-toolbar-activeBackground);
+			background-color: var(--action-item-active-background, var(--vscode-toolbar-activeBackground));
 		}
 
 		:host([disabled]) {
@@ -46,10 +62,21 @@ export class ActionItem extends LitElement {
 		}
 
 		a {
+			display: flex;
+			align-items: center;
+			justify-content: center;
+			width: 100%;
+			height: 100%;
 			color: inherit;
+			text-decoration: none;
 		}
+
 		a:focus {
 			outline: none;
+		}
+
+		a:is(:hover, :focus, :active) {
+			text-decoration: none;
 		}
 	`;
 
@@ -71,14 +98,20 @@ export class ActionItem extends LitElement {
 	@property({ attribute: 'alt-icon' })
 	altIcon?: string;
 
+	@property({ attribute: 'outline-icon' })
+	outlineIcon?: string;
+
 	@property({ type: Boolean })
 	disabled = false;
 
 	@query('a')
 	private defaultFocusEl!: HTMLAnchorElement;
 
-	@state()
-	private isAltKeyPressed = false;
+	private readonly _modifiers = new ModifierKeysController(this);
+
+	private get isAltKeyPressed(): boolean {
+		return this._modifiers.altKey || this._modifiers.shiftKey;
+	}
 
 	get effectiveIcon(): string {
 		if (this.isAltKeyPressed && this.altIcon) {
@@ -117,42 +150,52 @@ export class ActionItem extends LitElement {
 		return this.href;
 	}
 
-	override connectedCallback(): void {
-		super.connectedCallback?.();
-		window.addEventListener('keydown', this);
-		window.addEventListener('keyup', this);
-	}
-
-	override disconnectedCallback(): void {
-		super.disconnectedCallback?.();
-		window.removeEventListener('keydown', this);
-		window.removeEventListener('keyup', this);
-	}
-
-	handleEvent(e: KeyboardEvent) {
-		const isAltKey = e.key === 'Alt' || e.altKey;
-		if (e.type === 'keydown') {
-			this.isAltKeyPressed = isAltKey;
-		} else if (e.type === 'keyup' && isAltKey) {
-			this.isAltKeyPressed = false;
-		}
-	}
-
 	override render(): unknown {
 		return html`
-			<gl-tooltip hoist content="${this.effectiveTooltip ?? nothing}">
+			<gl-tooltip content="${this.effectiveTooltip ?? nothing}">
 				<a
 					role="${!this.effectiveHref ? 'button' : nothing}"
 					type="${!this.effectiveHref ? 'button' : nothing}"
 					aria-label="${this.effectiveLabel ?? nothing}"
 					?disabled=${this.disabled}
 					href=${this.effectiveHref ?? nothing}
+					tabindex="0"
+					@keydown=${this.handleLinkKeydown}
 				>
-					<code-icon icon="${this.effectiveIcon}"></code-icon>
+					<span class="icon-wrapper">
+						<code-icon part="icon" icon="${this.effectiveIcon}"></code-icon>
+						<code-icon
+							part="icon-outline"
+							icon="${this.outlineIcon ?? this.effectiveIcon}"
+							aria-hidden="true"
+						></code-icon>
+					</span>
 				</a>
 			</gl-tooltip>
 		`;
 	}
+
+	private handleLinkKeydown = (e: KeyboardEvent) => {
+		// Handle Space and Enter for button-role links without href.
+		if (!this.effectiveHref && (e.key === ' ' || e.key === 'Enter')) {
+			e.preventDefault();
+			// Dispatch a synthetic click that carries the current modifier state so consumers
+			// reading `MouseEvent.altKey` (e.g. the WIP smart Open Multi-Diff button) work for
+			// keyboard activation too — `HTMLElement.click()` would synthesize a click with all
+			// modifiers false.
+			(e.target as HTMLElement).dispatchEvent(
+				new MouseEvent('click', {
+					bubbles: true,
+					cancelable: true,
+					composed: true,
+					altKey: e.altKey,
+					ctrlKey: e.ctrlKey,
+					metaKey: e.metaKey,
+					shiftKey: e.shiftKey,
+				}),
+			);
+		}
+	};
 
 	override focus(options?: FocusOptions): void {
 		this.defaultFocusEl.focus(options);

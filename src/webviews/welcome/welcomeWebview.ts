@@ -1,0 +1,168 @@
+import { Disposable, env } from 'vscode';
+import { SubscriptionState } from '../../constants.subscription.js';
+import type { WebviewTelemetryContext } from '../../constants.telemetry.js';
+import type { GraphWalkthroughContextKeys, WalkthroughContextKeys } from '../../constants.walkthroughs.js';
+import type { Container } from '../../container.js';
+import { FeatureFlagKey } from '../../featureFlags/featureFlagService.js';
+import type { SubscriptionChangeEvent } from '../../plus/gk/subscriptionService.js';
+import { needsCursorMcpCleanupNotice } from '../../plus/gk/utils/-webview/mcp.utils.js';
+import { registerCommand } from '../../system/-webview/command.js';
+import { getContext } from '../../system/-webview/context.js';
+import type { WebviewHost, WebviewProvider, WebviewShowingArgs } from '../webviewProvider.js';
+import type { WebviewShowOptions } from '../webviewsController.js';
+import type { GraphWalkthroughProgress, State, WalkthroughMode, WalkthroughProgress } from './protocol.js';
+import {
+	DidChangeGraphWalkthroughProgress,
+	DidChangeSubscription,
+	DidChangeWalkthroughProgress,
+	DidFocusWalkthrough,
+	DidSwitchWalkthroughMode,
+} from './protocol.js';
+import type { WelcomeWebviewShowingArgs } from './registration.js';
+
+export class WelcomeWebviewProvider implements WebviewProvider<State, State, WelcomeWebviewShowingArgs> {
+	private readonly _disposable: Disposable;
+	private _etagSubscription?: number;
+	private _mode: WalkthroughMode = 'main';
+
+	constructor(
+		private readonly container: Container,
+		private readonly host: WebviewHost<'gitlens.views.welcome'>,
+	) {
+		this._disposable = Disposable.from(
+			this.container.subscription.onDidChange(this.onSubscriptionChanged, this),
+			this.container.walkthrough.onDidChangeProgress(this.onWalkthroughProgressChanged, this),
+		);
+	}
+
+	dispose(): void {
+		this._disposable.dispose();
+	}
+
+	getTelemetryContext(): WebviewTelemetryContext {
+		return {
+			...this.host.getTelemetryContext(),
+		};
+	}
+
+	onShowing(
+		loading: boolean,
+		_options?: WebviewShowOptions,
+		...args: WebviewShowingArgs<WelcomeWebviewShowingArgs, State>
+	): [boolean, Record<`context.${string}`, string | number | boolean> | undefined] {
+		const modeArg = args[0];
+		const mode: WalkthroughMode = modeArg != null && 'mode' in modeArg ? (modeArg.mode ?? 'main') : 'main';
+		this._mode = mode;
+
+		if (mode === 'graph') {
+			void this.container.usage.track('action:gitlens.graph.walkthrough.started:happened');
+		}
+
+		if (!loading) {
+			// If already loaded, notify the webview to switch mode and focus
+			void this.host.notify(DidSwitchWalkthroughMode, { mode: mode });
+			void this.host.notify(DidFocusWalkthrough, undefined);
+		}
+		return [true, undefined];
+	}
+
+	includeBootstrap(): Promise<State> {
+		return this.getState();
+	}
+
+	registerCommands(): Disposable[] {
+		if (this.host.is('view')) {
+			return [registerCommand(`${this.host.id}.refresh`, () => this.host.refresh(true), this)];
+		}
+		return [];
+	}
+
+	private onSubscriptionChanged(e: SubscriptionChangeEvent): void {
+		if (e.etag === this._etagSubscription) return;
+
+		this._etagSubscription = e.etag;
+		this.notifyDidChangeSubscription(e.current.state);
+	}
+
+	private notifyDidChangeSubscription(plusState: SubscriptionState): void {
+		void this.host.notify(DidChangeSubscription, { plusState: plusState });
+	}
+
+	private onWalkthroughProgressChanged(): void {
+		const walkthroughProgress = this.getWalkthroughProgress();
+		if (walkthroughProgress != null) {
+			void this.host.notify(DidChangeWalkthroughProgress, { walkthroughProgress: walkthroughProgress });
+		}
+
+		const graphWalkthroughProgress = this.getGraphWalkthroughProgress();
+		if (graphWalkthroughProgress != null) {
+			void this.host.notify(DidChangeGraphWalkthroughProgress, {
+				graphWalkthroughProgress: graphWalkthroughProgress,
+			});
+		}
+	}
+
+	private getWalkthroughProgress(): WalkthroughProgress | undefined {
+		const walkthroughState = this.container.walkthrough.getState();
+		const state = Object.fromEntries(walkthroughState) as Record<WalkthroughContextKeys, boolean>;
+
+		return {
+			allCount: this.container.walkthrough.walkthroughSize,
+			doneCount: this.container.walkthrough.doneCount,
+			progress: this.container.walkthrough.progress,
+			state: state,
+		};
+	}
+
+	private getGraphWalkthroughProgress(): GraphWalkthroughProgress | undefined {
+		const graphState = this.container.walkthrough.getGraphState();
+		const state = Object.fromEntries(graphState) as Record<GraphWalkthroughContextKeys, boolean>;
+
+		return {
+			allCount: this.container.walkthrough.graphWalkthroughSize,
+			doneCount: this.container.walkthrough.graphDoneCount,
+			progress: this.container.walkthrough.graphProgress,
+			state: state,
+		};
+	}
+
+	private getMcpCanAutoRegister(): boolean {
+		return this.container.gkMcp?.isRegistrationAllowed ?? false;
+	}
+
+	private isCliInstalled(): boolean {
+		return getContext('gitlens:gk:cli:installed', false);
+	}
+
+	private getMcpNeedsInstall(): boolean {
+		return !this.getMcpCanAutoRegister() || !this.isCliInstalled();
+	}
+
+	private getMcpShowCleanupNotice(): boolean {
+		return needsCursorMcpCleanupNotice(this.container);
+	}
+
+	private getWelcomeTitleVariant(): string | undefined {
+		const showVariant = this.container.featureFlags.getFlag(FeatureFlagKey.WelcomeTitleVariant, false);
+		return showVariant ? 'Welcome' : undefined;
+	}
+
+	private async getState(): Promise<State> {
+		const subscription = await this.container.subscription.getSubscription();
+		const welcomeTitle = this.getWelcomeTitleVariant() || 'Get Started with GitLens';
+		const plusState = subscription?.state ?? SubscriptionState.Community;
+
+		return {
+			...this.host.baseWebviewState,
+			webroot: this.host.getWebRoot(),
+			hostAppName: env.appName,
+			welcomeTitle: welcomeTitle,
+			plusState: plusState,
+			walkthroughProgress: this.getWalkthroughProgress(),
+			graphWalkthroughProgress: this.getGraphWalkthroughProgress(),
+			mode: this._mode,
+			mcpNeedsInstall: this.getMcpNeedsInstall(),
+			mcpShowCleanupNotice: this.getMcpShowCleanupNotice(),
+		};
+	}
+}

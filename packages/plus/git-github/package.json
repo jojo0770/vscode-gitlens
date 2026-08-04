@@ -1,0 +1,56 @@
+{
+	"name": "@gitlens/git-github",
+	"description": "GitLens GitHub integration package",
+	"version": "0.0.1",
+	"license": "SEE LICENSE IN LICENSE",
+	"private": true,
+	"type": "module",
+	"sideEffects": false,
+	"exports": {
+		"./context.js": {
+			"types": "./dist/context.d.ts",
+			"default": "./dist/context.js"
+		},
+		"./models.js": {
+			"types": "./dist/models.d.ts",
+			"default": "./dist/models.js"
+		},
+		"./api/*.js": {
+			"types": "./dist/api/*.d.ts",
+			"default": "./dist/api/*.js"
+		},
+		"./providers/*.js": {
+			"types": "./dist/providers/*.d.ts",
+			"default": "./dist/providers/*.js"
+		},
+		"./providers/github/*.js": {
+			"types": "./dist/providers/github/*.d.ts",
+			"default": "./dist/providers/github/*.js"
+		}
+	},
+	"files": [
+		"dist"
+	],
+	"scripts": {
+		"build": "tsc -b",
+		"clean": "pnpx rimraf --glob dist out **/tsconfig*.tsbuildinfo",
+		"clean:all": "pnpm run clean && pnpm run clean:deps",
+		"clean:deps": "pnpx rimraf --glob **/node_modules",
+		"clean:lint": "pnpx rimraf --glob **/tsconfig*.tsbuildinfo",
+		"test": "mocha --require tsx --ui tdd --timeout 30000 'src/**/__tests__/**/*.test.ts'"
+	},
+	"dependencies": {
+		"@gitlens/git": "workspace:*",
+		"@gitlens/utils": "workspace:*",
+		"@octokit/graphql": "catalog:",
+		"@octokit/request": "catalog:",
+		"@octokit/request-error": "catalog:",
+		"@octokit/types": "catalog:"
+	},
+	"devDependencies": {
+		"@types/mocha": "catalog:",
+		"mocha": "catalog:",
+		"tsx": "catalog:",
+		"typescript": "catalog:"
+	}
+}

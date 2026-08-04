@@ -1,18 +1,18 @@
 import { MarkdownString, ThemeColor, ThemeIcon, TreeItem, TreeItemCollapsibleState } from 'vscode';
-import type { Colors } from '../../constants.colors';
-import { GitUri } from '../../git/gitUri';
-import type { GitBranch } from '../../git/models/branch';
-import type { GitPausedOperationStatus } from '../../git/models/pausedOperationStatus';
-import type { GitStatus } from '../../git/models/status';
-import { pausedOperationStatusStringsByType } from '../../git/utils/pausedOperationStatus.utils';
-import { getReferenceLabel } from '../../git/utils/reference.utils';
-import { Lazy } from '../../system/lazy';
-import { pluralize } from '../../system/string';
-import type { ViewsWithCommits } from '../viewBase';
-import { createViewDecorationUri } from '../viewDecorationProvider';
-import { ContextValues, getViewNodeId, ViewNode } from './abstract/viewNode';
-import { MergeConflictFilesNode } from './mergeConflictFilesNode';
-import { RebaseCommitNode } from './rebaseCommitNode';
+import type { GitBranch } from '@gitlens/git/models/branch.js';
+import type { GitPausedOperationStatus } from '@gitlens/git/models/pausedOperationStatus.js';
+import type { GitStatus } from '@gitlens/git/models/status.js';
+import { pausedOperationStatusStringsByType } from '@gitlens/git/utils/pausedOperationStatus.utils.js';
+import { getReferenceLabel } from '@gitlens/git/utils/reference.utils.js';
+import { Lazy } from '@gitlens/utils/lazy.js';
+import { pluralize } from '@gitlens/utils/string.js';
+import type { Colors } from '../../constants.colors.js';
+import { GitUri } from '../../git/gitUri.js';
+import type { ViewsWithCommits } from '../viewBase.js';
+import { createViewDecorationUri } from '../viewDecorationProvider.js';
+import { ContextValues, getViewNodeId, ViewNode } from './abstract/viewNode.js';
+import { MergeConflictFilesNode } from './mergeConflictFilesNode.js';
+import { RebaseCommitNode } from './rebaseCommitNode.js';
 
 export class PausedOperationStatusNode extends ViewNode<'paused-operation-status', ViewsWithCommits> {
 	private _status: GitStatus | undefined;
@@ -60,12 +60,9 @@ export class PausedOperationStatusNode extends ViewNode<'paused-operation-status
 
 		const revision = this.pausedOpStatus.steps.current.commit;
 		if (revision != null) {
-			const commit =
-				revision != null
-					? await this.view.container.git
-							.getRepositoryService(this.pausedOpStatus.repoPath)
-							.commits.getCommit(revision.ref)
-					: undefined;
+			const commit = await this.view.container.git
+				.getRepositoryService(this.pausedOpStatus.repoPath)
+				.commits.getCommit(revision.ref);
 			if (commit != null) {
 				children.push(new RebaseCommitNode(this.view, this, commit));
 			}
@@ -83,10 +80,7 @@ export class PausedOperationStatusNode extends ViewNode<'paused-operation-status
 
 		const hasConflicts = status?.hasConflicts === true;
 		const hasChildren =
-			status?.hasConflicts ||
-			(this.pausedOpStatus.type === 'rebase' &&
-				this.pausedOpStatus.steps.total > 0 &&
-				this.pausedOpStatus.steps.current.commit != null);
+			status?.hasConflicts || (this.pausedOpStatus.type === 'rebase' && this.pausedOpStatus.hasStarted);
 
 		const item = new TreeItem(
 			this.label,
@@ -142,15 +136,15 @@ export class PausedOperationStatusNode extends ViewNode<'paused-operation-status
 			})}`;
 		}
 
-		const started = this.pausedOpStatus.steps.total > 0;
+		const { hasStarted } = this.pausedOpStatus;
 		const strings = pausedOperationStatusStringsByType[this.pausedOpStatus.type];
-		return `${hasConflicts ? strings.conflicts : started ? strings.label : strings.pending} ${getReferenceLabel(
+		return `${hasConflicts ? strings.conflicts : hasStarted ? strings.label : strings.pending} ${getReferenceLabel(
 			this.pausedOpStatus.incoming,
 			{ expand: false, icon: false },
 		)} ${strings.directionality} ${getReferenceLabel(this.pausedOpStatus.current ?? this.pausedOpStatus.onto, {
 			expand: false,
 			icon: false,
-		})}${started ? ` (${this.pausedOpStatus.steps.current.number}/${this.pausedOpStatus.steps.total})` : ''}`;
+		})}${hasStarted ? ` (${this.pausedOpStatus.steps.current.number}/${this.pausedOpStatus.steps.total})` : ''}`;
 	}
 
 	private get tooltip(): MarkdownString {
@@ -166,14 +160,17 @@ export class PausedOperationStatusNode extends ViewNode<'paused-operation-status
 				hasConflicts ? `\n\nResolve ${pluralize('conflict', status.conflicts.length)} before continuing` : ''
 			}`;
 		} else {
-			const started = this.pausedOpStatus.steps.total > 0;
+			const { hasStarted } = this.pausedOpStatus;
 			const strings = pausedOperationStatusStringsByType[this.pausedOpStatus.type];
-			tooltip = `${started ? strings.label : strings.pending} ${getReferenceLabel(this.pausedOpStatus.incoming, {
-				label: false,
-			})} ${strings.directionality} ${getReferenceLabel(this.pausedOpStatus.current ?? this.pausedOpStatus.onto, {
+			tooltip = `${hasStarted ? strings.label : strings.pending} ${getReferenceLabel(
+				this.pausedOpStatus.incoming,
+				{
+					label: false,
+				},
+			)} ${strings.directionality} ${getReferenceLabel(this.pausedOpStatus.current ?? this.pausedOpStatus.onto, {
 				label: false,
 			})}${
-				started
+				hasStarted
 					? `\n\nPaused at step ${this.pausedOpStatus.steps.current.number} of ${
 							this.pausedOpStatus.steps.total
 						}${

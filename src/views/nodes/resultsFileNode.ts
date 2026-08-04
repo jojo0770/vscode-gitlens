@@ -1,23 +1,23 @@
 import type { Command } from 'vscode';
-import { TreeItem, TreeItemCheckboxState, TreeItemCollapsibleState } from 'vscode';
-import type { DiffWithCommandArgs } from '../../commands/diffWith';
-import { StatusFileFormatter } from '../../git/formatters/statusFormatter';
-import { GitUri } from '../../git/gitUri';
-import type { GitFile } from '../../git/models/file';
-import type { GitRevisionReference } from '../../git/models/reference';
-import { getGitFileStatusIcon } from '../../git/utils/fileStatus.utils';
-import { createReference } from '../../git/utils/reference.utils';
-import { createCommand } from '../../system/-webview/command';
-import { relativeDir } from '../../system/-webview/path';
-import { editorLineToDiffRange } from '../../system/-webview/vscode/editors';
-import { joinPaths } from '../../system/path';
-import type { View } from '../viewBase';
-import { getFileTooltipMarkdown } from './abstract/viewFileNode';
-import type { ViewNode } from './abstract/viewNode';
-import { ContextValues, getViewNodeId } from './abstract/viewNode';
-import { ViewRefFileNode } from './abstract/viewRefNode';
-import { getComparisonStoragePrefix } from './compareResultsNode';
-import type { FileNode } from './folderNode';
+import { TreeItem, TreeItemCheckboxState, TreeItemCollapsibleState, Uri } from 'vscode';
+import type { GitFile } from '@gitlens/git/models/file.js';
+import type { GitRevisionReference } from '@gitlens/git/models/reference.js';
+import { getGitFileStatusIcon } from '@gitlens/git/utils/fileStatus.utils.js';
+import { createReference } from '@gitlens/git/utils/reference.utils.js';
+import { joinPaths } from '@gitlens/utils/path.js';
+import type { DiffWithCommandArgs } from '../../commands/diffWith.js';
+import { StatusFileFormatter } from '../../git/formatters/statusFormatter.js';
+import { GitUri } from '../../git/gitUri.js';
+import { createCommand } from '../../system/-webview/command.js';
+import { relativeDir } from '../../system/-webview/path.js';
+import { editorLineToDiffRange } from '../../system/-webview/vscode/range.js';
+import type { View } from '../viewBase.js';
+import { getFileTooltipMarkdown } from './abstract/viewFileNode.js';
+import type { ViewNode } from './abstract/viewNode.js';
+import { ContextValues, getViewNodeId } from './abstract/viewNode.js';
+import { ViewRefFileNode } from './abstract/viewRefNode.js';
+import { getComparisonStoragePrefix } from './compareResultsNode.js';
+import type { FileNode } from './folderNode.js';
 
 type State = {
 	checked: TreeItemCheckboxState;
@@ -65,8 +65,8 @@ export class ResultsFileNode extends ViewRefFileNode<'results-file', View, State
 
 		const statusIcon = getGitFileStatusIcon(this.file.status);
 		item.iconPath = {
-			dark: this.view.container.context.asAbsolutePath(joinPaths('images', 'dark', statusIcon)),
-			light: this.view.container.context.asAbsolutePath(joinPaths('images', 'light', statusIcon)),
+			dark: Uri.file(this.view.container.context.asAbsolutePath(joinPaths('images', 'dark', statusIcon))),
+			light: Uri.file(this.view.container.context.asAbsolutePath(joinPaths('images', 'light', statusIcon))),
 		};
 
 		item.command = this.getCommand();
@@ -81,33 +81,23 @@ export class ResultsFileNode extends ViewRefFileNode<'results-file', View, State
 
 	private _description: string | undefined;
 	get description(): string {
-		if (this._description === undefined) {
-			this._description = StatusFileFormatter.fromTemplate(
-				this.view.config.formats.files.description,
-				this.file,
-				{
-					relativePath: this.relativePath,
-				},
-			);
-		}
+		this._description ??= StatusFileFormatter.fromTemplate(this.view.config.formats.files.description, this.file, {
+			relativePath: this.relativePath,
+		});
 		return this._description;
 	}
 
 	private _folderName: string | undefined;
 	get folderName(): string {
-		if (this._folderName === undefined) {
-			this._folderName = relativeDir(this.uri.relativePath);
-		}
+		this._folderName ??= relativeDir(this.uri.relativePath);
 		return this._folderName;
 	}
 
 	private _label: string | undefined;
 	get label(): string {
-		if (this._label === undefined) {
-			this._label = StatusFileFormatter.fromTemplate(this.view.config.formats.files.label, this.file, {
-				relativePath: this.relativePath,
-			});
-		}
+		this._label ??= StatusFileFormatter.fromTemplate(this.view.config.formats.files.label, this.file, {
+			relativePath: this.relativePath,
+		});
 		return this._label;
 	}
 
@@ -132,12 +122,11 @@ export class ResultsFileNode extends ViewRefFileNode<'results-file', View, State
 			if (this.direction === 'behind') {
 				lhsUri = GitUri.fromFile(this.file, this.uri.repoPath!, this.ref2, true);
 				rhsUri = this.uri;
+			} else if (this.direction == null) {
+				lhsUri = GitUri.fromFile(this.file, this.uri.repoPath!, this.ref1, true);
+				rhsUri = GitUri.fromFile(this.file, this.uri.repoPath!, this.ref2, false);
 			} else {
-				if (this.direction == null) {
-					lhsUri = GitUri.fromFile(this.file, this.uri.repoPath!, this.ref1, true);
-				} else {
-					lhsUri = this.uri;
-				}
+				lhsUri = this.uri;
 				rhsUri = GitUri.fromFile(this.file, this.uri.repoPath!, this.ref2, true);
 			}
 		} else {

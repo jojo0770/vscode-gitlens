@@ -1,38 +1,50 @@
-import { GlyphChars } from '../../constants';
-import type { Container } from '../../container';
-import type { GitBranchReference, GitReference } from '../../git/models/reference';
-import type { Repository } from '../../git/models/repository';
-import { getRemoteNameFromBranchName } from '../../git/utils/branch.utils';
-import { getReferenceLabel, isBranchReference } from '../../git/utils/reference.utils';
-import { createDirectiveQuickPickItem, Directive } from '../../quickpicks/items/directive';
-import type { FlagsQuickPickItem } from '../../quickpicks/items/flags';
-import { createFlagsQuickPickItem } from '../../quickpicks/items/flags';
-import { configuration } from '../../system/-webview/configuration';
-import { isStringArray } from '../../system/array';
-import { fromNow } from '../../system/date';
-import { pad, pluralize } from '../../system/string';
-import type { ViewsWithRepositoryFolders } from '../../views/viewBase';
+import type { GitBranchReference, GitReference } from '@gitlens/git/models/reference.js';
+import { getReferenceLabel, isBranchReference } from '@gitlens/git/utils/reference.utils.js';
+import { isStringArray } from '@gitlens/utils/array.js';
+import { fromNow } from '@gitlens/utils/date.js';
+import { pad, pluralize } from '@gitlens/utils/string.js';
+import { GlyphChars } from '../../constants.js';
+import type { Container } from '../../container.js';
+import type { GlRepository } from '../../git/models/repository.js';
+import { createDirectiveQuickPickItem, Directive } from '../../quickpicks/items/directive.js';
+import type { FlagsQuickPickItem } from '../../quickpicks/items/flags.js';
+import { createFlagsQuickPickItem } from '../../quickpicks/items/flags.js';
+import { configuration } from '../../system/-webview/configuration.js';
+import type { ViewsWithRepositoryFolders } from '../../views/viewBase.js';
 import type {
 	AsyncStepResultGenerator,
 	PartialStepState,
-	QuickPickStep,
 	StepGenerator,
+	StepsContext,
 	StepSelection,
 	StepState,
-} from '../quickCommand';
-import { canPickStepContinue, endSteps, QuickCommand, StepResultBreak } from '../quickCommand';
-import { FetchQuickInputButton } from '../quickCommand.buttons';
-import { appendReposToTitle, pickRepositoriesStep, pickRepositoryStep } from '../quickCommand.steps';
+} from '../quick-wizard/models/steps.js';
+import { StepResultBreak } from '../quick-wizard/models/steps.js';
+import type { QuickPickStep } from '../quick-wizard/models/steps.quickpick.js';
+import { FetchQuickInputButton } from '../quick-wizard/quickButtons.js';
+import { QuickCommand } from '../quick-wizard/quickCommand.js';
+import {
+	canSkipRepositoriesPick,
+	pickRepositoriesStep,
+	pickRepositoryStep,
+} from '../quick-wizard/steps/repositories.js';
+import { StepsController } from '../quick-wizard/stepsController.js';
+import { appendReposToTitle, assertStepState, canPickStepContinue } from '../quick-wizard/utils/steps.utils.js';
 
-interface Context {
-	repos: Repository[];
+const Steps = {
+	PickRepos: 'push-pick-repos',
+	Confirm: 'push-confirm',
+} as const;
+type StepNames = (typeof Steps)[keyof typeof Steps];
+
+interface Context extends StepsContext<StepNames> {
+	repos: GlRepository[];
 	associatedView: ViewsWithRepositoryFolders;
 	title: string;
 }
 
 type Flags = '--force' | '--set-upstream' | string;
-
-interface State<Repos = string | string[] | Repository | Repository[]> {
+interface State<Repos = string | string[] | GlRepository | GlRepository[]> {
 	repos: Repos;
 	reference?: GitReference;
 	flags: Flags[];
@@ -44,27 +56,16 @@ export interface PushGitCommandArgs {
 	state?: Partial<State>;
 }
 
-type PushStepState<T extends State = State> = ExcludeSome<StepState<T>, 'repos', string | string[] | Repository>;
-
 export class PushGitCommand extends QuickCommand<State> {
 	constructor(container: Container, args?: PushGitCommandArgs) {
 		super(container, 'push', 'push', 'Push', {
 			description: 'pushes changes from the current branch to a remote',
 		});
 
-		let counter = 0;
-		if (args?.state?.repos != null && (!Array.isArray(args.state.repos) || args.state.repos.length !== 0)) {
-			counter++;
-		}
-
-		this.initialState = {
-			counter: counter,
-			confirm: args?.confirm,
-			...args?.state,
-		};
+		this.initialState = { confirm: args?.confirm, ...args?.state };
 	}
 
-	private execute(state: State<Repository[]>) {
+	private execute(state: StepState<State<GlRepository[]>>) {
 		const index = state.flags.indexOf('--set-upstream');
 		if (index !== -1) {
 			return this.container.git.pushAll(state.repos, {
@@ -80,79 +81,93 @@ export class PushGitCommand extends QuickCommand<State> {
 		});
 	}
 
-	protected async *steps(state: PartialStepState<State>): StepGenerator {
-		const context: Context = {
+	protected createContext(context?: StepsContext<any>): Context {
+		return {
+			...context,
+			container: this.container,
 			repos: this.container.git.openRepositories,
 			associatedView: this.container.views.commits,
 			title: this.title,
 		};
+	}
 
-		if (state.flags == null) {
-			state.flags = [];
-		}
+	protected async *steps(state: PartialStepState<State>, context?: Context): StepGenerator {
+		context ??= this.createContext();
+		using steps = new StepsController<StepNames>(context, this);
+
+		state.flags ??= [];
 
 		if (state.repos != null && !Array.isArray(state.repos)) {
-			state.repos = [state.repos as string];
+			state.repos = typeof state.repos === 'string' ? [state.repos] : [state.repos];
 		}
 
-		let skippedStepOne = false;
+		assertStepState<State<GlRepository[] | string[]>>(state);
 
-		while (this.canStepsContinue(state)) {
+		while (!steps.isComplete) {
 			context.title = this.title;
 
-			if (state.counter < 1 || state.repos == null || state.repos.length === 0 || isStringArray(state.repos)) {
-				skippedStepOne = false;
-				if (context.repos.length === 1) {
-					skippedStepOne = true;
-					if (state.repos == null) {
-						state.counter++;
-					}
-
-					state.repos = [context.repos[0]];
+			if (steps.isAtStep(Steps.PickRepos) || !state.repos?.length || isStringArray(state.repos)) {
+				// Skip the picker only when the sole available repo is the one requested
+				if (canSkipRepositoriesPick(context.repos, state.repos)) {
+					state.repos = context.repos;
 				} else if (state.reference != null) {
+					// If a reference is specified, only allow picking the repository that contains it
+					using step = steps.enterStep(Steps.PickRepos);
+
 					const result = yield* pickRepositoryStep(
 						{ ...state, repos: undefined, repo: state.reference.repoPath },
 						context,
+						step,
 					);
-					// Always break on the first step (so we will go back)
-					if (result === StepResultBreak) break;
+					if (result === StepResultBreak) {
+						state.repos = undefined!;
+						if (step.goBack() == null) break;
+						continue;
+					}
 
 					state.repos = [result];
 				} else {
-					const result = yield* pickRepositoriesStep(
-						state as ExcludeSome<typeof state, 'repos', string | Repository>,
-						context,
-						{ skipIfPossible: state.counter >= 1 },
-					);
-					// Always break on the first step (so we will go back)
-					if (result === StepResultBreak) break;
+					using step = steps.enterStep(Steps.PickRepos);
+
+					const result = yield* pickRepositoriesStep(state, context, step, {
+						skipIfPossible: true,
+					});
+					if (result === StepResultBreak) {
+						state.repos = undefined!;
+						if (step.goBack() == null) break;
+						continue;
+					}
 
 					state.repos = result;
 				}
 			}
 
-			if (this.confirm(state.confirm)) {
-				const result = yield* this.confirmStep(state as PushStepState, context);
-				if (result === StepResultBreak) {
-					// If we skipped the previous step, make sure we back up past it
-					if (skippedStepOne) {
-						state.counter--;
-					}
+			assertStepState<State<GlRepository[]>>(state);
 
+			if (this.confirm(state.confirm)) {
+				using step = steps.enterStep(Steps.Confirm);
+
+				const result = yield* this.confirmStep(state, context);
+				if (result === StepResultBreak) {
+					state.flags = [];
+					if (step.goBack() == null) break;
 					continue;
 				}
 
 				state.flags = result;
 			}
 
-			endSteps(state);
-			void this.execute(state as State<Repository[]>);
+			steps.markStepsComplete();
+			void this.execute(state);
 		}
 
-		return state.counter < 0 ? StepResultBreak : undefined;
+		return steps.isComplete ? undefined : StepResultBreak;
 	}
 
-	private async *confirmStep(state: PushStepState, context: Context): AsyncStepResultGenerator<Flags[]> {
+	private async *confirmStep(
+		state: StepState<State<GlRepository[]>>,
+		context: Context,
+	): AsyncStepResultGenerator<Flags[]> {
 		const useForceWithLease = configuration.getCore('git.useForcePushWithLease') ?? true;
 		const useForceIfIncludes =
 			useForceWithLease &&
@@ -257,10 +272,10 @@ export class PushGitCommand extends QuickCommand<State> {
 										branch?.upstream.state.ahead
 											? ` ${pluralize('commit', branch.upstream.state.ahead)}`
 											: ''
-									}${branch.getRemoteName() ? ` to ${branch.getRemoteName()}` : ''}${
+									}${branch.remoteName ? ` to ${branch.remoteName}` : ''}${
 										branch != null && branch.upstream.state.behind > 0
 											? `, overwriting ${pluralize('commit', branch.upstream.state.behind)}${
-													branch?.getRemoteName() ? ` on ${branch.getRemoteName()}` : ''
+													branch?.remoteName ? ` on ${branch.remoteName}` : ''
 												}`
 											: ''
 									}`,
@@ -270,7 +285,7 @@ export class PushGitCommand extends QuickCommand<State> {
 								label: `Cancel ${this.title}`,
 								detail: `Cannot push; ${getReferenceLabel(
 									branch,
-								)} is behind ${branch.getRemoteName()} by ${pluralize(
+								)} is behind ${branch.remoteName} by ${pluralize(
 									'commit',
 									branch.upstream.state.behind,
 								)}`,
@@ -278,12 +293,12 @@ export class PushGitCommand extends QuickCommand<State> {
 						);
 					} else if (branch?.upstream?.state.ahead) {
 						step = this.createConfirmStep(appendReposToTitle(`Confirm ${context.title}`, state, context), [
-							createFlagsQuickPickItem<Flags>(state.flags, [branch.getRemoteName()!], {
+							createFlagsQuickPickItem<Flags>(state.flags, [branch.remoteName!], {
 								label: this.title,
 								detail: `Will push ${pluralize(
 									'commit',
 									branch.upstream.state.ahead,
-								)} from ${getReferenceLabel(branch)} to ${branch.getRemoteName()}`,
+								)} from ${getReferenceLabel(branch)} to ${branch.remoteName}`,
 							}),
 						]);
 					} else {
@@ -361,12 +376,10 @@ export class PushGitCommand extends QuickCommand<State> {
 							[],
 							createDirectiveQuickPickItem(Directive.Cancel, true, {
 								label: 'OK',
-								detail: `No commits ahead of ${getRemoteNameFromBranchName(status.upstream?.name)}`,
+								detail: `No commits ahead of ${status.upstream?.name}`,
 							}),
 							{
-								placeholder: `Nothing to push; No commits ahead of ${getRemoteNameFromBranchName(
-									status.upstream?.name,
-								)}`,
+								placeholder: `Nothing to push; No commits ahead of ${status.upstream?.name}`,
 							},
 						);
 					}
@@ -386,11 +399,11 @@ export class PushGitCommand extends QuickCommand<State> {
 										label: false,
 									})}`
 								: ''
-						}${status?.upstream ? ` to ${getRemoteNameFromBranchName(status.upstream?.name)}` : ''}`;
+						}${status?.upstream ? ` to ${status.upstream.name}` : ''}`;
 					} else {
 						pushDetails = `${
 							status?.upstream?.state.ahead ? ` ${pluralize('commit', status.upstream.state.ahead)}` : ''
-						}${status?.upstream ? ` to ${getRemoteNameFromBranchName(status.upstream?.name)}` : ''}`;
+						}${status?.upstream ? ` to ${status.upstream.name}` : ''}`;
 					}
 
 					step = this.createConfirmStep(
@@ -426,9 +439,7 @@ export class PushGitCommand extends QuickCommand<State> {
 								} ${pushDetails}${
 									status?.upstream?.state.behind
 										? `, overwriting ${pluralize('commit', status.upstream.state.behind)}${
-												status?.upstream
-													? ` on ${getRemoteNameFromBranchName(status.upstream?.name)}`
-													: ''
+												status?.upstream ? ` on ${status.upstream.name}` : ''
 											}`
 										: ''
 								}`,
@@ -438,7 +449,7 @@ export class PushGitCommand extends QuickCommand<State> {
 							? createDirectiveQuickPickItem(Directive.Cancel, true, {
 									label: `Cancel ${this.title}`,
 									detail: `Cannot push; ${getReferenceLabel(branch)} is behind${
-										status?.upstream ? ` ${getRemoteNameFromBranchName(status.upstream?.name)}` : ''
+										status?.upstream ? ` ${status.upstream.name}` : ''
 									} by ${pluralize('commit', status.upstream.state.behind)}`,
 								})
 							: undefined,
@@ -454,7 +465,7 @@ export class PushGitCommand extends QuickCommand<State> {
 
 						quickpick.busy = true;
 						try {
-							await repo.fetch({ progress: true });
+							await repo.git.fetch({ progress: true });
 							// Signal that the step should be retried
 							return true;
 						} finally {

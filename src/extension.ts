@@ -1,67 +1,78 @@
 import type { ExtensionContext } from 'vscode';
-import { version as codeVersion, env, ExtensionMode, Uri, window, workspace } from 'vscode';
-import { hrtime } from '@env/hrtime';
-import { loggingJsonReplacer } from '@env/json';
-import { isWeb } from '@env/platform';
-import { Api } from './api/api';
-import type { CreatePullRequestActionContext, GitLensApi, OpenPullRequestActionContext } from './api/gitlens';
-import type { CreatePullRequestOnRemoteCommandArgs } from './commands/createPullRequestOnRemote';
-import type { OpenPullRequestOnRemoteCommandArgs } from './commands/openPullRequestOnRemote';
-import { fromOutputLevel } from './config';
-import { trackableSchemes } from './constants';
-import { SyncedStorageKeys } from './constants.storage';
-import { Container } from './container';
-import { isGitUri } from './git/gitUri';
-import { isBranch } from './git/models/branch';
-import { isCommit } from './git/models/commit';
-import { isRepository } from './git/models/repository';
-import { isTag } from './git/models/tag';
-import { getBranchNameWithoutRemote } from './git/utils/branch.utils';
-import { setAbbreviatedShaLength } from './git/utils/revision.utils';
-import { showDebugLoggingWarningMessage, showPreReleaseExpiredErrorMessage, showWhatsNewMessage } from './messages';
-import { registerPartnerActionRunners } from './partners';
-import { executeCommand, registerCommands } from './system/-webview/command';
-import { configuration, Configuration } from './system/-webview/configuration';
-import { setContext } from './system/-webview/context';
-import { Storage } from './system/-webview/storage';
-import { deviceCohortGroup } from './system/-webview/vscode';
-import { isTextDocument } from './system/-webview/vscode/documents';
-import { isTextEditor } from './system/-webview/vscode/editors';
-import { isWorkspaceFolder } from './system/-webview/vscode/workspaces';
-import { setDefaultDateLocales } from './system/date';
-import { once } from './system/event';
-import { BufferedLogChannel, getLoggableName, Logger } from './system/logger';
-import { flatten } from './system/object';
-import { Stopwatch } from './system/stopwatch';
-import { compare, fromString, satisfies } from './system/version';
-import { isViewNode } from './views/nodes/utils/-webview/node.utils';
-import './commands';
+import {
+	version as codeVersion,
+	ConfigurationTarget,
+	env,
+	ExtensionMode,
+	LogLevel,
+	Uri,
+	window,
+	workspace,
+} from 'vscode';
+import { isWeb } from '@env/platform.js';
+import { defaultResolver as envDefaultResolver } from '@env/resolver.js';
+import { getBranchNameWithoutRemote } from '@gitlens/git/utils/branch.utils.js';
+import { setAbbreviatedShaLength } from '@gitlens/git/utils/revision.utils.js';
+import { setDefaultDateLocales } from '@gitlens/utils/date.js';
+import { setDefaultResolver } from '@gitlens/utils/decorators/resolver.js';
+import { once } from '@gitlens/utils/event.js';
+import { microhash } from '@gitlens/utils/hash.js';
+import { hrtime } from '@gitlens/utils/hrtime.js';
+import { isLoggable } from '@gitlens/utils/loggable.js';
+import { getLoggableName, Logger } from '@gitlens/utils/logger.js';
+import { flatten } from '@gitlens/utils/object.js';
+import { Stopwatch } from '@gitlens/utils/stopwatch.js';
+import { compare, fromString, satisfies } from '@gitlens/utils/version.js';
+import { Api } from './api/api.js';
+import type {
+	CreatePullRequestActionContext,
+	GitLensApi,
+	OpenIssueActionContext,
+	OpenPullRequestActionContext,
+} from './api/gitlens.d.js';
+import type { CreatePullRequestOnRemoteCommandArgs } from './commands/createPullRequestOnRemote.js';
+import type { OpenIssueOnRemoteCommandArgs } from './commands/openIssueOnRemote.js';
+import type { OpenPullRequestOnRemoteCommandArgs } from './commands/openPullRequestOnRemote.js';
+import { trackableSchemes } from './constants.js';
+import { SyncedStorageKeys } from './constants.storage.js';
+import type { TrackedUsage, TrackedUsageKeys } from './constants.telemetry.js';
+import { Container } from './container.js';
+import { isGitUri } from './git/gitUri.js';
+import {
+	showCursorMcpCleanupMessage,
+	showDebugLoggingWarningMessage,
+	showMcpMessage,
+	showPreReleaseExpiredErrorMessage,
+	showWhatsNewMessage,
+} from './messages.js';
+import { registerPartnerActionRunners } from './partners.js';
+import { needsCursorMcpCleanupNotice } from './plus/gk/utils/-webview/mcp.utils.js';
+import { executeCommand, registerCommands } from './system/-webview/command.js';
+import { configuration, Configuration } from './system/-webview/configuration.js';
+import { setContext } from './system/-webview/context.js';
+import { Storage } from './system/-webview/storage.js';
+import { deviceCohortGroup, getExtensionModeLabel } from './system/-webview/vscode.js';
+import { isTextDocument } from './system/-webview/vscode/documents.js';
+import { isTextEditor } from './system/-webview/vscode/editors.js';
+import { isWorkspaceFolder } from './system/-webview/vscode/workspaces.js';
+import './commands.js';
 
 export async function activate(context: ExtensionContext): Promise<GitLensApi | undefined> {
 	const gitlensVersion: string = context.extension.packageJSON.version;
 	const prerelease = satisfies(gitlensVersion, '> 2020.0.0');
 
 	const defaultDateLocale = configuration.get('defaultDateLocale');
-	const logLevel = fromOutputLevel(configuration.get('outputLevel'));
 	Logger.configure(
 		{
 			name: 'GitLens',
 			createChannel: function (name: string) {
-				const channel = new BufferedLogChannel(window.createOutputChannel(name, { log: true }), 500);
+				const channel = window.createOutputChannel(name, { log: true });
 				context.subscriptions.push(channel);
 
-				if (logLevel === 'error' || logLevel === 'warn') {
+				// Show message if debug logging is not enabled (level > Debug)
+				if (channel.logLevel === LogLevel.Off || channel.logLevel > LogLevel.Debug) {
 					channel.appendLine(
-						`GitLens${prerelease ? ' (pre-release)' : ''} v${gitlensVersion} activating in ${
-							env.appName
-						} (${codeVersion}) on the ${isWeb ? 'web' : 'desktop'}; language='${
-							env.language
-						}', logLevel='${logLevel}', defaultDateLocale='${defaultDateLocale}' (${env.machineId}|${
-							env.sessionId
-						})`,
-					);
-					channel.appendLine(
-						'To enable debug logging, set `"gitlens.outputLevel": "debug"` or run "GitLens: Enable Debug Logging" from the Command Palette',
+						'To enable debug logging, run "GitLens: Enable Debug Logging" or "Developer: Set Log Level..." from the Command Palette',
 					);
 				}
 				return channel;
@@ -73,8 +84,7 @@ export async function activate(context: ExtensionContext): Promise<GitLensApi | 
 					})`;
 				}
 				if (o instanceof Uri) return `Uri(${o.toString(true)})`;
-
-				if (isRepository(o) || isBranch(o) || isCommit(o) || isTag(o) || isViewNode(o)) return o.toString();
+				if (isLoggable(o)) return o.toLoggable();
 
 				if ('rootUri' in o && o.rootUri instanceof Uri) {
 					return `ScmRepository(${o.rootUri.toString(true)})`;
@@ -98,22 +108,30 @@ export async function activate(context: ExtensionContext): Promise<GitLensApi | 
 						.join(',')})`;
 				}
 
+				// Use custom toString() if available (covers Repository, Branch, Commit, Tag, Remote, Worktree, ViewNode, Container, etc.)
+				if (o.toString !== Object.prototype.toString) {
+					return o.toString() as string;
+				}
+
 				return undefined;
 			},
-			sanitizer: loggingJsonReplacer,
+			hash: microhash,
+			// Redact env var maps (e.g. `GitOperationRunOptions.env` carrying SSH_ASKPASS tokens) from debug logs.
+			sanitizeKeys: new Set(['env']),
 		},
-		logLevel,
 		context.extensionMode === ExtensionMode.Development,
 	);
 
 	const sw = new Stopwatch(`GitLens${prerelease ? ' (pre-release)' : ''} v${gitlensVersion}`, {
 		log: {
-			message: ` activating in ${env.appName} (${codeVersion}) on the ${isWeb ? 'web' : 'desktop'}; language='${
+			level: 'info',
+			message: ` activating in ${env.appName} (${codeVersion}) on the ${isWeb ? 'web' : 'desktop'}; mode=${getExtensionModeLabel(
+				context.extensionMode,
+			)},language='${
 				env.language
-			}', logLevel='${logLevel}', defaultDateLocale='${defaultDateLocale}' (${env.uriScheme}|${env.machineId}|${
+			}', logLevel='${Logger.logLevel}', defaultDateLocale='${defaultDateLocale}' (${env.uriScheme}|${env.machineId}|${
 				env.sessionId
 			})`,
-			//${context.extensionRuntime !== ExtensionRuntime.Node ? ' in a webworker' : ''}
 		},
 	});
 
@@ -140,6 +158,12 @@ export async function activate(context: ExtensionContext): Promise<GitLensApi | 
 		void setContext('gitlens:untrusted', true);
 	}
 
+	// Clear any leftover terminal env-var state from older versions (see #4977). The
+	// current code no longer contributes terminal env vars, but VS Code may still have
+	// persisted entries cached against the extension id, which keeps surfacing the
+	// "terminal needs to be relaunched" warning.
+	context.environmentVariableCollection.clear();
+
 	setKeysForSync(context);
 
 	const storage = new Storage(context);
@@ -163,12 +187,13 @@ export async function activate(context: ExtensionContext): Promise<GitLensApi | 
 	}
 
 	let exitMessage;
-	if (Logger.enabled('debug')) {
+	if (Logger.enabled('trace')) {
 		exitMessage = `syncedVersion=${syncedVersion}, localVersion=${localVersion}, previousVersion=${previousVersion}`;
 	}
 
 	Configuration.configure(context);
 
+	setDefaultResolver(envDefaultResolver);
 	setDefaultDateLocales(defaultDateLocale ?? env.language);
 	context.subscriptions.push(
 		configuration.onDidChange(e => {
@@ -182,7 +207,7 @@ export async function activate(context: ExtensionContext): Promise<GitLensApi | 
 		}),
 	);
 
-	// await migrateSettings(context, previousVersion);
+	await migrateSettings(storage);
 
 	const container = Container.create(context, storage, prerelease, gitlensVersion, previousVersion);
 	once(container.onReady)(() => {
@@ -200,6 +225,7 @@ export async function activate(context: ExtensionContext): Promise<GitLensApi | 
 		}
 
 		void showWhatsNew(container, gitlensVersion, prerelease, previousVersion);
+		showMcp(container, gitlensVersion, previousVersion);
 
 		void storage.store(prerelease ? 'preVersion' : 'version', gitlensVersion).catch();
 
@@ -208,9 +234,9 @@ export async function activate(context: ExtensionContext): Promise<GitLensApi | 
 			void storage.store(prerelease ? 'synced:preVersion' : 'synced:version', gitlensVersion).catch();
 		}
 
-		if (logLevel === 'debug') {
+		if (Logger.enabled('trace')) {
 			setTimeout(async () => {
-				if (fromOutputLevel(configuration.get('outputLevel')) !== 'debug') return;
+				if (!Logger.enabled('trace')) return;
 
 				if (!container.prereleaseOrDebugging) {
 					if (await showDebugLoggingWarningMessage()) {
@@ -247,6 +273,7 @@ export async function activate(context: ExtensionContext): Promise<GitLensApi | 
 		upgrade: previousVersion != null && gitlensVersion !== previousVersion,
 		upgradedFrom: previousVersion != null && gitlensVersion !== previousVersion ? previousVersion : undefined,
 	});
+	setFeatureFlagTelemetryGlobalAttributes(container);
 
 	const api = new Api(container);
 	const mode = container.mode;
@@ -277,25 +304,113 @@ export async function activate(context: ExtensionContext): Promise<GitLensApi | 
 }
 
 export function deactivate(): void {
-	Logger.log('GitLens deactivating...');
+	Logger.info('GitLens deactivating...');
 	Container.instance.deactivate();
 }
 
-// async function migrateSettings(context: ExtensionContext, previousVersion: string | undefined) {
-// 	if (previousVersion === undefined) return;
+// One-time settings migrations, each identified by a stable `id` and applied at most once per
+// install (tracked by id in the `settings:migrated` storage key). Append new entries — no
+// per-migration storage key, and no reliance on the install version (which spans two schemes:
+// stable `18.x` and date-based pre-release). Migrations MUST be idempotent (a fresh install runs
+// them as no-ops).
+const settingsMigrations: { id: string; migrate: (storage: Storage) => Promise<void> }[] = [
+	{
+		// Move existing explicit `right`/`bottom` Commit Graph details locations onto the new
+		// width-aware `auto` default. Window-scoped, so only user/workspace can hold a value.
+		id: 'graph.details.location:auto',
+		migrate: async () => {
+			const inspect = configuration.inspect('graph.details.location');
+			const isPinned = (v: unknown) => v === 'right' || v === 'bottom';
+			if (isPinned(inspect?.globalValue)) {
+				await configuration.update('graph.details.location', 'auto', ConfigurationTarget.Global);
+			}
+			if (isPinned(inspect?.workspaceValue)) {
+				await configuration.update('graph.details.location', 'auto', ConfigurationTarget.Workspace);
+			}
+		},
+	},
+	{
+		// Replace the boolean `terminalLinks.showDetailsView` with the `terminalLinks.showIn` enum.
+		// Old default (`true` = show the Inspect view) maps to `inspect`; `false` maps to `quickpick`.
+		// Unset users fall through to the new `graph` default.
+		id: 'terminalLinks.showIn:enum',
+		migrate: async () => {
+			await configuration.migrate('terminalLinks.showDetailsView', 'terminalLinks.showIn', {
+				migrationFn: (v: unknown) => (v === false ? 'quickpick' : 'inspect'),
+			});
+		},
+	},
+	{
+		// Unpin installs that a passive AI-model resolve silently wrote to Copilot: resolving the fallback
+		// used to persist its result, so merely rendering an AI chip could write `ai.model`, after which
+		// signing in never re-evaluated. Such a write only ever landed in User settings, so only Global is
+		// inspected. Either tell on its own is enough to call it passive:
+		//  - the model is `copilot:gpt-4.1`, the passive fallback's hardcoded pick and the only Copilot id
+		//    GitLens has ever hardcoded. Copilot no longer serves it, so the setting is already inert —
+		//    it resolves to nothing and falls through to the fallback regardless.
+		//  - the AI picker was never opened on this machine, so no Copilot model here was ever chosen.
+		//    This covers the fallback's `?? models[0]` branch, which could have stored any id.
+		// A Copilot model other than gpt-4.1 on a machine where the picker HAS been opened is a real
+		// choice, and is left alone. Clearing lets the fallback re-evaluate: GitKraken AI once signed in.
+		id: 'ai.model:unpin-passive-copilot',
+		migrate: async (storage: Storage) => {
+			if (configuration.inspect('ai.model')?.globalValue !== 'vscode') return;
 
-// 	const previous = fromString(previousVersion);
+			const isPassiveModel = configuration.inspect('ai.vscode.model')?.globalValue === 'copilot:gpt-4.1';
+			// `UsageTracker` is only a typed view over this key, and the Container doesn't exist yet here
+			const usages: Partial<Record<TrackedUsageKeys, TrackedUsage>> = storage.get('usages') ?? {};
+			const pickerOpened = (
+				['gitlens.ai.switchProvider', 'gitlens.ai.switchProvider:scm', 'gitlens.switchAIModel'] as const
+			).some(c => usages[`command:${c}:executed`] != null);
 
-// 	try {
-// 		if (compare(previous, from(11, 0, 0)) !== 1) {
-// 		}
-// 	} catch (ex) {
-// 		Logger.error(ex, 'migrateSettings');
-// 	}
-// }
+			if (!isPassiveModel && pickerOpened) return;
+
+			await configuration.update('ai.model', undefined, ConfigurationTarget.Global);
+			await configuration.update('ai.vscode.model', undefined, ConfigurationTarget.Global);
+		},
+	},
+];
+
+async function migrateSettings(storage: Storage): Promise<void> {
+	const applied = new Set(storage.get('settings:migrated'));
+
+	let changed = false;
+	for (const migration of settingsMigrations) {
+		if (applied.has(migration.id)) continue;
+
+		try {
+			await migration.migrate(storage);
+			// Mark only on success — leave a failed migration unmarked so it retries next activation
+			// (migrations are idempotent).
+			applied.add(migration.id);
+			changed = true;
+		} catch (ex) {
+			Logger.error(ex, 'migrateSettings', migration.id);
+		}
+	}
+
+	if (changed) {
+		await storage.store('settings:migrated', [...applied]);
+	}
+}
 
 function setKeysForSync(context: ExtensionContext, ...keys: (SyncedStorageKeys | string)[]) {
-	context.globalState?.setKeysForSync([...keys, SyncedStorageKeys.Version, SyncedStorageKeys.PreReleaseVersion]);
+	context.globalState?.setKeysForSync([
+		...keys,
+		SyncedStorageKeys.ApprovedAvatarRemoteTemplates,
+		SyncedStorageKeys.Version,
+		SyncedStorageKeys.PreReleaseVersion,
+	]);
+}
+
+function setFeatureFlagTelemetryGlobalAttributes(container: Container): void {
+	const flags = container.featureFlags.getAllFlags();
+	if (Object.keys(flags).length === 0) return;
+
+	container.telemetry.setGlobalAttribute(
+		'featureFlags',
+		JSON.stringify(Object.fromEntries(Object.entries(flags).sort(([a], [b]) => a.localeCompare(b)))),
+	);
 }
 
 function registerBuiltInActionRunners(container: Container): void {
@@ -329,6 +444,16 @@ function registerBuiltInActionRunners(container: Container): void {
 				}));
 			},
 		}),
+		container.actionRunners.registerBuiltIn<OpenIssueActionContext>('openIssue', {
+			label: ctx => `Open Issue on ${ctx.provider?.name ?? 'Remote'}`,
+			run: async ctx => {
+				if (ctx.type !== 'openIssue') return;
+
+				void (await executeCommand<OpenIssueOnRemoteCommandArgs>('gitlens.openIssueOnRemote', {
+					issue: { url: ctx.issue.url },
+				}));
+			},
+		}),
 	);
 }
 
@@ -339,13 +464,13 @@ async function showWhatsNew(
 	previousVersion: string | undefined,
 ) {
 	if (previousVersion == null) {
-		Logger.log(`GitLens first-time install; window.focused=${window.state.focused}`);
+		Logger.info(`GitLens first-time install; window.focused=${window.state.focused}`);
 
 		return;
 	}
 
 	if (previousVersion !== version) {
-		Logger.log(`GitLens upgraded from v${previousVersion} to v${version}; window.focused=${window.state.focused}`);
+		Logger.info(`GitLens upgraded from v${previousVersion} to v${version}; window.focused=${window.state.focused}`);
 	}
 
 	const current = fromString(version);
@@ -385,4 +510,23 @@ async function showWhatsNew(
 			container.context.subscriptions.push(disposable);
 		}
 	}
+}
+
+function showMcp(container: Container, version: string, previousVersion: string | undefined): void {
+	if (needsCursorMcpCleanupNotice(container)) {
+		void showCursorMcpCleanupMessage();
+		return;
+	}
+
+	if (
+		isWeb ||
+		previousVersion == null ||
+		version === previousVersion ||
+		compare(version, previousVersion) !== 1 ||
+		satisfies(fromString(previousVersion), '>= 17.5')
+	) {
+		return;
+	}
+
+	void showMcpMessage(container, version);
 }

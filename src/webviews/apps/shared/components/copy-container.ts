@@ -1,14 +1,21 @@
 import { css, html, LitElement, nothing } from 'lit';
-import { customElement, property, state } from 'lit/decorators.js';
+import { customElement, property, query, state } from 'lit/decorators.js';
 import { ifDefined } from 'lit/directives/if-defined.js';
-import type { GlTooltip } from './overlays/tooltip';
-import './overlays/tooltip';
+import type { GlTooltip } from './overlays/tooltip.js';
+import './overlays/tooltip.js';
 
-const tagName = 'gl-copy-container';
+declare global {
+	interface HTMLElementTagNameMap {
+		['gl-copy-container']: GlCopyContainer;
+	}
+}
 
-@customElement(tagName)
+@customElement('gl-copy-container')
 export class GlCopyContainer extends LitElement {
-	static readonly tagName = tagName;
+	static override shadowRootOptions: ShadowRootInit = {
+		...LitElement.shadowRootOptions,
+		delegatesFocus: true,
+	};
 
 	static override styles = css`
 		:host {
@@ -19,31 +26,46 @@ export class GlCopyContainer extends LitElement {
 			cursor: pointer;
 		}
 
+		gl-tooltip:focus-visible {
+			outline: var(--gl-border-width) solid var(--vscode-focusBorder);
+			outline-offset: 2px;
+		}
+
+		/* Hide focus outline on slotted copy icon - we show it on the host instead */
+		::slotted(.copy-icon) {
+			outline: none !important;
+		}
+
 		:host([appearance='toolbar']) {
 			--copy-background: transparent;
 			--copy-foreground: var(--vscode-foreground);
 			--copy-hover-background: var(--vscode-toolbar-hoverBackground);
 			--copy-border: transparent;
-			--copy-border-radius: var(--gk-action-radius, 0.3rem);
-			--copy-padding: 0.4rem;
+			--copy-border-radius: var(--gl-radius-sm);
+			--copy-padding: 0 0.4rem;
 
-			border: 1px solid var(--copy-border);
-			border-radius: var(--copy-border-radius);
-			background: var(--copy-background);
 			color: var(--copy-foreground);
+			background: var(--copy-background);
+			border: var(--gl-border-width) solid var(--copy-border);
+			border-radius: var(--copy-border-radius);
 		}
 
 		:host([appearance='toolbar']:hover) {
 			background: var(--copy-hover-background);
 		}
 
+		:host([appearance='toolbar']:focus-within) {
+			outline: var(--gl-border-width) solid var(--color-focus-border);
+			outline-offset: -1px;
+		}
+
 		:host([appearance='toolbar']) gl-tooltip {
-			padding: var(--copy-padding);
+			box-sizing: border-box;
 			display: flex;
 			align-items: center;
 			justify-content: center;
-			min-height: 1.8rem;
-			box-sizing: border-box;
+			min-height: 2rem;
+			padding: var(--copy-padding);
 		}
 
 		:host([disabled]) {
@@ -74,28 +96,62 @@ export class GlCopyContainer extends LitElement {
 	timeout: number = 1000;
 
 	private _resetTimer: ReturnType<typeof setTimeout> | undefined;
+	private _isMouseDown = false;
 
 	@state()
 	private label!: string;
 
-	override disconnectedCallback() {
-		this.cancelResetTimer();
-		super.disconnectedCallback?.();
-	}
+	@query('gl-tooltip')
+	private tooltip!: GlTooltip;
 
 	override connectedCallback() {
 		super.connectedCallback?.();
-
 		this.label = this.copyLabel;
+		this.addEventListener('mousedown', this.onMouseDown);
+		this.addEventListener('focusin', this.onFocusIn);
+		this.addEventListener('focusout', this.onFocusOut);
 	}
+
+	override willUpdate(changedProperties: Map<PropertyKey, unknown>) {
+		// Keep label in sync with copyLabel when it hasn't been temporarily changed (e.g. to "Copied!")
+		if (changedProperties.has('copyLabel') && this._resetTimer == null) {
+			this.label = this.copyLabel;
+		}
+	}
+
+	override disconnectedCallback() {
+		this.cancelResetTimer();
+		this.removeEventListener('mousedown', this.onMouseDown);
+		this.removeEventListener('focusin', this.onFocusIn);
+		this.removeEventListener('focusout', this.onFocusOut);
+		super.disconnectedCallback?.();
+	}
+
+	private onMouseDown = () => {
+		this._isMouseDown = true;
+		window.addEventListener('mouseup', () => (this._isMouseDown = false), { once: true });
+	};
+
+	private onFocusIn = () => {
+		// Skip showing on mouse-triggered focus — onClick handles it after copy
+		if (this._isMouseDown) return;
+
+		void this.tooltip?.show();
+	};
+
+	private onFocusOut = () => {
+		void this.tooltip?.hide();
+	};
 
 	override render() {
 		if (!this.content && !this.disabled) return nothing;
 
 		return html`<gl-tooltip
+			tabindex="0"
 			.content="${this.label}"
 			placement="${ifDefined(this.placement)}"
 			@click=${this.onClick}
+			@keydown=${this.onKeydown}
 		>
 			<slot></slot>
 		</gl-tooltip>`;
@@ -115,6 +171,16 @@ export class GlCopyContainer extends LitElement {
 			this.label = 'Nothing to Copy';
 		}
 		this.createResetTimer();
+		await this.updateComplete;
+		await this.tooltip?.updateComplete;
+		void this.tooltip?.show();
+	}
+
+	private onKeydown(e: KeyboardEvent) {
+		if (e.key === 'Enter' || e.key === ' ') {
+			e.preventDefault();
+			void this.onClick(e as unknown as MouseEvent);
+		}
 	}
 
 	private cancelResetTimer() {

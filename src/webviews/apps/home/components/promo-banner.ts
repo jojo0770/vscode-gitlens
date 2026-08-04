@@ -1,9 +1,9 @@
 import { consume } from '@lit/context';
 import { css, html, LitElement } from 'lit';
 import { customElement } from 'lit/decorators.js';
-import type { PromosContext } from '../../shared/contexts/promos';
-import { promosContext } from '../../shared/contexts/promos';
-import '../../shared/components/promo';
+import type { PromosContext } from '../../shared/contexts/promos.js';
+import { promosContext } from '../../shared/contexts/promos.js';
+import '../../shared/components/promo.js';
 
 @customElement('gl-promo-banner')
 export class GlPromoBanner extends LitElement {
@@ -12,14 +12,17 @@ export class GlPromoBanner extends LitElement {
 			:host {
 				display: block;
 			}
+
 			.promo-banner {
+				margin-bottom: var(--gl-space-10);
 				text-align: center;
-				margin-bottom: 1rem;
 			}
+
 			.promo-banner--eyebrow {
+				margin-bottom: var(--gl-space-2);
 				color: var(--color-foreground--50);
-				margin-bottom: 0.2rem;
 			}
+
 			.promo-banner:has(gl-promo:not([has-promo])) {
 				display: none;
 			}

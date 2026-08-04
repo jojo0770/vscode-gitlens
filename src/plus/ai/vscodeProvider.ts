@@ -1,16 +1,17 @@
-import type { CancellationToken, Event, LanguageModelChat, LanguageModelChatSelector } from 'vscode';
-import { Disposable, EventEmitter, LanguageModelChatMessage, lm } from 'vscode';
-import { uuid } from '@env/crypto';
-import { vscodeProviderDescriptor } from '../../constants.ai';
-import type { Container } from '../../container';
-import { AIError, AIErrorReason, CancellationError } from '../../errors';
-import { getLoggableName, Logger } from '../../system/logger';
-import { startLogScope } from '../../system/logger.scope';
-import { capitalize } from '../../system/string';
-import type { ServerConnection } from '../gk/serverConnection';
-import type { AIActionType, AIModel } from './models/model';
-import type { AIChatMessage, AIProvider, AIRequestResult } from './models/provider';
-import { getActionName, getValidatedTemperature } from './utils/-webview/ai.utils';
+import type { LanguageModelChat, LanguageModelChatSelector } from 'vscode';
+import { CancellationTokenSource, Disposable, EventEmitter, LanguageModelChatMessage, lm } from 'vscode';
+import { vscodeProviderDescriptor } from '@gitlens/ai/constants.js';
+import type { AIActionType, AIModel } from '@gitlens/ai/models/model.js';
+import type { AIChatMessage, AIProvider, AIProviderResponse } from '@gitlens/ai/models/provider.js';
+import type { AIProviderContext } from '@gitlens/ai/providers/context.js';
+import { getActionName, getReducedMaxInputTokens, getValidatedTemperature } from '@gitlens/ai/utils/ai.utils.js';
+import { CancellationError, isCancellationError } from '@gitlens/utils/cancellation.js';
+import { uuid } from '@gitlens/utils/crypto.js';
+import type { Event } from '@gitlens/utils/event.js';
+import { getLoggableName } from '@gitlens/utils/logger.js';
+import { maybeStartScopedLogger } from '@gitlens/utils/logger.scoped.js';
+import { capitalize } from '@gitlens/utils/string.js';
+import { AIError, AIErrorReason } from '../../errors.js';
 
 const provider = vscodeProviderDescriptor;
 
@@ -29,15 +30,12 @@ export class VSCodeAIProvider implements AIProvider<typeof provider.id> {
 
 	private _onDidChange = new EventEmitter<void>();
 	get onDidChange(): Event<void> {
-		return this._onDidChange.event;
+		return this._onDidChange.event as unknown as Event<void>;
 	}
 
 	private readonly _disposable: Disposable;
 
-	constructor(
-		private readonly container: Container,
-		private readonly connection: ServerConnection,
-	) {
+	constructor(private readonly context: AIProviderContext) {
 		this._disposable = Disposable.from(
 			this._onDidChange,
 			lm.onDidChangeChatModels(() => this._onDidChange.fire()),
@@ -46,6 +44,9 @@ export class VSCodeAIProvider implements AIProvider<typeof provider.id> {
 
 	dispose(): void {
 		this._disposable.dispose();
+	}
+	[Symbol.dispose](): void {
+		this.dispose();
 	}
 
 	async configured(_silent: boolean): Promise<boolean> {
@@ -71,88 +72,119 @@ export class VSCodeAIProvider implements AIProvider<typeof provider.id> {
 		model: VSCodeAIModel,
 		_apiKey: string,
 		getMessages: (maxInputTokens: number, retries: number) => Promise<AIChatMessage[]>,
-		options: { cancellation: CancellationToken; modelOptions?: { outputTokens?: number; temperature?: number } },
-	): Promise<AIRequestResult | undefined> {
-		using scope = startLogScope(`${getLoggableName(this)}.sendRequest`, false);
+		options: { signal: AbortSignal; modelOptions?: { outputTokens?: number; temperature?: number } },
+	): Promise<AIProviderResponse<void> | undefined> {
+		using scope = maybeStartScopedLogger(`${getLoggableName(this)}.sendRequest`);
 
 		const chatModel = await this.getChatModel(model);
 		if (chatModel == null) return undefined;
 
+		// Convert AbortSignal to VS Code CancellationToken for the Language Model API
+		const cancellationSource = new CancellationTokenSource();
+		if (options.signal.aborted) {
+			cancellationSource.cancel();
+		} else {
+			options.signal.addEventListener('abort', () => cancellationSource.cancel(), { once: true });
+		}
+		const cancellation = cancellationSource.token;
+
 		let retries = 0;
 		let maxInputTokens = model.maxTokens.input;
 
-		while (true) {
-			try {
-				const messages = (await getMessages(maxInputTokens, retries)).map(m => {
-					switch (m.role) {
-						case 'assistant':
-							return LanguageModelChatMessage.Assistant(m.content);
-						default:
-							return LanguageModelChatMessage.User(m.content);
-					}
-				});
+		try {
+			while (true) {
+				try {
+					const messages = (await getMessages(maxInputTokens, retries)).map(m => {
+						switch (m.role) {
+							case 'assistant':
+								return LanguageModelChatMessage.Assistant(m.content);
+							default:
+								return LanguageModelChatMessage.User(m.content);
+						}
+					});
 
-				const rsp = await chatModel.sendRequest(
-					messages,
-					{
-						justification: accessJustification,
-						modelOptions: {
-							outputTokens: model.maxTokens.output
-								? Math.min(options.modelOptions?.outputTokens ?? Infinity, model.maxTokens.output)
-								: options.modelOptions?.outputTokens,
-							temperature: getValidatedTemperature(model.temperature),
+					const rsp = await chatModel.sendRequest(
+						messages,
+						{
+							justification: accessJustification,
+							modelOptions: {
+								outputTokens: model.maxTokens.output
+									? Math.min(options.modelOptions?.outputTokens ?? Infinity, model.maxTokens.output)
+									: options.modelOptions?.outputTokens,
+								temperature: getValidatedTemperature(
+									model,
+									model.temperature,
+									this.context.defaultTemperature,
+								),
+							},
 						},
-					},
-					options.cancellation,
-				);
+						cancellation,
+					);
 
-				let message = '';
-				for await (const fragment of rsp.text) {
-					message += fragment;
-				}
+					if (cancellation.isCancellationRequested) {
+						throw new CancellationError();
+					}
 
-				return { content: message.trim(), model: model, id: uuid() } satisfies AIRequestResult;
-			} catch (ex) {
-				if (ex instanceof CancellationError) {
-					Logger.error(ex, scope, `Cancelled request to ${getActionName(action)}: (${model.provider.name})`);
-					throw ex;
-				}
+					let message = '';
+					for await (const fragment of rsp.text) {
+						if (cancellation.isCancellationRequested) {
+							throw new CancellationError();
+						}
 
-				debugger;
+						message += fragment;
+					}
 
-				let message = ex instanceof Error ? ex.message : String(ex);
+					return {
+						content: message.trim(),
+						model: model,
+						id: uuid(),
+						result: undefined,
+					} satisfies AIProviderResponse<void>;
+				} catch (ex) {
+					if (isCancellationError(ex)) {
+						scope?.error(ex, `Cancelled request to ${getActionName(action)}: (${model.provider.name})`);
+						throw ex;
+					}
 
-				if (ex instanceof Error && 'code' in ex && ex.code === 'NoPermissions') {
-					Logger.error(ex, scope, `User denied access to ${model.provider.name}`);
-					throw new AIError(AIErrorReason.DeniedByUser, ex);
-				}
+					debugger;
 
-				if (ex instanceof Error && 'cause' in ex && ex.cause instanceof Error) {
-					message += `\n${ex.cause.message}`;
+					let message = ex instanceof Error ? ex.message : String(ex);
 
-					if (ex.cause.message.includes('exceeds token limit')) {
-						if (retries++ < 2) {
-							maxInputTokens -= 500 * retries;
+					if (ex instanceof Error && 'code' in ex && ex.code === 'NoPermissions') {
+						scope?.error(ex, `User denied access to ${model.provider.name}`);
+						throw new AIError(AIErrorReason.DeniedByUser, ex);
+					}
+
+					if (ex instanceof Error && 'cause' in ex && ex.cause instanceof Error) {
+						message += `\n${ex.cause.message}`;
+					}
+
+					if (message.includes('exceeds token limit')) {
+						if (++retries <= 3) {
+							maxInputTokens = getReducedMaxInputTokens(maxInputTokens, retries);
 							continue;
 						}
 
-						Logger.error(ex, scope, `Unable to ${getActionName(action)}: (${model.provider.name})`);
+						scope?.error(ex, `Unable to ${getActionName(action)}: (${model.provider.name})`);
 						throw new AIError(AIErrorReason.RequestTooLarge, ex);
 					}
+
+					scope?.error(ex, `Unable to ${getActionName(action)}: (${model.provider.name})`);
+
+					if (message.includes('Model is not supported for this request')) {
+						throw new AIError(AIErrorReason.ModelNotSupported, ex);
+					}
+
+					throw new Error(
+						`Unable to ${getActionName(action)}: (${model.provider.name}${
+							ex.code ? `:${ex.code}` : ''
+						}) ${message}`,
+						{ cause: ex },
+					);
 				}
-
-				Logger.error(ex, scope, `Unable to ${getActionName(action)}: (${model.provider.name})`);
-
-				if (message.includes('Model is not supported for this request')) {
-					throw new AIError(AIErrorReason.ModelNotSupported, ex);
-				}
-
-				throw new Error(
-					`Unable to ${getActionName(action)}: (${model.provider.name}${
-						ex.code ? `:${ex.code}` : ''
-					}) ${message}`,
-				);
 			}
+		} finally {
+			cancellationSource.dispose();
 		}
 	}
 }

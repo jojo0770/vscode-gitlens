@@ -1,33 +1,28 @@
 import { ThemeIcon, TreeItem, TreeItemCollapsibleState } from 'vscode';
-import { GitUri } from '../../git/gitUri';
-import type { GitTrackingState } from '../../git/models/branch';
-import type { GitFileWithCommit } from '../../git/models/file';
-import type { GitStatus } from '../../git/models/status';
-import type { GitStatusFile } from '../../git/models/statusFile';
-import { makeHierarchical } from '../../system/array';
-import { flatMap, groupBy } from '../../system/iterable';
-import { joinPaths, normalizePath } from '../../system/path';
-import type { ViewsWithWorkingTree } from '../viewBase';
-import { ContextValues, getViewNodeId, ViewNode } from './abstract/viewNode';
-import type { FileNode } from './folderNode';
-import { FolderNode } from './folderNode';
-import { UncommittedFileNode } from './UncommittedFileNode';
+import type { GitFileWithCommit } from '@gitlens/git/models/file.js';
+import type { GitStatus } from '@gitlens/git/models/status.js';
+import { makeHierarchical } from '@gitlens/utils/array.js';
+import { flatMap, groupBy } from '@gitlens/utils/iterable.js';
+import type { Lazy } from '@gitlens/utils/lazy.js';
+import { joinPaths, normalizePath } from '@gitlens/utils/path.js';
+import { GitUri } from '../../git/gitUri.js';
+import { getCommitDate } from '../../git/utils/-webview/commit.utils.js';
+import { getStatusFilePseudoCommits } from '../../git/utils/-webview/statusFile.utils.js';
+import type { ViewsWithWorkingTree } from '../viewBase.js';
+import { ContextValues, getViewNodeId, ViewNode } from './abstract/viewNode.js';
+import type { FileNode } from './folderNode.js';
+import { FolderNode } from './folderNode.js';
+import { UncommittedFileNode } from './UncommittedFileNode.js';
 
 export class UncommittedFilesNode extends ViewNode<'uncommitted-files', ViewsWithWorkingTree> {
 	constructor(
 		view: ViewsWithWorkingTree,
 		protected override readonly parent: ViewNode,
-		public readonly status:
-			| GitStatus
-			| {
-					readonly repoPath: string;
-					readonly files: GitStatusFile[];
-					readonly state: GitTrackingState;
-					readonly upstream?: string;
-			  },
+		public readonly repoPath: string,
+		private readonly status: Lazy<Promise<GitStatus | undefined>>,
 		public readonly range: string | undefined,
 	) {
-		super('uncommitted-files', GitUri.fromRepoPath(status.repoPath), view, parent);
+		super('uncommitted-files', GitUri.fromRepoPath(repoPath), view, parent);
 
 		this._uniqueId = getViewNodeId(this.type, this.context);
 	}
@@ -36,16 +31,15 @@ export class UncommittedFilesNode extends ViewNode<'uncommitted-files', ViewsWit
 		return this._uniqueId;
 	}
 
-	get repoPath(): string {
-		return this.status.repoPath;
-	}
-
-	getChildren(): ViewNode[] {
+	async getChildren(): Promise<ViewNode[]> {
 		const repoPath = this.repoPath;
 
+		const status = await this.status.value;
+		if (status == null) return [];
+
 		const files: GitFileWithCommit[] = [
-			...flatMap(this.status.files, f => {
-				const commits = f.getPseudoCommits(this.view.container, undefined);
+			...flatMap(status.files, f => {
+				const commits = getStatusFilePseudoCommits(f, undefined);
 				return commits.map(
 					c =>
 						({
@@ -61,12 +55,12 @@ export class UncommittedFilesNode extends ViewNode<'uncommitted-files', ViewsWit
 			}),
 		];
 
-		files.sort((a, b) => b.commit.date.getTime() - a.commit.date.getTime());
+		files.sort((a, b) => getCommitDate(b.commit).getTime() - getCommitDate(a.commit).getTime());
 
 		const groups = groupBy(files, f => f.path);
 
 		let children: FileNode[] = Object.values(groups).map(
-			files => new UncommittedFileNode(this.view, this, repoPath, files[files.length - 1]),
+			files => new UncommittedFileNode(this.view, this, repoPath, files.at(-1)!),
 		);
 
 		if (this.view.config.files.layout !== 'list') {

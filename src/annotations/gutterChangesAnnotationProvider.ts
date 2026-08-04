@@ -1,19 +1,20 @@
 import type { CancellationToken, DecorationOptions, Disposable, TextDocument, TextEditor } from 'vscode';
 import { Hover, languages, Position, Range, Selection, TextEditorRevealType } from 'vscode';
-import type { Container } from '../container';
-import type { GitCommit } from '../git/models/commit';
-import type { ParsedGitDiffHunks } from '../git/models/diff';
-import { localChangesMessage } from '../hovers/hovers';
-import { configuration } from '../system/-webview/configuration';
-import { log } from '../system/decorators/log';
-import { getLogScope } from '../system/logger.scope';
-import { getSettledValue } from '../system/promise';
-import { maybeStopWatch } from '../system/stopwatch';
-import type { TrackedGitDocument } from '../trackers/trackedDocument';
-import type { AnnotationContext, AnnotationState, DidChangeStatusCallback } from './annotationProvider';
-import { AnnotationProviderBase } from './annotationProvider';
-import type { Decoration } from './annotations';
-import { Decorations } from './fileAnnotationController';
+import type { GitCommit } from '@gitlens/git/models/commit.js';
+import type { ParsedGitDiffHunks } from '@gitlens/git/models/diff.js';
+import { debug } from '@gitlens/utils/decorators/log.js';
+import { getScopedLogger } from '@gitlens/utils/logger.scoped.js';
+import { getSettledValue } from '@gitlens/utils/promise.js';
+import { maybeStopWatch } from '@gitlens/utils/stopwatch.js';
+import type { Container } from '../container.js';
+import { getStatusFilePseudoCommits } from '../git/utils/-webview/statusFile.utils.js';
+import { localChangesMessage } from '../hovers/hovers.js';
+import { configuration } from '../system/-webview/configuration.js';
+import type { TrackedGitDocument } from '../trackers/trackedDocument.js';
+import type { AnnotationContext, AnnotationState, DidChangeStatusCallback } from './annotationProvider.js';
+import { AnnotationProviderBase } from './annotationProvider.js';
+import type { Decoration } from './annotations.js';
+import { Decorations } from './fileAnnotationController.js';
 
 const maxSmallIntegerV8 = 2 ** 30 - 1; // Max number that can be stored in V8's smis (small integers)
 
@@ -86,7 +87,7 @@ export class GutterChangesAnnotationProvider extends AnnotationProviderBase<Chan
 		}
 
 		if (previousLine === -1) {
-			previousLine = this.sortedHunkStarts[this.sortedHunkStarts.length - 1];
+			previousLine = this.sortedHunkStarts.at(-1)!;
 		}
 
 		if (previousLine > 0) {
@@ -98,9 +99,9 @@ export class GutterChangesAnnotationProvider extends AnnotationProviderBase<Chan
 		}
 	}
 
-	@log()
+	@debug()
 	override async onProvideAnnotation(context?: ChangesAnnotationContext, state?: AnnotationState): Promise<boolean> {
-		const scope = getLogScope();
+		const scope = getScopedLogger();
 
 		let rev1 = this.trackedDocument.uri.sha;
 		let rev2 = context?.sha != null && context.sha !== rev1 ? `${context.sha}^` : undefined;
@@ -127,7 +128,8 @@ export class GutterChangesAnnotationProvider extends AnnotationProviderBase<Chan
 				}
 			} else {
 				const status = await svc.status.getStatusForFile?.(this.trackedDocument.uri);
-				const commits = status?.getPseudoCommits(this.container, await svc.config.getCurrentUser());
+				const commits =
+					status != null ? getStatusFilePseudoCommits(status, await svc.config.getCurrentUser()) : undefined;
 				if (commits?.length) {
 					commit = await svc.commits.getCommitForFile(this.trackedDocument.uri);
 					rev1 = 'HEAD';
@@ -214,9 +216,7 @@ export class GutterChangesAnnotationProvider extends AnnotationProviderBase<Chan
 
 					this.sortedHunkStarts.push(range.start.line);
 
-					if (selection == null) {
-						selection = new Selection(range.start, range.end);
-					}
+					selection ??= new Selection(range.start, range.end);
 
 					let decoration = decorationsMap.get(hunkLine.state);
 					if (decoration == null) {
@@ -288,7 +288,13 @@ export class GutterChangesAnnotationProvider extends AnnotationProviderBase<Chan
 					position.line >= hunk.current.position.start - 1 &&
 					position.line <= hunk.current.position.end - (hasMoreDeletedLines ? 0 : 1)
 				) {
-					const markdown = await localChangesMessage(commit, this.trackedDocument.uri, position.line, hunk);
+					const markdown = await localChangesMessage(
+						commit,
+						this.trackedDocument.uri,
+						position.line,
+						hunk,
+						'editor:hover',
+					);
 					if (markdown == null) return undefined;
 
 					return new Hover(

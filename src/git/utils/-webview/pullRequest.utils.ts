@@ -1,18 +1,23 @@
 import type { ProgressOptions } from 'vscode';
 import { ProgressLocation, Uri, window } from 'vscode';
-import { Schemes } from '../../../constants';
-import type { Source } from '../../../constants.telemetry';
-import type { Container } from '../../../container';
-import type { LeftRightCommitCountResult } from '../../gitProvider';
-import type { PullRequest, PullRequestComparisonRefs } from '../../models/pullRequest';
-import type { CreatePullRequestRemoteResource } from '../../models/remoteResource';
-import type { Repository } from '../../models/repository';
-import { getComparisonRefsForPullRequest, getRepositoryIdentityForPullRequest } from '../pullRequest.utils';
-import { createRevisionRange } from '../revision.utils';
+import type { PullRequest, PullRequestComparisonRefs } from '@gitlens/git/models/pullRequest.js';
+import type { CreatePullRequestRemoteResource } from '@gitlens/git/models/remoteResource.js';
+import type { LeftRightCommitCountResult } from '@gitlens/git/providers/commits.js';
+import {
+	getComparisonRefsForPullRequest,
+	getRepositoryIdentityForPullRequest,
+} from '@gitlens/git/utils/pullRequest.utils.js';
+import { gitSuffixRegex } from '@gitlens/git/utils/remote.utils.js';
+import { createRevisionRange } from '@gitlens/git/utils/revision.utils.js';
+import { Schemes } from '../../../constants.js';
+import type { Source } from '../../../constants.telemetry.js';
+import type { Container } from '../../../container.js';
+import { AuthenticationRequiredError } from '../../../errors.js';
+import type { GlRepository } from '../../models/repository.js';
 
 export async function describePullRequestWithAI(
 	container: Container,
-	repo: string | Repository,
+	repo: string | GlRepository,
 	{ base, head }: CreatePullRequestRemoteResource,
 	source: Source,
 	options?: { progress?: ProgressOptions },
@@ -29,7 +34,7 @@ export async function describePullRequestWithAI(
 	}
 
 	try {
-		const result = await container.ai.generateCreatePullRequest(
+		const result = await container.ai.actions.generateCreatePullRequest(
 			repo,
 			`${base.remote.name}/${base.branch}`,
 			`${head.remote.name}/${head.branch}`,
@@ -41,8 +46,10 @@ export async function describePullRequestWithAI(
 		);
 		if (result === 'cancelled') return undefined;
 
-		return result?.parsed ? { title: result.parsed.summary, description: result.parsed.body } : undefined;
+		return result?.result ? { title: result.result.summary, description: result.result.body } : undefined;
 	} catch (ex) {
+		if (ex instanceof AuthenticationRequiredError) return undefined;
+
 		void window.showErrorMessage(ex.message);
 		return undefined;
 	}
@@ -50,7 +57,7 @@ export async function describePullRequestWithAI(
 
 export async function ensurePullRequestRefs(
 	pr: PullRequest,
-	repo: Repository,
+	repo: GlRepository,
 	options?: { silent?: true; promptMessage?: never } | { silent?: never; promptMessage?: string },
 	refs?: PullRequestComparisonRefs,
 ): Promise<LeftRightCommitCountResult | undefined> {
@@ -71,13 +78,13 @@ export async function ensurePullRequestRefs(
 
 export async function ensurePullRequestRemote(
 	pr: PullRequest,
-	repo: Repository,
+	repo: GlRepository,
 	options?: { silent?: true; promptMessage?: never } | { silent?: never; promptMessage?: string },
 ): Promise<boolean> {
 	const identity = getRepositoryIdentityForPullRequest(pr);
 	if (identity.remote.url == null) return false;
 
-	const prRemoteUrl = identity.remote.url.replace(/\.git$/, '');
+	const prRemoteUrl = identity.remote.url.replace(gitSuffixRegex, '');
 
 	let found = false;
 	for (const remote of await repo.git.remotes.getRemotes()) {
@@ -116,7 +123,7 @@ export async function getOpenedPullRequestRepo(
 	container: Container,
 	pr: PullRequest,
 	repoPath?: string,
-): Promise<Repository | undefined> {
+): Promise<GlRepository | undefined> {
 	if (repoPath) return container.git.getRepository(repoPath);
 
 	const repo = await getOrOpenPullRequestRepository(container, pr, { promptIfNeeded: true });
@@ -127,7 +134,7 @@ export async function getOrOpenPullRequestRepository(
 	container: Container,
 	pr: PullRequest,
 	options?: { promptIfNeeded?: boolean; skipVirtual?: boolean },
-): Promise<Repository | undefined> {
+): Promise<GlRepository | undefined> {
 	const identity = getRepositoryIdentityForPullRequest(pr);
 	let repo = await container.repositoryIdentity.getRepository(identity, {
 		openIfNeeded: true,
@@ -138,7 +145,7 @@ export async function getOrOpenPullRequestRepository(
 	if (repo == null && !options?.skipVirtual) {
 		const virtualUri = getVirtualUriForPullRequest(pr);
 		if (virtualUri != null) {
-			repo = await container.git.getOrOpenRepository(virtualUri, { closeOnOpen: true, detectNested: false });
+			repo = await container.git.getOrAddRepository(virtualUri, { opened: false, detectNested: false });
 		}
 	}
 

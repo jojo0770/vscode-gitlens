@@ -1,66 +1,111 @@
+import { SignalWatcher } from '@lit-labs/signals';
 import { consume } from '@lit/context';
-import { html, LitElement } from 'lit';
-import { customElement, state } from 'lit/decorators.js';
-import type { OpenWalkthroughCommandArgs } from '../../../../commands/walkthroughs';
-import { createCommandLink } from '../../../../system/commands';
-import type { State } from '../../../home/protocol';
-import { DismissWalkthroughSection } from '../../../home/protocol';
-import { ipcContext } from '../../shared/contexts/ipc';
-import type { HostIpc } from '../../shared/ipc';
-import { stateContext } from '../context';
-import { homeBaseStyles, walkthroughProgressStyles } from '../home.css';
-import '../../shared/components/button';
-import '../../shared/components/code-icon';
-import '../../shared/components/overlays/tooltip';
+import { css, html, LitElement, nothing } from 'lit';
+import { customElement } from 'lit/decorators.js';
+import { walkthroughProgressSteps } from '../../../../constants.walkthroughs.js';
+import { createCommandLink } from '../../../../system/commands.js';
+import { ruleStyles } from '../../plus/shared/components/vscode.css.js';
+import type { OnboardingState } from '../../shared/contexts/onboarding.js';
+import { onboardingContext } from '../../shared/contexts/onboarding.js';
+import { homeBaseStyles, walkthroughProgressStyles } from '../home.css.js';
+import '../../shared/components/button.js';
+import '../../shared/components/code-icon.js';
+import '../../shared/components/overlays/tooltip.js';
 
 @customElement('gl-onboarding')
-export class GlOnboarding extends LitElement {
-	static override styles = [homeBaseStyles, walkthroughProgressStyles];
+export class GlOnboarding extends SignalWatcher(LitElement) {
+	@consume({ context: onboardingContext })
+	private _onboarding!: OnboardingState;
 
-	@consume<State>({ context: stateContext, subscribe: true })
-	@state()
-	private _state!: State;
+	static override styles = [
+		homeBaseStyles,
+		walkthroughProgressStyles,
+		ruleStyles,
+		css`
+			.walkthrough-progress__label {
+				margin-block: 0;
+			}
 
-	@consume<HostIpc>({ context: ipcContext, subscribe: true })
-	@state()
-	private _ipc!: HostIpc;
+			.walkthrough-progress__steps {
+				padding-inline-start: 0;
+				margin-block: 0;
+			}
+
+			.walkthrough-progress__step {
+				margin-block-start: 0.3rem;
+				list-style: none;
+			}
+
+			.walkthrough-progress__step-label {
+				margin-inline-start: 0.3rem;
+			}
+
+			code-icon[icon='circle-large'] {
+				color: var(--color-foreground--50);
+			}
+
+			code-icon[icon='pass'] {
+				color: #0d0;
+			}
+		`,
+	];
+
+	private get isWalkthroughComplete(): boolean {
+		const progress = this._onboarding.walkthroughProgress.get();
+		return progress != null && progress.doneCount === progress.allCount;
+	}
 
 	override render(): unknown {
-		if (this._state.walkthroughProgress == null) return undefined;
+		const progress = this._onboarding.walkthroughProgress.get();
+		if (progress == null) return undefined;
 
-		return html`<gl-button
-				@click=${this.onDismissWalkthrough}
-				class="walkthrough-progress__button"
-				appearance="toolbar"
-				tooltip="Dismiss"
-				aria-label="Dismiss"
-				><code-icon icon="x"></code-icon
-			></gl-button>
-			<gl-tooltip placement="bottom" content="Open Walkthrough">
-				<a
-					class="walkthrough-progress"
-					href=${createCommandLink<OpenWalkthroughCommandArgs>('gitlens.openWalkthrough', {
-						source: { source: 'home', detail: 'onboarding' },
-					})}
-				>
+		return html`${
+				this.isWalkthroughComplete
+					? html`<gl-button
+							@click=${this.onDismissWalkthrough}
+							class="walkthrough-progress__button"
+							appearance="toolbar"
+							tooltip="Dismiss"
+							aria-label="Dismiss"
+							><code-icon icon="x"></code-icon
+						></gl-button>`
+					: nothing
+			}
+			<gl-tooltip placement="bottom">
+				<a class="walkthrough-progress" href=${createCommandLink('gitlens.showWelcomeView')}>
 					<header class="walkthrough-progress__title">
-						<span
-							>GitLens Walkthrough
-							(${this._state.walkthroughProgress.doneCount}/${this._state.walkthroughProgress
-								.allCount})</span
-						>
+						<span>GitLens Walkthrough (${progress.doneCount}/${progress.allCount})</span>
 					</header>
-					<progress
-						class="walkthrough-progress__bar"
-						value=${this._state.walkthroughProgress.progress}
-					></progress>
+					<progress class="walkthrough-progress__bar" value=${progress.progress}></progress>
 				</a>
+				<div slot="content">
+					<div>Open Walkthrough</div>
+					<hr />
+					${this.renderWalkthroughProgress()}
+				</div>
 			</gl-tooltip>`;
 	}
 
+	private renderWalkthroughProgress(): unknown {
+		const progress = this._onboarding.walkthroughProgress.get();
+		if (progress == null) return undefined;
+
+		return html`<p class="walkthrough-progress__label">
+				Walkthrough Progress (${progress.doneCount}/${progress.allCount})
+			</p>
+			<ul class="walkthrough-progress__steps">
+				${Object.entries(walkthroughProgressSteps).map(([key, label]) => {
+					const isCompleted = progress.state[key as keyof typeof walkthroughProgressSteps];
+					return html`<li class="walkthrough-progress__step ${isCompleted ? 'completed' : ''}">
+						<code-icon icon="${isCompleted ? 'pass' : 'circle-large'}"></code-icon>
+						<span class="walkthrough-progress__step-label">${label}</span>
+					</li>`;
+				})}
+			</ul>`;
+	}
+
 	private onDismissWalkthrough = () => {
-		this._state.walkthroughProgress = undefined;
-		this._ipc.sendCommand(DismissWalkthroughSection);
-		this.requestUpdate();
+		this._onboarding.walkthroughProgress.set(undefined);
+		this._onboarding.dismissWalkthrough();
 	};
 }

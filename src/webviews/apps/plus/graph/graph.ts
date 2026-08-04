@@ -1,14 +1,27 @@
+import './graph.scss';
+import { ContextProvider } from '@lit/context';
 import { html } from 'lit';
 import { customElement, query, state } from 'lit/decorators.js';
-import { Color } from '../../../../system/color';
-import type { State } from '../../../plus/graph/protocol';
-import { GlAppHost } from '../../shared/appHost';
-import type { HostIpc } from '../../shared/ipc';
-import type { ThemeChangeEvent } from '../../shared/theme';
-import type { GraphApp } from './graph-app';
-import { GraphStateProvider } from './stateProvider';
-import './graph-app';
-import './graph.scss';
+import { Color } from '@gitlens/utils/color.js';
+import type { GraphServices } from '../../../plus/graph/graphService.js';
+import type {
+	DidRequestOpenCompareModeParams,
+	DidRequestOpenTimelineScopeParams,
+	DidRequestSearchParams,
+	State,
+} from '../../../plus/graph/protocol.js';
+import { GlAppHost } from '../../shared/appHost.js';
+import { createOnboardingDismissals, onboardingDismissalsContext } from '../../shared/contexts/onboardingDismissals.js';
+import type { HostIpc } from '../../shared/ipc.js';
+import { RpcController } from '../../shared/rpc/rpcController.js';
+import type { ThemeChangeEvent } from '../../shared/theme.js';
+import { graphServicesContext } from './context.js';
+import type { GraphApp } from './graph-app.js';
+import { applyGraphThemeVariables } from './graph-wrapper/graph-theme-bridge.js';
+import { sidebarActionsContext } from './sidebar/sidebarContext.js';
+import { createSidebarActions } from './sidebar/sidebarState.js';
+import { GraphStateProvider } from './stateProvider.js';
+import './graph-app.js';
 
 @customElement('gl-graph-apphost')
 export class GraphAppHost extends GlAppHost<State, GraphStateProvider> {
@@ -16,12 +29,52 @@ export class GraphAppHost extends GlAppHost<State, GraphStateProvider> {
 		return this;
 	}
 
+	private _sidebarActions = createSidebarActions();
+
+	// Create the context provider eagerly so child components can consume it
+	// during their connectedCallback. The actions object exists immediately;
+	// initialize() later populates it with the RPC service, and signal
+	// updates inside the actions drive reactivity in consumers.
+	private _sidebarActionsProvider = new ContextProvider(this, {
+		context: sidebarActionsContext,
+		initialValue: this._sidebarActions,
+	});
+
+	private readonly _onboardingDismissals = createOnboardingDismissals();
+
+	// Eager provider (like _sidebarActionsProvider): consumers can read during connectedCallback;
+	// connect() later wires the RPC remote and signal updates drive their reactivity.
+	private _onboardingDismissalsProvider = new ContextProvider(this, {
+		context: onboardingDismissalsContext,
+		initialValue: this._onboardingDismissals,
+	});
+
+	private _servicesProvider = new ContextProvider(this, {
+		context: graphServicesContext,
+		initialValue: undefined,
+	});
+
+	private _rpc = new RpcController<GraphServices>(this, {
+		onReady: services => this._onRpcReady(services),
+	});
+
+	private async _onRpcReady(services: import('@eamodio/supertalk').Remote<GraphServices>): Promise<void> {
+		this._servicesProvider.setValue(services);
+
+		this._onboardingDismissals.connect(services.onboarding);
+
+		const sidebar = await services.sidebar;
+		this._sidebarActions.initialize(sidebar);
+	}
+
 	@query('gl-graph-app')
 	private appElement!: GraphApp;
 
+	private _initialRowsLoaded = false;
+
 	@state()
 	searching: string = '';
-	searchResultsHidden: unknown;
+
 	get hasFilters() {
 		if (this.state.config?.onlyFollowFirstParent) return true;
 		if (this.state.excludeTypes == null) return false;
@@ -29,21 +82,92 @@ export class GraphAppHost extends GlAppHost<State, GraphStateProvider> {
 		return Object.values(this.state.excludeTypes).includes(true);
 	}
 
+	override connectedCallback(): void {
+		super.connectedCallback?.();
+		// StateProvider dispatches webview-directed notifications on this element (the apphost).
+		// We listen here — descendants can't catch parent-dispatched events — and route to the
+		// graph-app, which holds the @query reference to the details panel.
+		this.addEventListener(
+			'gl-graph-request-open-compare-mode',
+			this._handleRequestOpenCompareMode as EventListener,
+		);
+		this.addEventListener(
+			'gl-graph-request-open-timeline-scope',
+			this._handleRequestOpenTimelineScope as EventListener,
+		);
+		this.addEventListener('gl-graph-request-search', this._handleRequestSearch as EventListener);
+		this.addEventListener(
+			'gl-graph-request-ensure-row-visible',
+			this._handleRequestEnsureRowVisible as EventListener,
+		);
+	}
+
+	override disconnectedCallback(): void {
+		super.disconnectedCallback?.();
+		this.removeEventListener(
+			'gl-graph-request-open-compare-mode',
+			this._handleRequestOpenCompareMode as EventListener,
+		);
+		this.removeEventListener(
+			'gl-graph-request-open-timeline-scope',
+			this._handleRequestOpenTimelineScope as EventListener,
+		);
+		this.removeEventListener('gl-graph-request-search', this._handleRequestSearch as EventListener);
+		this.removeEventListener(
+			'gl-graph-request-ensure-row-visible',
+			this._handleRequestEnsureRowVisible as EventListener,
+		);
+		this._sidebarActions.dispose();
+		this._onboardingDismissals.dispose();
+	}
+
+	private _handleRequestOpenCompareMode = (e: CustomEvent<DidRequestOpenCompareModeParams>): void => {
+		this.appElement?.openCompareMode(e.detail);
+	};
+
+	private _handleRequestEnsureRowVisible = (e: CustomEvent<string>): void => {
+		this.appElement?.ensureRowVisible(e.detail);
+	};
+
+	private _handleRequestOpenTimelineScope = (e: CustomEvent<DidRequestOpenTimelineScopeParams>): void => {
+		this.appElement?.openTimelineScope(e.detail);
+	};
+
+	private _handleRequestSearch = (e: CustomEvent<DidRequestSearchParams>): void => {
+		this.appElement?.applyExternalSearchRequest(e.detail);
+	};
+
 	override render() {
 		return html`<gl-graph-app></gl-graph-app>`;
 	}
 
-	protected override createStateProvider(state: State, ipc: HostIpc): GraphStateProvider {
-		return new GraphStateProvider(this, state, ipc, this._logger, {
+	protected override createStateProvider(bootstrap: string, ipc: HostIpc): GraphStateProvider {
+		return new GraphStateProvider(this, bootstrap, ipc, this._logger, {
 			onStateUpdate: partial => {
 				if ('rows' in partial) {
 					this.appElement.resetHover();
+
+					// Focus the graph after initial rows are loaded
+					if (!this._initialRowsLoaded && partial.rows?.length) {
+						this._initialRowsLoaded = true;
+						requestAnimationFrame(() => this.appElement?.graph?.focus());
+					}
 				}
 			},
 		});
 	}
 
 	protected override onThemeUpdated(e: ThemeChangeEvent) {
+		// Refresh the graph engine's HSL token vars so lane colors follow theme switches. Cheap
+		// (~7 getComputedStyle reads + Color.from conversions) and idempotent.
+		// `onThemeUpdated` is invoked once at startup (before the initial render) AND on every later
+		// theme change (see appBase.ts) — so the lane palette is already correct before `gl-lit-graph`
+		// ever renders; the event below only matters for a THEME CHANGE while the graph is open, to
+		// invalidate its cached (lane-colored) adornments.
+		if (applyGraphThemeVariables()) {
+			window.dispatchEvent(new CustomEvent('gl-graph-lane-palette-changed'));
+		}
+
 		const rootStyle = document.documentElement.style;
 
 		const backgroundColor = Color.from(e.colors.background);
@@ -66,14 +190,8 @@ export class GraphAppHost extends GlAppHost<State, GraphStateProvider> {
 			return percent * (max - min) + min;
 		};
 
-		// minimap and scroll markers
-
-		let c = Color.fromCssVariable('--vscode-scrollbarSlider-background', e.computedStyle);
-		rootStyle.setProperty(
-			'--color-graph-minimap-visibleAreaBackground',
-			c.luminance(themeLuminance(e.isLightTheme ? 0.6 : 0.1)).toString(),
-		);
-
+		// minimap tip colors (dark themes only)
+		let c: Color;
 		if (!e.isLightTheme) {
 			c = Color.fromCssVariable('--color-graph-scroll-marker-local-branches', e.computedStyle);
 			rootStyle.setProperty(
@@ -136,6 +254,10 @@ export class GraphAppHost extends GlAppHost<State, GraphStateProvider> {
 	}
 
 	protected override onWebviewVisibilityChanged(visible: boolean): void {
+		// Buffered onboarding change events collapse to the last one while hidden; re-sync on restore
+		if (visible) {
+			this._onboardingDismissals.refresh();
+		}
 		this.appElement?.onWebviewVisibilityChanged(visible);
 	}
 }

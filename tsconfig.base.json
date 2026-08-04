@@ -1,7 +1,6 @@
 {
 	"compilerOptions": {
 		"allowUnreachableCode": false,
-		"baseUrl": ".",
 		"esModuleInterop": true,
 		"experimentalDecorators": true,
 		"forceConsistentCasingInFileNames": true,
@@ -9,6 +8,7 @@
 		"isolatedModules": true,
 		"lib": ["es2023"],
 		"libReplacement": false,
+		"types": ["node", "mocha"],
 		"module": "esnext",
 		"moduleResolution": "bundler",
 		"noFallthroughCasesInSwitch": true,

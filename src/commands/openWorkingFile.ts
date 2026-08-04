@@ -1,14 +1,14 @@
 import type { TextDocumentShowOptions, TextEditor, Uri } from 'vscode';
 import { Range, window } from 'vscode';
-import type { FileAnnotationType } from '../config';
-import type { Container } from '../container';
-import { GitUri, isGitUri } from '../git/gitUri';
-import { showGenericErrorMessage } from '../messages';
-import { command } from '../system/-webview/command';
-import { getOrOpenTextEditor } from '../system/-webview/vscode/editors';
-import { Logger } from '../system/logger';
-import { ActiveEditorCommand } from './commandBase';
-import { getCommandUri } from './commandBase.utils';
+import { Logger } from '@gitlens/utils/logger.js';
+import type { FileAnnotationType } from '../config.js';
+import type { Container } from '../container.js';
+import { GitUri, isGitUri } from '../git/gitUri.js';
+import { showGenericErrorMessage } from '../messages.js';
+import { command } from '../system/-webview/command.js';
+import { getOrOpenTextEditor } from '../system/-webview/vscode/editors.js';
+import { ActiveEditorCommand } from './commandBase.js';
+import { getCommandUri } from './commandBase.utils.js';
 
 export interface OpenWorkingFileCommandArgs {
 	uri?: Uri;
@@ -20,14 +20,17 @@ export interface OpenWorkingFileCommandArgs {
 @command()
 export class OpenWorkingFileCommand extends ActiveEditorCommand {
 	constructor(private readonly container: Container) {
-		super('gitlens.openWorkingFile');
+		super([
+			'gitlens.openWorkingFile',
+			'gitlens.openWorkingFile:command',
+			'gitlens.openWorkingFile:editor/context',
+			'gitlens.openWorkingFile:editor/title',
+		]);
 	}
 
 	async execute(editor: TextEditor, uri?: Uri, args?: OpenWorkingFileCommandArgs): Promise<void> {
 		args = { ...args };
-		if (args.line == null) {
-			args.line = editor?.selection.active.line;
-		}
+		args.line ??= editor?.selection.active.line;
 
 		try {
 			if (args.uri == null) {
@@ -54,9 +57,7 @@ export class OpenWorkingFileCommand extends ActiveEditorCommand {
 			}
 
 			if (args.line !== undefined && args.line !== 0) {
-				if (args.showOptions === undefined) {
-					args.showOptions = {};
-				}
+				args.showOptions ??= {};
 				args.showOptions.selection = new Range(args.line, 0, args.line, 0);
 			}
 

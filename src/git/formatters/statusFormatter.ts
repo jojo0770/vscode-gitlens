@@ -1,18 +1,19 @@
-import { GlyphChars } from '../../constants';
-import { escapeMarkdown } from '../../system/markdown';
-import { basename } from '../../system/path';
-import type { TokenOptions } from '../../system/string';
-import type { GitFile, GitFileWithCommit } from '../models/file';
-import { isGitFileChange } from '../models/fileChange';
+import type { GitFile, GitFileWithCommit } from '@gitlens/git/models/file.js';
+import { GitFileChange } from '@gitlens/git/models/fileChange.js';
+import { getGitFileStatusText } from '@gitlens/git/utils/fileStatus.utils.js';
+import type { FormatOptions } from '@gitlens/utils/formatter.js';
+import { Formatter } from '@gitlens/utils/formatter.js';
+import { escapeMarkdown } from '@gitlens/utils/markdown.js';
+import { basename } from '@gitlens/utils/path.js';
+import type { TokenOptions } from '@gitlens/utils/string.js';
+import { GlyphChars } from '../../constants.js';
 import {
 	getGitFileFormattedDirectory,
 	getGitFileFormattedPath,
 	getGitFileOriginalRelativePath,
 	getGitFileRelativePath,
-} from '../utils/-webview/file.utils';
-import { getGitFileStatusText } from '../utils/fileStatus.utils';
-import type { FormatOptions } from './formatter';
-import { Formatter } from './formatter';
+} from '../utils/-webview/file.utils.js';
+import { formatFileChangeStats } from '../utils/-webview/fileChange.utils.js';
 
 export interface StatusFormatOptions extends FormatOptions {
 	outputFormat?: 'markdown' | 'plaintext';
@@ -79,7 +80,7 @@ export class StatusFileFormatter extends Formatter<GitFile, StatusFormatOptions>
 	}
 
 	get working(): string {
-		let icon = '';
+		let icon: string;
 		if (this._item.workingTreeStatus != null && this._item.indexStatus != null) {
 			icon = `${GlyphChars.Pencil}${GlyphChars.Space}${GlyphChars.SpaceThinnest}${GlyphChars.Check}`;
 		} else if (this._item.workingTreeStatus != null) {
@@ -93,34 +94,41 @@ export class StatusFileFormatter extends Formatter<GitFile, StatusFormatOptions>
 	}
 
 	get changes(): string {
-		if (!isGitFileChange(this._item)) {
+		if (!GitFileChange.is(this._item)) {
 			return this._padOrTruncate('', this._options.tokenOptions.changes);
 		}
 
 		return this._padOrTruncate(
-			this._item.formatStats('stats', this._options.outputFormat !== 'plaintext' ? { color: true } : undefined),
+			formatFileChangeStats(
+				this._item.stats,
+				'stats',
+				this._options.outputFormat !== 'plaintext' ? { color: true } : undefined,
+			),
 			this._options.tokenOptions.changes,
 		);
 	}
 
 	get changesDetail(): string {
-		if (!isGitFileChange(this._item)) {
+		if (!GitFileChange.is(this._item)) {
 			return this._padOrTruncate('', this._options.tokenOptions.changes);
 		}
 
 		return this._padOrTruncate(
-			this._item.formatStats('expanded', { color: this._options.outputFormat !== 'plaintext', separator: ', ' }),
+			formatFileChangeStats(this._item.stats, 'expanded', {
+				color: this._options.outputFormat !== 'plaintext',
+				separator: ', ',
+			}),
 			this._options.tokenOptions.changesDetail,
 		);
 	}
 
 	get changesShort(): string {
-		if (!isGitFileChange(this._item)) {
+		if (!GitFileChange.is(this._item)) {
 			return this._padOrTruncate('', this._options.tokenOptions.changes);
 		}
 
 		return this._padOrTruncate(
-			this._item.formatStats('short', { separator: '' }),
+			formatFileChangeStats(this._item.stats, 'short', { separator: '' }),
 			this._options.tokenOptions.changesShort,
 		);
 	}

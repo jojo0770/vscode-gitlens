@@ -1,21 +1,21 @@
 import type { TextEditor, Uri } from 'vscode';
 import { ProgressLocation } from 'vscode';
-import type { Container } from '../container';
-import type { GitCommit } from '../git/models/commit';
-import { isStash } from '../git/models/commit';
-import { showGenericErrorMessage } from '../messages';
-import { showCommitPicker } from '../quickpicks/commitPicker';
-import { command } from '../system/-webview/command';
-import { createMarkdownCommandLink } from '../system/commands';
-import { Logger } from '../system/logger';
-import { getNodeRepoPath } from '../views/nodes/abstract/viewNode';
-import type { CommandContext } from './commandContext';
-import { isCommandContextViewNodeHasCommit } from './commandContext.utils';
-import type { ExplainBaseArgs } from './explainBase';
-import { ExplainCommandBase } from './explainBase';
+import { GitCommit } from '@gitlens/git/models/commit.js';
+import { Logger } from '@gitlens/utils/logger.js';
+import type { Container } from '../container.js';
+import { showGenericErrorMessage } from '../messages.js';
+import { showCommitPicker } from '../quickpicks/commitPicker.js';
+import { command } from '../system/-webview/command.js';
+import { createMarkdownCommandLink } from '../system/commands.js';
+import { getNodeRepoPath } from '../views/nodes/abstract/viewNode.js';
+import type { CommandContext } from './commandContext.js';
+import { isCommandContextViewNodeHasCommit } from './commandContext.utils.js';
+import type { ExplainBaseArgs } from './explainBase.js';
+import { ExplainCommandBase } from './explainBase.js';
 
 export interface ExplainCommitCommandArgs extends ExplainBaseArgs {
 	rev?: string;
+	prompt?: string;
 }
 
 @command()
@@ -42,7 +42,7 @@ export class ExplainCommitCommand extends ExplainCommandBase {
 			args.rev = args.rev ?? context.node.commit.sha;
 			args.source = args.source ?? {
 				source: 'view',
-				type: isStash(context.node.commit) ? 'stash' : 'commit',
+				context: { type: GitCommit.isStash(context.node.commit) ? 'stash' : 'commit' },
 			};
 		}
 
@@ -66,6 +66,7 @@ export class ExplainCommitCommand extends ExplainCommandBase {
 				const log = await commitsProvider.getLog();
 				const pick = await showCommitPicker(log, this.pickerTitle, 'Choose a commit to explain');
 				if (pick?.sha == null) return;
+
 				args.rev = pick.sha;
 				commit = pick;
 			} else {
@@ -78,15 +79,16 @@ export class ExplainCommitCommand extends ExplainCommandBase {
 			}
 
 			// Call the AI service to explain the commit
-			const result = await this.container.ai.explainCommit(
+			const result = await this.container.ai.actions.explainCommit(
 				commit,
 				{
 					...args.source,
 					source: args.source?.source ?? 'commandPalette',
-					type: args.source?.type ?? 'commit',
+					context: { type: args.source?.context?.type ?? 'commit' },
 				},
 				{
 					progress: { location: ProgressLocation.Notification, title: 'Explaining commit...' },
+					prompt: args.prompt,
 				},
 			);
 
@@ -97,7 +99,8 @@ export class ExplainCommitCommand extends ExplainCommandBase {
 				return;
 			}
 
-			this.openDocument(result, `/explain/commit/${commit.ref}/${result.model.id}`, {
+			const { promise, model } = result;
+			this.openDocument(promise, `/explain/commit/${commit.ref}/${model.id}`, model, 'explain-commit', {
 				header: { title: 'Commit Summary', subtitle: `${commit.summary} (${commit.shortSha})` },
 				command: {
 					label: 'Explain Commit Summary',
@@ -105,6 +108,7 @@ export class ExplainCommitCommand extends ExplainCommandBase {
 					args: {
 						repoPath: svc.path,
 						rev: commit.ref,
+						prompt: args.prompt,
 						source: args.source,
 					},
 				},

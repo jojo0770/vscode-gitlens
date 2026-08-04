@@ -1,0 +1,40 @@
+name: Merge Mate Sync
+on:
+    push:
+        branches: [main]
+    workflow_dispatch:
+        inputs:
+            apply-policy:
+                description: 'Apply policy'
+                required: true
+                type: choice
+                options:
+                    - resolved-only
+                    - auto
+                    - review
+                    - dry-run
+                default: review
+permissions:
+    contents: write
+    pull-requests: write
+    id-token: write
+jobs:
+    sync:
+        runs-on: ubuntu-latest
+        steps:
+            - uses: gitkraken/merge-mate-action/sync@v0.3.0
+              with:
+                  ai-provider: gitkraken
+                  ai-api-key: ${{ secrets.GK_AI_PROVISIONER_TOKEN }}
+                  apply-policy: ${{ inputs.apply-policy || 'review' }}
+                  pr-filter: |
+                      target-branches:
+                          - "main"
+                      updated: "<7d"
+                      authors:
+                          - eamodio
+                          - d13
+                          - axosoft-ramint
+                          - sergeibbb
+                          - justinrobots
+                          - ianhattendorf

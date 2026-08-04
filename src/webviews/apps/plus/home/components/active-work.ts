@@ -1,48 +1,68 @@
-import { consume } from '@lit/context';
 import { SignalWatcher } from '@lit-labs/signals';
+import { consume } from '@lit/context';
 import type { TemplateResult } from 'lit';
 import { css, html, LitElement, nothing } from 'lit';
 import { customElement, state } from 'lit/decorators.js';
 import { ifDefined } from 'lit/directives/if-defined.js';
-import { isSubscriptionTrialOrPaidFromState } from '../../../../../plus/gk/utils/subscription.utils';
-import type { AssociateIssueWithBranchCommandArgs } from '../../../../../plus/startWork/startWork';
-import { createCommandLink } from '../../../../../system/commands';
-import { createWebviewCommandLink } from '../../../../../system/webview';
+import { isSubscriptionTrialOrPaidFromState } from '../../../../../plus/gk/utils/subscription.utils.js';
+import type { AssociateIssueWithBranchCommandArgs } from '../../../../../plus/startWork/associateIssueWithBranch.js';
+import { createCommandLink } from '../../../../../system/commands.js';
 import type {
 	GetActiveOverviewResponse,
 	GetOverviewBranch,
 	OpenInGraphParams,
 	OpenInTimelineParams,
-	State,
-} from '../../../../home/protocol';
-import { ExecuteCommand } from '../../../../protocol';
-import { stateContext } from '../../../home/context';
-import type { RepoButtonGroupClickEvent } from '../../../shared/components/repo-button-group';
-import { ipcContext } from '../../../shared/contexts/ipc';
-import { linkStyles, ruleStyles } from '../../shared/components/vscode.css';
-import { branchCardStyles, GlBranchCardBase } from './branch-card';
-import type { ActiveOverviewState } from './overviewState';
-import { activeOverviewStateContext } from './overviewState';
-import '../../../shared/components/breadcrumbs';
-import '../../../shared/components/button';
-import '../../../shared/components/code-icon';
-import '../../../shared/components/skeleton-loader';
-import '../../../shared/components/card/card';
-import '../../../shared/components/commit/commit-stats';
-import '../../../shared/components/menu/menu-item';
-import '../../../shared/components/menu/menu-label';
-import '../../../shared/components/overlays/popover';
-import '../../../shared/components/pills/tracking';
-import '../../../shared/components/ref-button';
-import '../../../shared/components/repo-button-group';
-import '../../../shared/components/rich/issue-icon';
-import '../../../shared/components/rich/pr-icon';
-import '../../shared/components/merge-rebase-status';
+} from '../../../../home/protocol.js';
+import type { HomeState } from '../../../home/state.js';
+import { homeStateContext } from '../../../home/state.js';
+import type { RepoButtonGroupClickEvent } from '../../../shared/components/repo-button-group.js';
+import type { CommandsState } from '../../../shared/contexts/commands.js';
+import { commandsContext } from '../../../shared/contexts/commands.js';
+import type { SubscriptionContextState } from '../../../shared/contexts/subscription.js';
+import { subscriptionContext } from '../../../shared/contexts/subscription.js';
+import type { WebviewContext } from '../../../shared/contexts/webview.js';
+import { webviewContext } from '../../../shared/contexts/webview.js';
+import { linkStyles, ruleStyles } from '../../shared/components/vscode.css.js';
+import { branchCardStyles, GlBranchCardBase } from './branch-card.js';
+import type { ActiveOverviewState } from './overviewState.js';
+import { activeOverviewStateContext } from './overviewState.js';
+import '../../../shared/components/actions/action-item.js';
+import '../../../shared/components/breadcrumbs.js';
+import '../../../shared/components/button.js';
+import '../../../shared/components/button-container.js';
+import '../../../shared/components/code-icon.js';
+import '../../../shared/components/skeleton-loader.js';
+import '../../../shared/components/card/card.js';
+import '../../../shared/components/commit/commit-stats.js';
+import '../../../shared/components/menu/menu-divider.js';
+import '../../../shared/components/menu/menu-item.js';
+import '../../../shared/components/menu/menu-label.js';
+import '../../../shared/components/overlays/popover.js';
+import '../../../shared/components/pills/tracking.js';
+import '../../../shared/components/ref-button.js';
+import '../../../shared/components/repo-button-group.js';
+import '../../../shared/components/rich/issue-icon.js';
+import '../../../shared/components/rich/pr-icon.js';
+import '../../shared/components/merge-rebase-status.js';
+import './branch-section.js';
 
-export const activeWorkTagName = 'gl-active-work';
+declare global {
+	interface HTMLElementTagNameMap {
+		['gl-active-work']: GlActiveWork;
+	}
+}
 
-@customElement(activeWorkTagName)
+@customElement('gl-active-work')
 export class GlActiveWork extends SignalWatcher(LitElement) {
+	@consume({ context: subscriptionContext, subscribe: true })
+	private _subscription!: SubscriptionContextState;
+
+	@consume({ context: homeStateContext })
+	private _homeCtx!: HomeState;
+
+	@consume({ context: commandsContext })
+	private _commands!: CommandsState;
+
 	static override styles = [
 		linkStyles,
 		branchCardStyles,
@@ -54,7 +74,7 @@ export class GlActiveWork extends SignalWatcher(LitElement) {
 
 			:host {
 				display: block;
-				margin-bottom: 2.4rem;
+				margin-bottom: var(--gl-space-24);
 				color: var(--vscode-foreground);
 			}
 
@@ -63,18 +83,19 @@ export class GlActiveWork extends SignalWatcher(LitElement) {
 			}
 
 			gl-section::part(header) {
-				margin-block-end: 0.2rem;
+				margin-block-end: var(--gl-space-2);
 			}
 
 			.section-heading-actions {
-				flex: none;
 				display: flex;
+				flex: none;
 				align-items: center;
 			}
 
 			.section-heading-action {
 				--button-padding: 0.2rem;
 				--button-line-height: 1.2rem;
+
 				/* margin-block: -1rem; */
 			}
 
@@ -94,58 +115,78 @@ export class GlActiveWork extends SignalWatcher(LitElement) {
 				--gl-tooltip-text-transform: none;
 			}
 
-			.heading-branch-breadcrumb {
-				text-transform: none;
+			/* Style hr inside any slotted tooltip — the default browser hr renders too
+	   bright and without proper spacing inside the dark tooltip body. */
+			[slot='tooltip'] hr {
+				margin: var(--gl-space-4) 0;
+				border: none;
+				border-top: var(--gl-border-width) solid var(--color-foreground--25);
 			}
 		`,
 	];
 
-	@consume<State>({ context: stateContext, subscribe: true })
-	@state()
-	private _homeState!: State;
-
 	@consume({ context: activeOverviewStateContext })
 	private _activeOverviewState!: ActiveOverviewState;
 
-	@consume({ context: ipcContext })
-	private _ipc!: typeof ipcContext.__context__;
+	@consume({ context: webviewContext })
+	private _webview!: WebviewContext;
 
 	@state()
 	private repoCollapsed = true;
 
 	get isPro() {
-		return isSubscriptionTrialOrPaidFromState(this._homeState.subscription.state);
+		const sub = this._subscription.subscription.get();
+		return sub != null && isSubscriptionTrialOrPaidFromState(sub.state);
 	}
 
 	override connectedCallback(): void {
 		super.connectedCallback?.();
 
-		if (this._homeState.repositories.openCount > 0) {
-			this._activeOverviewState.run();
+		if (this._homeCtx.repositories.get().openCount > 0) {
+			this._activeOverviewState.fetch();
 		}
 	}
 
 	private onBranchSelectorClicked() {
-		this._ipc.sendCommand(ExecuteCommand, {
-			command: 'gitlens.home.switchToBranch',
-			args: [{ repoPath: this._activeOverviewState.state?.active.repoPath }],
+		void this._commands.service?.executeScoped('gitlens.switchToBranch:home', {
+			repoPath: this._activeOverviewState.value.get()?.active[0]?.repoPath,
 		});
 	}
 
 	override render(): unknown {
-		if (this._homeState.discovering) {
+		if (this._homeCtx.discovering.get()) {
 			return this.renderLoader();
 		}
 
-		if (this._homeState.repositories.openCount === 0) {
+		if (this._homeCtx.repositories.get().openCount === 0) {
 			return nothing;
 		}
 
-		return this._activeOverviewState.render({
-			pending: () => this.renderPending(),
-			complete: overview => this.renderComplete(overview),
-			error: () => html`<span>Error</span>`,
-		});
+		if (this._activeOverviewState.error.get() != null) {
+			return html`
+				<gl-section>
+					<span slot="heading">Active Branch</span>
+					<span
+						>Unable to load branch data.
+						<a
+							href="#"
+							@click=${(e: Event) => {
+								e.preventDefault();
+								this._activeOverviewState.fetch();
+							}}
+							>Retry</a
+						>
+					</span>
+				</gl-section>
+			`;
+		}
+
+		const overview = this._activeOverviewState.value.get();
+		if (overview == null) {
+			return this.renderLoader();
+		}
+
+		return this.renderComplete(overview, this._activeOverviewState.loading.get());
 	}
 
 	private renderLoader() {
@@ -157,27 +198,22 @@ export class GlActiveWork extends SignalWatcher(LitElement) {
 		`;
 	}
 
-	private renderPending() {
-		if (this._activeOverviewState.state == null) {
-			return this.renderLoader();
-		}
-		return this.renderComplete(this._activeOverviewState.state, true);
-	}
-
 	private renderComplete(overview: GetActiveOverviewResponse, isFetching = false) {
 		const repo = overview?.repository;
-		const activeBranch = overview?.active;
-		if (!repo || !activeBranch) return html`<span>None</span>`;
-		const hasMultipleRepositories = this._homeState.repositories.openCount > 1;
+		const activeBranches = overview?.active;
+		if (!repo || !activeBranches?.length) return html`<span>None</span>`;
+
+		const hasMultipleRepositories = this._homeCtx.repositories.get().openCount > 1;
+		const primaryBranch = activeBranches[0];
 
 		return html`
 			<gl-section ?loading=${isFetching}>
-				<gl-breadcrumbs slot="heading">
-					<gl-breadcrumb-item collapsibleState="none" class="heading-repo-breadcrumb"
+				<gl-breadcrumbs slot="heading" label="Active Work scope">
+					<gl-breadcrumb-item label="${repo.name}" .shrink=${0}
 						><gl-repo-button-group
 							.repository=${repo}
 							?disabled=${!hasMultipleRepositories}
-							?hasMultipleRepositories=${hasMultipleRepositories}
+							.hasMultipleRepositories=${hasMultipleRepositories}
 							.source=${{ source: 'graph' } as const}
 							?expandable=${true}
 							@gl-click=${this.onRepositorySelectorClicked}
@@ -188,8 +224,8 @@ export class GlActiveWork extends SignalWatcher(LitElement) {
 							</span></gl-repo-button-group
 						></gl-breadcrumb-item
 					>
-					<gl-breadcrumb-item collapsibleState="none" icon="git-branch" class="heading-branch-breadcrumb"
-						><gl-ref-button .ref=${activeBranch.reference} @click=${this.onBranchSelectorClicked}
+					<gl-breadcrumb-item icon="git-branch" label="${primaryBranch.reference?.name ?? 'Branch'}"
+						><gl-ref-button .ref=${primaryBranch.reference} @click=${this.onBranchSelectorClicked}
 							><span slot="tooltip">Switch to Another Branch... </span></gl-ref-button
 						></gl-breadcrumb-item
 					>
@@ -201,7 +237,7 @@ export class GlActiveWork extends SignalWatcher(LitElement) {
 						class="section-heading-action"
 						appearance="toolbar"
 						tooltip="Fetch All"
-						href=${createCommandLink('gitlens.home.fetch', undefined)}
+						href=${this._webview.createCommandLink('gitlens.fetch:')}
 						><code-icon icon="repo-fetch"></code-icon
 					></gl-button>
 					<gl-button
@@ -210,10 +246,10 @@ export class GlActiveWork extends SignalWatcher(LitElement) {
 						class="section-heading-action"
 						appearance="toolbar"
 						tooltip="Visualize Repo History"
-						href=${createCommandLink('gitlens.visualizeHistory.repo:home', {
+						href=${this._webview.createCommandLink<OpenInTimelineParams>('gitlens.visualizeHistory.repo:', {
 							type: 'repo',
-							repoPath: this._activeOverviewState.state!.repository.path,
-						} satisfies OpenInTimelineParams)}
+							repoPath: repo.path,
+						})}
 						><code-icon icon="graph-scatter"></code-icon></gl-button
 					><gl-button
 						aria-busy="${ifDefined(isFetching)}"
@@ -221,14 +257,14 @@ export class GlActiveWork extends SignalWatcher(LitElement) {
 						class="section-heading-action"
 						appearance="toolbar"
 						tooltip="Open in Commit Graph"
-						href=${createCommandLink('gitlens.home.openInGraph', {
+						href=${this._webview.createCommandLink<OpenInGraphParams>('gitlens.showInCommitGraph:', {
 							type: 'repo',
-							repoPath: this._activeOverviewState.state!.repository.path,
-						} satisfies OpenInGraphParams)}
+							repoPath: repo.path,
+						})}
 						><code-icon icon="gl-graph"></code-icon
 					></gl-button>
 				</span>
-				${this.renderRepoBranchCard(activeBranch, repo.path, isFetching)}
+				${activeBranches.map(branch => this.renderRepoBranchCard(branch, repo.path, isFetching))}
 			</gl-section>
 		`;
 	}
@@ -251,7 +287,7 @@ export class GlActiveWork extends SignalWatcher(LitElement) {
 
 declare global {
 	interface HTMLElementTagNameMap {
-		[activeWorkTagName]: GlActiveWork;
+		['gl-active-branch-card']: GlBranchCardBase;
 	}
 }
 
@@ -264,12 +300,12 @@ export class GlActiveBranchCard extends GlBranchCardBase {
 			:host {
 				display: flex;
 				flex-direction: column;
-				gap: 0.8rem;
+				gap: var(--gl-space-8);
 			}
 
 			span.branch-item__missing {
-				color: var(--vscode-descriptionForeground);
 				font-style: italic;
+				color: var(--vscode-descriptionForeground);
 			}
 
 			gl-work-item {
@@ -298,7 +334,7 @@ export class GlActiveBranchCard extends GlBranchCardBase {
 	}
 
 	private renderActionsMenu() {
-		const aiEnabled = this._homeState.orgSettings.ai && this._homeState.aiEnabled;
+		const aiEnabled = this._subscription.orgSettings.get()?.ai && this._aiCtx.state.get().enabled;
 		const isFetching = this.busy;
 		const workingTreeState = this.wip?.workingTreeState;
 		const hasWip =
@@ -311,28 +347,37 @@ export class GlActiveBranchCard extends GlBranchCardBase {
 				actions.push(
 					html`<menu-item
 						?disabled=${isFetching}
-						href=${this.createCommandLink('gitlens.ai.generateCommits:home')}
-						>Generate Commits with AI (Preview)</menu-item
+						href=${createCommandLink('gitlens.ai.generateCommitMessage', {
+							repoPath: this.repo,
+							source: 'home',
+						})}
+						>Generate Commit Message</menu-item
 					>`,
 				);
+				actions.push(html`<menu-divider></menu-divider>`);
 				actions.push(
-					html`<menu-item ?disabled=${isFetching} href=${this.createCommandLink('gitlens.ai.explainWip:home')}
-						>Explain Working Changes (Preview)</menu-item
+					html`<menu-item
+						?disabled=${isFetching}
+						href=${this.createWebviewCommandLinkWithBranchRef('gitlens.ai.explainWip:')}
+						>Explain Working Changes</menu-item
 					>`,
 				);
 			}
 
 			actions.push(
-				html`<menu-item ?disabled=${isFetching} href=${this.createCommandLink('gitlens.ai.explainBranch:home')}
-					>Explain Branch Changes (Preview)</menu-item
+				html`<menu-item
+					?disabled=${isFetching}
+					href=${this.createWebviewCommandLinkWithBranchRef('gitlens.ai.explainBranch:')}
+					>Explain Branch Changes</menu-item
 				>`,
 			);
 
 			if (hasWip) {
+				actions.push(html`<menu-divider></menu-divider>`);
 				actions.push(
 					html`<menu-item
 						?disabled=${isFetching}
-						href=${this.createCommandLink('gitlens.home.createCloudPatch')}
+						href=${this.createWebviewCommandLinkWithBranchRef('gitlens.createCloudPatch:')}
 						>Share as Cloud Patch</menu-item
 					>`,
 				);
@@ -342,7 +387,7 @@ export class GlActiveBranchCard extends GlBranchCardBase {
 				<gl-button
 					aria-busy=${ifDefined(isFetching)}
 					?disabled=${isFetching}
-					href=${this.createCommandLink('gitlens.home.createCloudPatch')}
+					href=${this.createWebviewCommandLinkWithBranchRef('gitlens.createCloudPatch:')}
 					appearance="secondary"
 					tooltip="Share as Cloud Patch"
 					><code-icon icon="gl-cloud-patch-share"></code-icon>
@@ -357,15 +402,12 @@ export class GlActiveBranchCard extends GlBranchCardBase {
 			trigger="click focus"
 			placement="bottom-end"
 			.arrow=${false}
-			distance="0"
+			.distance=${0}
 		>
 			<gl-button slot="anchor" appearance="toolbar" tooltipPlacement="top" aria-label="Additional Actions">
 				<code-icon icon="ellipsis"></code-icon>
 			</gl-button>
-			<div slot="content">
-				<menu-label>Actions</menu-label>
-				${actions}
-			</div>
+			<div slot="content">${actions}</div>
 		</gl-popover>`;
 	}
 
@@ -386,32 +428,20 @@ export class GlActiveBranchCard extends GlBranchCardBase {
 			workingTreeState.added + workingTreeState.changed + workingTreeState.deleted > 0;
 
 		if (hasWip) {
-			if (this._homeState.orgSettings.ai && this._homeState.aiEnabled) {
-				actions.push(html`
-					<gl-button
-						aria-busy=${ifDefined(isFetching)}
-						?disabled=${isFetching}
-						href=${this.createCommandLink('gitlens.ai.generateCommitMessage', {
-							repoPath: this.repo,
-							source: 'home',
-						})}
-						appearance="secondary"
-						tooltip="Generate Message &amp; Commit via SCM..."
-						><code-icon icon="sparkle" slot="prefix"></code-icon>Commit
-					</gl-button>
-				`);
-			} else {
-				actions.push(html`
-					<gl-button
-						aria-busy=${ifDefined(isFetching)}
-						?disabled=${isFetching}
-						href="command:workbench.view.scm"
-						appearance="secondary"
-						tooltip="Commit via SCM"
-						><code-icon rotate="45" icon="arrow-up" slot="suffix"></code-icon>Commit
-					</gl-button>
-				`);
-			}
+			actions.push(html`
+				<gl-button
+					aria-busy=${ifDefined(isFetching)}
+					?disabled=${isFetching}
+					href=${this.createWebviewCommandLinkWithBranchRef('gitlens.composeCommits:')}
+					appearance="secondary"
+					density="compact"
+					><code-icon icon="wand" slot="prefix"></code-icon>Compose Commits...<span slot="tooltip"
+						><strong>Compose Commits</strong><br /><i
+							>Automatically or interactively organize changes into meaningful commits</i
+						></span
+					></gl-button
+				>
+			`);
 		}
 
 		if (this.wip?.pausedOpStatus != null) {
@@ -424,13 +454,16 @@ export class GlActiveBranchCard extends GlBranchCardBase {
 				<gl-button
 					aria-busy=${ifDefined(isFetching)}
 					?disabled=${isFetching}
-					href=${this.createWebviewCommandLink('gitlens.views.home.publishBranch')}
-					full
+					href=${this.createWebviewCommandLinkWithBranchRef('gitlens.publishBranch:')}
 					appearance="secondary"
-					><code-icon icon="cloud-upload" slot="prefix"></code-icon> Publish Branch<span slot="tooltip"
-						>Publish (push) <strong>${name}</strong> to ${upstream?.name ?? 'a remote'}</span
-					></gl-button
+					density="compact"
 				>
+					<code-icon icon="cloud-upload" slot="${ifDefined(hasWip ? undefined : 'prefix')}"></code-icon>
+					${hasWip ? '' : 'Publish Branch'}
+					<span slot="tooltip"
+						>Publish (push) <strong>${name}</strong> to ${upstream?.name ?? 'a remote'}</span
+					>
+				</gl-button>
 			`);
 
 			return wrappedActions();
@@ -440,77 +473,86 @@ export class GlActiveBranchCard extends GlBranchCardBase {
 			const isAhead = Boolean(upstream.state.ahead);
 			const isBehind = Boolean(upstream.state.behind);
 			if (isAhead && isBehind) {
-				const pullTooltip = upstream?.name ? `Pull from ${upstream.name}` : 'Pull';
-				const forcePushTooltip = upstream?.name ? `Force Push to ${upstream.name}` : 'Force Push';
 				actions.push(html`
 					<gl-button
 						aria-busy=${ifDefined(isFetching)}
 						?disabled=${isFetching}
-						href=${createWebviewCommandLink('gitlens.views.home.pull', 'gitlens.views.home', '')}
-						full
+						href=${this._webview.createCommandLink('gitlens.pull:')}
 						appearance="secondary"
-						tooltip=${pullTooltip}
-						><code-icon icon="repo-pull" slot="prefix"></code-icon> Pull
+						density="compact"
+					>
+						<code-icon icon="repo-pull" slot="${ifDefined(hasWip ? undefined : 'prefix')}"></code-icon>
+						${hasWip ? '' : 'Pull'}
 						<gl-tracking-pill
 							.ahead=${upstream.state.ahead}
 							.behind=${upstream.state.behind}
 							slot="suffix"
-						></gl-tracking-pill
-					></gl-button>
+						></gl-tracking-pill>
+						<span slot="tooltip"
+							>Pull${upstream?.name ? html` from <strong>${upstream.name}</strong>` : ''}</span
+						>
+					</gl-button>
 					<gl-button
 						aria-busy=${ifDefined(isFetching)}
 						?disabled=${isFetching}
-						href=${createWebviewCommandLink('gitlens.views.home.push', 'gitlens.views.home', '', {
-							force: true,
-						})}
+						href=${this._webview.createCommandLink<{ force?: boolean }>('gitlens.push:', { force: true })}
 						appearance="secondary"
 						density="compact"
-						tooltip=${forcePushTooltip}
-						><code-icon icon="repo-force-push"></code-icon
-					></gl-button>
+					>
+						<code-icon icon="repo-force-push"></code-icon>
+						<span slot="tooltip"
+							>Force Push${upstream?.name ? html` to <strong>${upstream.name}</strong>` : ''}</span
+						>
+					</gl-button>
 				`);
 
 				return wrappedActions();
 			}
 
 			if (isBehind) {
-				const tooltip = upstream?.name ? `Pull from ${upstream.name}` : 'Pull';
 				actions.push(html`
 					<gl-button
 						aria-busy=${ifDefined(isFetching)}
 						?disabled=${isFetching}
-						href=${createWebviewCommandLink('gitlens.views.home.pull', 'gitlens.views.home', '')}
-						full
+						href=${this._webview.createCommandLink('gitlens.pull:')}
 						appearance="secondary"
-						tooltip=${tooltip}
-						><code-icon icon="repo-pull" slot="prefix"></code-icon> Pull
+						density="compact"
+					>
+						<code-icon icon="repo-pull" slot="${ifDefined(hasWip ? undefined : 'prefix')}"></code-icon>
+						${hasWip ? '' : 'Pull'}
 						<gl-tracking-pill
 							.ahead=${upstream.state.ahead}
 							.behind=${upstream.state.behind}
 							slot="suffix"
-						></gl-tracking-pill
-					></gl-button>
+						></gl-tracking-pill>
+						<span slot="tooltip"
+							>Pull${upstream?.name ? html` from <strong>${upstream.name}</strong>` : ''}</span
+						>
+					</gl-button>
 				`);
 
 				return wrappedActions();
 			}
 
 			if (isAhead) {
-				const tooltip = upstream?.name ? `Push to ${upstream.name}` : 'Push';
 				actions.push(html`
 					<gl-button
 						aria-busy=${ifDefined(isFetching)}
 						?disabled=${isFetching}
-						href=${createWebviewCommandLink('gitlens.views.home.push', 'gitlens.views.home', '')}
-						full
+						href=${this._webview.createCommandLink('gitlens.push:')}
 						appearance="secondary"
-						tooltip=${tooltip}
-						><code-icon icon="repo-push" slot="prefix"></code-icon> Push
+						density="compact"
+					>
+						<code-icon icon="repo-push" slot="prefix"></code-icon>
+						${hasWip ? '' : 'Push'}
 						<gl-tracking-pill
 							.ahead=${upstream.state.ahead}
 							.behind=${upstream.state.behind}
 							slot="suffix"
 						></gl-tracking-pill>
+						<span slot="tooltip"
+							>Push${upstream?.name ? html` to <strong>${upstream.name}</strong>` : ''}</span
+						>
 					</gl-button>
 				`);
 
@@ -540,17 +582,17 @@ export class GlActiveBranchCard extends GlBranchCardBase {
 			html`<action-item
 				label="Open Pull Request Changes"
 				icon="request-changes"
-				href=${this.createCommandLink('gitlens.home.openPullRequestChanges')}
+				href=${this.createWebviewCommandLinkWithBranchRef('gitlens.openPullRequestChanges:')}
 			></action-item>`,
 			html`<action-item
 				label="Compare Pull Request"
 				icon="git-compare"
-				href=${this.createCommandLink('gitlens.home.openPullRequestComparison')}
+				href=${this.createWebviewCommandLinkWithBranchRef('gitlens.openPullRequestComparison:')}
 			></action-item>`,
 			html`<action-item
 				label="Open Pull Request Details"
 				icon="eye"
-				href=${this.createCommandLink('gitlens.home.openPullRequestDetails')}
+				href=${this.createWebviewCommandLinkWithBranchRef('gitlens.openPullRequestDetails:')}
 			></action-item>`,
 		];
 	}
@@ -569,13 +611,11 @@ export class GlActiveBranchCard extends GlBranchCardBase {
 				<gl-button
 					class="associate-issue-action"
 					appearance="toolbar"
-					href=${this.createCommandLink<AssociateIssueWithBranchCommandArgs>(
-						'gitlens.associateIssueWithBranch',
-						{
-							branch: this.branch.reference,
-							source: 'home',
-						},
-					)}
+					href=${createCommandLink<AssociateIssueWithBranchCommandArgs>('gitlens.associateIssueWithBranch', {
+						command: 'associateIssueWithBranch',
+						branch: this.branch.reference,
+						source: 'home',
+					})}
 					tooltip="Associate Issue with Branch"
 					aria-label="Associate Issue with Branch"
 					><issue-icon></issue-icon>

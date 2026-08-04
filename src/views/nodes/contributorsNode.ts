@@ -1,17 +1,18 @@
 import { ThemeColor, ThemeIcon, TreeItem, TreeItemCollapsibleState } from 'vscode';
-import type { CoreColors } from '../../constants.colors';
-import type { GitUri } from '../../git/gitUri';
-import type { GitContributor } from '../../git/models/contributor';
-import type { Repository } from '../../git/models/repository';
-import { sortContributors } from '../../git/utils/-webview/sorting';
-import { configuration } from '../../system/-webview/configuration';
-import { debug } from '../../system/decorators/log';
-import type { ViewsWithContributorsNode } from '../viewBase';
-import { CacheableChildrenViewNode } from './abstract/cacheableChildrenViewNode';
-import type { ViewNode } from './abstract/viewNode';
-import { ContextValues, getViewNodeId } from './abstract/viewNode';
-import { ActionMessageNode, MessageNode } from './common';
-import { ContributorNode } from './contributorNode';
+import type { GitContributor } from '@gitlens/git/models/contributor.js';
+import { trace } from '@gitlens/utils/decorators/log.js';
+import type { CoreColors } from '../../constants.colors.js';
+import type { GitUri } from '../../git/gitUri.js';
+import type { GlRepository } from '../../git/models/repository.js';
+import { sortContributors } from '../../git/utils/-webview/sorting.js';
+import { toAbortSignal } from '../../system/-webview/cancellation.js';
+import { configuration } from '../../system/-webview/configuration.js';
+import type { ViewsWithContributorsNode } from '../viewBase.js';
+import { CacheableChildrenViewNode } from './abstract/cacheableChildrenViewNode.js';
+import type { ViewNode } from './abstract/viewNode.js';
+import { ContextValues, getViewNodeId } from './abstract/viewNode.js';
+import { ActionMessageNode, MessageNode } from './common.js';
+import { ContributorNode } from './contributorNode.js';
 
 export class ContributorsNode extends CacheableChildrenViewNode<
 	'contributors',
@@ -22,7 +23,7 @@ export class ContributorsNode extends CacheableChildrenViewNode<
 		uri: GitUri,
 		view: ViewsWithContributorsNode,
 		protected override readonly parent: ViewNode,
-		public readonly repo: Repository,
+		public readonly repo: GlRepository,
 		private readonly options?: {
 			all?: boolean;
 			icon?: boolean;
@@ -85,7 +86,7 @@ export class ContributorsNode extends CacheableChildrenViewNode<
 		}
 	}
 
-	@debug({ args: false })
+	@trace({ args: false })
 	private async getPresenceMap(contributors: GitContributor[]) {
 		// Only get presence for the current user, because it is far too slow otherwise
 		const email = contributors.find(c => c.current)?.email;
@@ -125,7 +126,7 @@ export class ContributorsNode extends CacheableChildrenViewNode<
 		const result = await svc.contributors.getContributors(
 			rev,
 			{ all: all, merges: this.options?.showMergeCommits, stats: !deferStats && stats },
-			this.view.cancellation,
+			toAbortSignal(this.view.cancellation),
 			timeout || undefined,
 		);
 		if (!result.contributors.length) {

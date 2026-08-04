@@ -1,17 +1,17 @@
 import type { ConfigurationChangeEvent, Extension, Uri } from 'vscode';
 import { Disposable, extensions, workspace } from 'vscode';
-import type { Contact, LiveShare, LiveShareExtension, SessionChangeEvent } from '../@types/vsls';
-import { Schemes } from '../constants';
-import type { Container } from '../container';
-import { configuration } from '../system/-webview/configuration';
-import { setContext } from '../system/-webview/context';
-import { debug } from '../system/decorators/log';
-import { once } from '../system/event';
-import { Logger } from '../system/logger';
-import type { Deferred } from '../system/promise';
-import { defer } from '../system/promise';
-import { VslsGuestService } from './guest';
-import { VslsHostService } from './host';
+import { trace } from '@gitlens/utils/decorators/log.js';
+import { once } from '@gitlens/utils/event.js';
+import { Logger } from '@gitlens/utils/logger.js';
+import type { Deferred } from '@gitlens/utils/promise.js';
+import { defer } from '@gitlens/utils/promise.js';
+import type { Contact, LiveShare, LiveShareExtension, SessionChangeEvent } from '../@types/vsls.d.js';
+import { Schemes } from '../constants.js';
+import type { Container } from '../container.js';
+import { configuration } from '../system/-webview/configuration.js';
+import { setContext } from '../system/-webview/context.js';
+import { VslsGuestService } from './guest.js';
+import { VslsHostService } from './host.js';
 
 export interface ContactPresence {
 	status: ContactPresenceStatus;
@@ -184,7 +184,7 @@ export class VslsController implements Disposable {
 		return this._guest;
 	}
 
-	@debug()
+	@trace()
 	async getContact(email: string | undefined): Promise<Contact | undefined> {
 		if (email == null) return undefined;
 
@@ -195,7 +195,7 @@ export class VslsController implements Disposable {
 		return contacts.contacts[email];
 	}
 
-	@debug<VslsController['getContacts']>({ args: { 0: emails => emails.length } })
+	@trace({ args: emails => ({ emails: emails.length }) })
 	private async getContacts(emails: string[]) {
 		const api = await this._api;
 		if (api == null) return undefined;
@@ -204,7 +204,7 @@ export class VslsController implements Disposable {
 		return Object.values(contacts.contacts);
 	}
 
-	@debug()
+	@trace()
 	async getContactPresence(email: string | undefined): Promise<ContactPresence | undefined> {
 		const contact = await this.getContact(email);
 		if (contact == null) return undefined;
@@ -212,7 +212,7 @@ export class VslsController implements Disposable {
 		return contactStatusToPresence(contact.status);
 	}
 
-	@debug<VslsController['getContactsPresence']>({ args: { 0: emails => emails.length } })
+	@trace({ args: emails => ({ emails: emails.length }) })
 	async getContactsPresence(emails: string[]): Promise<Map<string, ContactPresence> | undefined> {
 		const contacts = await this.getContacts(emails);
 		if (contacts == null) return undefined;

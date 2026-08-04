@@ -1,12 +1,12 @@
-import type { Repository } from '../../../git/models/repository';
+import type { GlRepository } from '../../../git/models/repository.js';
 import type {
 	CloudWorkspace,
 	CloudWorkspaceData,
 	CloudWorkspaceIssueTracker,
 	CloudWorkspaceProviderType,
 	CloudWorkspaceRepositoryDescriptor,
-} from './cloudWorkspace';
-import type { LocalWorkspace, LocalWorkspaceRepositoryDescriptor } from './localWorkspace';
+} from './cloudWorkspace.js';
+import type { LocalWorkspace, LocalWorkspaceRepositoryDescriptor } from './localWorkspace.js';
 
 export type WorkspaceType = 'cloud' | 'local';
 export type WorkspaceAutoAddSetting = 'disabled' | 'enabled' | 'prompt';
@@ -21,7 +21,7 @@ export type CodeWorkspaceFileContents = {
 export type WorkspaceRepositoriesByName = Map<string, RepositoryMatch>;
 
 export interface RepositoryMatch {
-	repository: Repository;
+	repository: GlRepository;
 	descriptor: CloudWorkspaceRepositoryDescriptor | LocalWorkspaceRepositoryDescriptor;
 }
 

@@ -1,3 +1,5 @@
+import * as fs from 'fs';
+import { expand } from 'regex-to-strings';
 import type {
 	Command,
 	ContributionsJson,
@@ -13,8 +15,6 @@ import type {
 	View,
 	SubmenuLocations,
 } from './models';
-import * as fs from 'fs';
-import { expand } from 'regex-to-strings';
 import { ContextKeyExprType, Parser, type ContextKeyExpression } from './whenParser.mts';
 
 export const menuLocations: MenuLocations[] = [
@@ -32,6 +32,7 @@ export const menuLocations: MenuLocations[] = [
 	'explorer/context',
 	'extension/context',
 	'git.commit',
+	'git.changes',
 	'menuBar/edit/copy',
 	'scm/title',
 	'scm/sourceControl',
@@ -453,8 +454,8 @@ const orderedContextKeysByLocation = new Map<string, [primary: string[], ...(str
 		'view/item/context',
 		[
 			['viewItem'],
-			'gitlens:views:scm:grouped:view',
 			'view',
+			'gitlens:views:scm:grouped:view',
 			'listDoubleSelection',
 			'listMultiSelection',
 			...orderedContextKeys,
@@ -476,8 +477,8 @@ const orderedContextKeysByLocation = new Map<string, [primary: string[], ...(str
 		[
 			[
 				'viewItem',
-				'gitlens:views:scm:grouped:view',
 				'view',
+				'gitlens:views:scm:grouped:view',
 				'webviewItem',
 				'webviewItems',
 				'webviewItemGroup',

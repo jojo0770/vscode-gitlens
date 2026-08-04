@@ -1,21 +1,22 @@
 import { ThemeIcon, TreeItem, TreeItemCollapsibleState } from 'vscode';
-import { GitUri } from '../../git/gitUri';
-import type { Repository } from '../../git/models/repository';
-import { makeHierarchical } from '../../system/array';
-import type { ViewsWithTagsNode } from '../viewBase';
-import { CacheableChildrenViewNode } from './abstract/cacheableChildrenViewNode';
-import type { ViewNode } from './abstract/viewNode';
-import { ContextValues, getViewNodeId } from './abstract/viewNode';
-import { BranchOrTagFolderNode } from './branchOrTagFolderNode';
-import { MessageNode } from './common';
-import { TagNode } from './tagNode';
+import { makeHierarchical } from '@gitlens/utils/array.js';
+import { GitUri } from '../../git/gitUri.js';
+import type { GlRepository } from '../../git/models/repository.js';
+import { configuration } from '../../system/-webview/configuration.js';
+import type { ViewsWithTagsNode } from '../viewBase.js';
+import { CacheableChildrenViewNode } from './abstract/cacheableChildrenViewNode.js';
+import type { ViewNode } from './abstract/viewNode.js';
+import { ContextValues, getViewNodeId } from './abstract/viewNode.js';
+import { BranchOrTagFolderNode } from './branchOrTagFolderNode.js';
+import { MessageNode } from './common.js';
+import { TagNode } from './tagNode.js';
 
 export class TagsNode extends CacheableChildrenViewNode<'tags', ViewsWithTagsNode> {
 	constructor(
 		uri: GitUri,
 		view: ViewsWithTagsNode,
 		protected override readonly parent: ViewNode,
-		public readonly repo: Repository,
+		public readonly repo: GlRepository,
 	) {
 		super('tags', uri, view, parent);
 
@@ -33,7 +34,7 @@ export class TagsNode extends CacheableChildrenViewNode<'tags', ViewsWithTagsNod
 
 	async getChildren(): Promise<ViewNode[]> {
 		if (this.children == null) {
-			const tags = await this.repo.git.tags.getTags({ sort: true });
+			const tags = await this.repo.git.tags.getTags({ sort: { orderBy: configuration.get('sortTagsBy') } });
 			if (tags.values.length === 0) return [new MessageNode(this.view, this, 'No tags could be found.')];
 
 			// TODO@eamodio handle paging

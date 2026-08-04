@@ -2,24 +2,24 @@ import { homedir } from 'os';
 import { join } from 'path';
 import { env } from 'process';
 import { Uri, workspace } from 'vscode';
-import type { Container } from '../../../container';
-import type { SharedGkStorageLocationProvider } from '../../../plus/repos/sharedGkStorageLocationProvider';
-import { log } from '../../../system/decorators/log';
-import type { Lazy } from '../../../system/lazy';
-import { lazy } from '../../../system/lazy';
-import { getLoggableName, Logger } from '../../../system/logger';
-import { getLogScope, startLogScope } from '../../../system/logger.scope';
-import { wait } from '../../../system/promise';
-import type { UnifiedAsyncDisposable } from '../../../system/unifiedDisposable';
-import { createAsyncDisposable } from '../../../system/unifiedDisposable';
-import { getPlatform } from '../platform';
+import { debug } from '@gitlens/utils/decorators/log.js';
+import type { UnifiedAsyncDisposable } from '@gitlens/utils/disposable.js';
+import { createAsyncDisposable } from '@gitlens/utils/disposable.js';
+import type { Lazy } from '@gitlens/utils/lazy.js';
+import { lazy } from '@gitlens/utils/lazy.js';
+import { getLoggableName } from '@gitlens/utils/logger.js';
+import { getScopedLogger, maybeStartScopedLogger } from '@gitlens/utils/logger.scoped.js';
+import { wait } from '@gitlens/utils/promise.js';
+import type { Container } from '../../../container.js';
+import type { SharedGkStorageLocationProvider } from '../../../plus/repos/sharedGkStorageLocationProvider.js';
+import { getPlatform } from '../platform.js';
 
 export class LocalSharedGkStorageLocationProvider implements SharedGkStorageLocationProvider {
 	private readonly _lazySharedGKUri: Lazy<Promise<Uri>>;
 
 	constructor(private readonly container: Container) {
 		this._lazySharedGKUri = lazy(async () => {
-			using scope = startLogScope(`${getLoggableName(this)}.load`, false);
+			using scope = maybeStartScopedLogger(`${getLoggableName(this)}.load`);
 
 			/** Deprecated prefer using XDG paths */
 			const legacySharedGKPath = join(homedir(), '.gk');
@@ -48,13 +48,13 @@ export class LocalSharedGkStorageLocationProvider implements SharedGkStorageLoca
 
 				if (path) {
 					path = join(path, 'gk');
-					Logger.log(scope, `Using shared GK path: ${path}`);
+					scope?.info(`Using shared GK path: ${path}`);
 				}
 			}
 
 			if (path) return Uri.file(path);
 
-			Logger.log(scope, `Using legacy shared GK path: ${legacySharedGKPath}`);
+			scope?.info(`Using legacy shared GK path: ${legacySharedGKPath}`);
 			return legacySharedGKUri;
 		});
 	}
@@ -63,9 +63,9 @@ export class LocalSharedGkStorageLocationProvider implements SharedGkStorageLoca
 		return Uri.joinPath(await this._lazySharedGKUri.value, relativeFilePath);
 	}
 
-	@log()
+	@debug()
 	async acquireSharedStorageWriteLock(): Promise<UnifiedAsyncDisposable | undefined> {
-		const scope = getLogScope();
+		const scope = getScopedLogger();
 
 		const lockFileUri = await this.getUri('lockfile');
 
@@ -78,7 +78,7 @@ export class LocalSharedGkStorageLocationProvider implements SharedGkStorageLoca
 				break;
 			}
 
-			const currentTime = new Date().getTime();
+			const currentTime = Date.now();
 			if (currentTime - stat.ctime > 30000) {
 				// File exists, but the timestamp is older than 30 seconds, so we can safely remove it
 				break;
@@ -92,23 +92,23 @@ export class LocalSharedGkStorageLocationProvider implements SharedGkStorageLoca
 			// write the lockfile to the shared data folder
 			await workspace.fs.writeFile(lockFileUri, new Uint8Array(0));
 		} catch (ex) {
-			Logger.error(ex, scope, `Failed to acquire lock: ${lockFileUri.toString(true)}`);
+			scope?.error(ex, `Failed to acquire lock: ${lockFileUri.toString(true)}`);
 			return undefined;
 		}
 
 		return createAsyncDisposable(() => this.releaseSharedStorageWriteLock());
 	}
 
-	@log()
+	@debug()
 	async releaseSharedStorageWriteLock(): Promise<boolean> {
-		const scope = getLogScope();
+		const scope = getScopedLogger();
 
 		const lockFileUri = await this.getUri('lockfile');
 
 		try {
 			await workspace.fs.delete(lockFileUri);
 		} catch (ex) {
-			Logger.error(ex, scope, `Failed to release lock: ${lockFileUri.toString(true)}`);
+			scope?.error(ex, `Failed to release lock: ${lockFileUri.toString(true)}`);
 			return false;
 		}
 

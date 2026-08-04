@@ -1,8 +1,8 @@
-import type { TreeViewNodeTypes } from '../../../constants.views';
-import { debug } from '../../../system/decorators/log';
-import type { View } from '../../viewBase';
-import { disposeChildren } from '../../viewBase';
-import { ViewNode } from './viewNode';
+import { trace } from '@gitlens/utils/decorators/log.js';
+import type { TreeViewNodeTypes } from '../../../constants.views.js';
+import type { View } from '../../viewBase.js';
+import { disposeChildren } from '../../viewBase.js';
+import { ViewNode } from './viewNode.js';
 
 export abstract class CacheableChildrenViewNode<
 	Type extends TreeViewNodeTypes = TreeViewNodeTypes,
@@ -26,7 +26,7 @@ export abstract class CacheableChildrenViewNode<
 		this.children = undefined;
 	}
 
-	@debug()
+	@trace()
 	override refresh(reset: boolean = false): void | { cancel: boolean } | Promise<void | { cancel: boolean }> {
 		if (reset) {
 			this.children = undefined;

@@ -1,10 +1,10 @@
 import { css, html, LitElement } from 'lit';
 import { customElement, property } from 'lit/decorators.js';
 import { ifDefined } from 'lit/directives/if-defined.js';
-import type { GitReference } from '../../../../git/models/reference';
-import { pickerIconStyles, refButtonBaseStyles } from './ref.css';
-import './button';
-import './ref-name';
+import type { GitReference } from '@gitlens/git/models/reference.js';
+import { pickerIconStyles, refButtonBaseStyles } from './ref.css.js';
+import './button.js';
+import './ref-name.js';
 
 @customElement('gl-ref-button')
 export class GlRefButton extends LitElement {
@@ -13,14 +13,23 @@ export class GlRefButton extends LitElement {
 		css`
 			:host {
 				--font-weight: normal;
+
+				/* Use grid to force the min-content contribution of this host to 0,
+			   then apply a configurable floor at icon + chevron + padding.
+		   Without grid minmax(0, 1fr), the host's min-content resolves to
+		   the full label width due to white-space: nowrap inside. */
+				display: grid;
+				grid-template-columns: minmax(0, 1fr);
+				min-width: var(--gl-ref-button-min-width, 3.6rem);
 			}
 
 			gl-button {
+				min-width: 0;
 				max-width: 100%;
 			}
 
 			gl-ref-name:not([icon]) {
-				padding-left: 0.2rem;
+				padding-left: var(--gl-space-2);
 			}
 		`,
 		pickerIconStyles,
@@ -45,21 +54,23 @@ export class GlRefButton extends LitElement {
 	worktree = false;
 
 	override render(): unknown {
-		return html`<gl-button appearance="toolbar" href=${ifDefined(this.href)} ?disabled=${this.disabled}
-			>${this.ref == null
-				? html`<slot name="empty">&lt;missing&gt;</slot>`
-				: html`<gl-ref-name
-						part="label"
-						?icon=${this.icon}
-						.ref=${this.ref}
-						.size=${this.size}
-						?worktree=${this.worktree}
-					></gl-ref-name>`}<code-icon
-				slot="suffix"
-				class="picker-icon"
-				icon="chevron-down"
-				size="10"
-			></code-icon
+		return html`<gl-button
+			part="button"
+			appearance="toolbar"
+			href=${ifDefined(this.href)}
+			?disabled=${this.disabled}
+			truncate
+			>${
+				this.ref == null
+					? html`<slot name="empty">&lt;missing&gt;</slot>`
+					: html`<gl-ref-name
+							part="label"
+							?icon=${this.icon}
+							.ref=${this.ref}
+							.size=${this.size}
+							?worktree=${this.worktree}
+						></gl-ref-name>`
+			}<code-icon slot="suffix" class="picker-icon" icon="chevron-down" size="10"></code-icon
 			><slot name="tooltip" slot="tooltip"></slot
 		></gl-button>`;
 	}

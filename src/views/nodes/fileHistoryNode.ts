@@ -1,32 +1,33 @@
 import { Disposable, TreeItem, TreeItemCollapsibleState, window } from 'vscode';
-import type { GitUri } from '../../git/gitUri';
-import type { GitBranch } from '../../git/models/branch';
-import type { GitLog } from '../../git/models/log';
-import type { RepositoryChangeEvent, RepositoryFileSystemChangeEvent } from '../../git/models/repository';
-import { RepositoryChange, RepositoryChangeComparisonMode } from '../../git/models/repository';
-import { deletedOrMissing } from '../../git/models/revision';
-import { getBranchAheadRange } from '../../git/utils/-webview/branch.utils';
-import { configuration } from '../../system/-webview/configuration';
-import { getFolderGlobUri } from '../../system/-webview/path';
-import { gate } from '../../system/decorators/-webview/gate';
-import { memoize } from '../../system/decorators/-webview/memoize';
-import { debug } from '../../system/decorators/log';
-import { weakEvent } from '../../system/event';
-import { filterMap, flatMap, map, some, uniqueBy } from '../../system/iterable';
-import { getLoggableName, Logger } from '../../system/logger';
-import { startLogScope } from '../../system/logger.scope';
-import { basename } from '../../system/path';
-import { getSettledValue } from '../../system/promise';
-import type { FileHistoryView } from '../fileHistoryView';
-import { SubscribeableViewNode } from './abstract/subscribeableViewNode';
-import type { PageableViewNode, ViewNode } from './abstract/viewNode';
-import { ContextValues, getViewNodeId } from './abstract/viewNode';
-import { CommitNode } from './commitNode';
-import { LoadMoreNode, MessageNode } from './common';
-import { ContributorNode } from './contributorNode';
-import { FileHistoryTrackerNode } from './fileHistoryTrackerNode';
-import { FileRevisionAsCommitNode } from './fileRevisionAsCommitNode';
-import { insertDateMarkers } from './utils/-webview/node.utils';
+import type { GitBranch } from '@gitlens/git/models/branch.js';
+import type { GitLog } from '@gitlens/git/models/log.js';
+import { deletedOrMissing } from '@gitlens/git/models/revision.js';
+import { trace } from '@gitlens/utils/decorators/log.js';
+import { memoize } from '@gitlens/utils/decorators/memoize.js';
+import { weakEvent } from '@gitlens/utils/event.js';
+import { filterMap, flatMap, map, some, uniqueBy } from '@gitlens/utils/iterable.js';
+import { getLoggableName } from '@gitlens/utils/logger.js';
+import { maybeStartScopedLogger } from '@gitlens/utils/logger.scoped.js';
+import { basename } from '@gitlens/utils/path.js';
+import { getSettledValue } from '@gitlens/utils/promise.js';
+import { areUrisEqual } from '@gitlens/utils/uri.js';
+import type { GitUri } from '../../git/gitUri.js';
+import type { RepositoryChangeEvent, RepositoryWorkingTreeChangeEvent } from '../../git/models/repository.js';
+import { getBranchAheadRange } from '../../git/utils/-webview/branch.utils.js';
+import { getStatusFilePseudoCommits } from '../../git/utils/-webview/statusFile.utils.js';
+import { configuration } from '../../system/-webview/configuration.js';
+import { getFolderGlobUri } from '../../system/-webview/path.js';
+import { gate } from '../../system/decorators/gate.js';
+import type { FileHistoryView } from '../fileHistoryView.js';
+import { SubscribeableViewNode } from './abstract/subscribeableViewNode.js';
+import type { PageableViewNode, ViewNode } from './abstract/viewNode.js';
+import { ContextValues, getViewNodeId } from './abstract/viewNode.js';
+import { CommitNode } from './commitNode.js';
+import { LoadMoreNode, MessageNode } from './common.js';
+import { ContributorNode } from './contributorNode.js';
+import { FileHistoryTrackerNode } from './fileHistoryTrackerNode.js';
+import { FileRevisionAsCommitNode } from './fileRevisionAsCommitNode.js';
+import { insertDateMarkers } from './utils/-webview/node.utils.js';
 
 export class FileHistoryNode
 	extends SubscribeableViewNode<'file-history', FileHistoryView>
@@ -59,7 +60,7 @@ export class FileHistoryNode
 	}
 
 	async getChildren(): Promise<ViewNode[]> {
-		this.view.description = `${this.view.groupedLabel ? `${this.view.groupedLabel}: ` : ''}${this.label}${
+		this.view.description = `${this.label}${
 			this.parent instanceof FileHistoryTrackerNode && !this.parent.followingEditor ? ' (pinned)' : ''
 		}`;
 
@@ -78,7 +79,7 @@ export class FileHistoryNode
 			this.uri.sha == null ? '' : `\n\n${this.uri.sha}`
 		}`;
 
-		this.view.description = `${this.view.groupedLabel ? `${this.view.groupedLabel}: ` : ''}${label}${
+		this.view.description = `${label}${
 			this.parent instanceof FileHistoryTrackerNode && !this.parent.followingEditor ? ' (pinned)' : ''
 		}`;
 
@@ -100,14 +101,14 @@ export class FileHistoryNode
 		}`;
 	}
 
-	@debug()
+	@trace()
 	protected subscribe(): Disposable | undefined {
 		const repo = this.view.container.git.getRepository(this.uri);
 		if (repo == null) return undefined;
 
 		const subscription = Disposable.from(
 			weakEvent(repo.onDidChange, this.onRepositoryChanged, this),
-			weakEvent(repo.onDidChangeFileSystem, this.onFileSystemChanged, this, [repo.watchFileSystem()]),
+			weakEvent(repo.onDidChangeWorkingTree, this.onWorkingTreeChanged, this, [repo.watchWorkingTree()]),
 			weakEvent(
 				configuration.onDidChange,
 				e => {
@@ -123,47 +124,36 @@ export class FileHistoryNode
 	}
 
 	protected override etag(): number {
-		return Date.now();
+		return this.view.container.git.getRepository(this.uri)?.etag ?? 0;
 	}
 
 	private onRepositoryChanged(e: RepositoryChangeEvent) {
-		if (
-			!e.changed(
-				RepositoryChange.Index,
-				RepositoryChange.Heads,
-				RepositoryChange.Remotes,
-				RepositoryChange.RemoteProviders,
-				RepositoryChange.PausedOperationStatus,
-				RepositoryChange.Unknown,
-				RepositoryChangeComparisonMode.Any,
-			)
-		) {
+		if (!e.changed('index', 'heads', 'remotes', 'remoteProviders', 'pausedOp', 'unknown')) {
 			return;
 		}
 
-		using scope = startLogScope(`${getLoggableName(this)}.onRepositoryChanged(e=${e.toString()})`, false);
-		Logger.debug(scope, 'triggering node refresh');
+		using scope = maybeStartScopedLogger(`${getLoggableName(this)}.onRepositoryChanged(e=${e.toString()})`);
+		scope?.trace('triggering node refresh');
 
 		void this.triggerChange(true);
 	}
 
-	private onFileSystemChanged(e: RepositoryFileSystemChangeEvent) {
+	private onWorkingTreeChanged(e: RepositoryWorkingTreeChangeEvent) {
 		if (this.folder) {
 			if (!some(e.uris, uri => uri.fsPath.startsWith(this.uri.fsPath))) return;
-		} else if (!e.uris.has(this.uri)) {
+		} else if (!some(e.uris, uri => areUrisEqual(uri, this.uri))) {
 			return;
 		}
 
-		using scope = startLogScope(
-			`${getLoggableName(this)}.onFileSystemChanged(e=${this.uri.toString(true)})`,
-			false,
+		using scope = maybeStartScopedLogger(
+			`${getLoggableName(this)}.onWorkingTreeChanged(e=${this.uri.toString(true)})`,
 		);
-		Logger.debug(scope, 'triggering node refresh');
+		scope?.trace('triggering node refresh');
 
 		void this.triggerChange(true);
 	}
 
-	@debug()
+	@trace()
 	override refresh(reset: boolean = false): void | { cancel: boolean } | Promise<void | { cancel: boolean }> {
 		if (reset) {
 			this._log = undefined;
@@ -261,10 +251,11 @@ export class FileHistoryNode
 				// Combine all the working/staged changes into single pseudo commits
 				const commits = map(
 					uniqueBy(
-						flatMap(fileStatuses, f => f.getPseudoCommits(this.view.container, currentUser)),
+						flatMap(fileStatuses, f => getStatusFilePseudoCommits(f, currentUser)),
 						c => c.sha,
 						(original, c) =>
-							original.with({
+							// oxlint-disable-next-line typescript/no-unnecessary-type-arguments -- required for tsc to infer the correct extension GitCommit type
+							original.with<typeof original>({
 								fileset: {
 									files: [...(original.fileset?.files ?? []), ...(c.fileset?.files ?? [])],
 									filtered: {
@@ -282,7 +273,7 @@ export class FileHistoryNode
 				children.push(...commits);
 			} else {
 				const [file] = fileStatuses;
-				const commits = file.getPseudoCommits(this.view.container, currentUser);
+				const commits = getStatusFilePseudoCommits(file, currentUser);
 				if (commits.length) {
 					children.push(
 						...commits.map(commit => new FileRevisionAsCommitNode(this.view, this, file, commit)),
@@ -322,7 +313,7 @@ export class FileHistoryNode
 			);
 
 			if (log.hasMore) {
-				children.push(new LoadMoreNode(this.view, this, children[children.length - 1]));
+				children.push(new LoadMoreNode(this.view, this, children.at(-1)!));
 			}
 		}
 

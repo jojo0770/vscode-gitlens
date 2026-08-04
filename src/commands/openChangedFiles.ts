@@ -1,13 +1,13 @@
 import type { Uri } from 'vscode';
 import { window } from 'vscode';
-import type { Container } from '../container';
-import { showGenericErrorMessage } from '../messages';
-import { getRepositoryOrShowPicker } from '../quickpicks/repositoryPicker';
-import { command } from '../system/-webview/command';
-import { openTextEditors } from '../system/-webview/vscode/editors';
-import { filterMap } from '../system/array';
-import { Logger } from '../system/logger';
-import { GlCommandBase } from './commandBase';
+import { filterMap } from '@gitlens/utils/array.js';
+import { Logger } from '@gitlens/utils/logger.js';
+import type { Container } from '../container.js';
+import { showGenericErrorMessage } from '../messages.js';
+import { getRepositoryOrShowPicker } from '../quickpicks/repositoryPicker.js';
+import { command } from '../system/-webview/command.js';
+import { openTextEditors } from '../system/-webview/vscode/editors.js';
+import { GlCommandBase } from './commandBase.js';
 
 export interface OpenChangedFilesCommandArgs {
 	uris?: Uri[];
@@ -24,7 +24,7 @@ export class OpenChangedFilesCommand extends GlCommandBase {
 
 		try {
 			if (args.uris == null) {
-				const repo = await getRepositoryOrShowPicker('Open All Changed Files');
+				const repo = await getRepositoryOrShowPicker(this.container, 'Open All Changed Files');
 				if (repo == null) return;
 
 				const status = await repo.git.status.getStatus();

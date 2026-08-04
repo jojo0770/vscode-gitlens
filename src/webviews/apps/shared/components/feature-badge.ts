@@ -2,25 +2,25 @@ import { consume } from '@lit/context';
 import type { TemplateResult } from 'lit';
 import { css, html, LitElement, nothing, unsafeCSS } from 'lit';
 import { customElement, property } from 'lit/decorators.js';
-import { proTrialLengthInDays, SubscriptionState } from '../../../../constants.subscription';
-import type { Source } from '../../../../constants.telemetry';
-import type { Subscription, SubscriptionUpgradeCommandArgs } from '../../../../plus/gk/models/subscription';
+import { pluralize } from '@gitlens/utils/string.js';
+import { proTrialLengthInDays, SubscriptionState } from '../../../../constants.subscription.js';
+import type { Source } from '../../../../constants.telemetry.js';
+import type { Subscription, SubscriptionUpgradeCommandArgs } from '../../../../plus/gk/models/subscription.js';
 import {
 	getSubscriptionProductPlanName,
 	getSubscriptionTimeRemaining,
 	isSubscriptionPaid,
 	isSubscriptionTrial,
-} from '../../../../plus/gk/utils/subscription.utils';
-import { createCommandLink } from '../../../../system/commands';
-import { pluralize } from '../../../../system/string';
-import type { PromosContext } from '../contexts/promos';
-import { promosContext } from '../contexts/promos';
-import type { GlPopover } from './overlays/popover';
-import { focusOutline } from './styles/lit/a11y.css';
-import { elementBase, linkBase } from './styles/lit/base.css';
-import './overlays/popover';
-import './overlays/tooltip';
-import './promo';
+} from '../../../../plus/gk/utils/subscription.utils.js';
+import { createCommandLink } from '../../../../system/commands.js';
+import type { PromosContext } from '../contexts/promos.js';
+import { promosContext } from '../contexts/promos.js';
+import type { GlPopover } from './overlays/popover.js';
+import { focusOutline } from './styles/lit/a11y.css.js';
+import { elementBase, linkBase } from './styles/lit/base.css.js';
+import './overlays/popover.js';
+import './overlays/tooltip.js';
+import './promo.js';
 
 declare global {
 	interface HTMLElementTagNameMap {
@@ -39,7 +39,7 @@ export class GlFeatureBadge extends LitElement {
 			:host {
 				/* position: relative; */
 				display: inline-block;
-				--gl-feature-badge-color: currentColor;
+				--gl-feature-badge-color: currentcolor;
 				--gl-feature-badge-border-color: var(--color-foreground--50);
 				--max-width: 40rem;
 			}
@@ -50,15 +50,16 @@ export class GlFeatureBadge extends LitElement {
 			}
 
 			.badge {
-				color: var(--gl-feature-badge-color, currentColor);
-				cursor: help;
+				display: inline-block;
+				padding: 0 0.8rem 0.1rem;
 				font-size: var(--gl-feature-badge-font-size, x-small);
-				font-variant: all-small-caps;
 				font-weight: 600;
-				border: 1px solid var(--gl-feature-badge-border-color, var(--color-foreground--50));
-				border-radius: 1rem;
-				padding: 0 0.8rem 0.1rem 0.8rem;
+				font-variant: all-small-caps;
+				color: var(--gl-feature-badge-color, currentColor);
 				white-space: nowrap;
+				cursor: help;
+				border: var(--gl-border-width) solid var(--gl-feature-badge-border-color, var(--color-foreground--50));
+				border-radius: 1rem;
 			}
 
 			.badge:focus-visible {
@@ -66,39 +67,39 @@ export class GlFeatureBadge extends LitElement {
 			}
 
 			.badge-icon {
+				margin-left: var(--gl-space-4);
 				font-weight: 400;
-				margin-left: 0.4rem;
 				white-space: nowrap;
 			}
 
 			.badge-popup {
 				display: flex;
 				flex-direction: column;
+				gap: var(--gl-space-6);
 				white-space: normal;
-				gap: 0.6rem;
 			}
 
 			.popup-header {
 				display: flex;
 				flex-direction: column;
-				margin-bottom: 0.4rem;
+				margin-bottom: var(--gl-space-4);
 			}
 
 			.popup-title {
-				font-size: 1.3rem;
+				font-size: var(--gl-font-base);
 				font-weight: 600;
 			}
 
 			.popup-subtitle {
+				margin-top: var(--gl-space-6);
 				font-size: smaller;
-				margin-top: 0.6rem;
 			}
 
 			.popup-content {
 				display: flex;
 				flex-direction: column;
-				border-top: 1px solid var(--color-foreground--25);
-				padding-top: 0.6rem;
+				padding-top: var(--gl-space-6);
+				border-top: var(--gl-border-width) solid var(--color-foreground--25);
 			}
 
 			.popup-content p {
@@ -106,24 +107,24 @@ export class GlFeatureBadge extends LitElement {
 			}
 
 			.popup-content .actions {
-				margin-top: 0.8rem;
-				margin-bottom: 0.6rem;
+				margin-top: var(--gl-space-8);
+				margin-bottom: var(--gl-space-6);
 			}
 
 			.popup-content .actions:first-child {
-				margin-bottom: 0.8rem;
+				margin-bottom: var(--gl-space-8);
 			}
 
 			.popup-content .actions :not(:first-child) {
-				margin-top: 0.4rem;
+				margin-top: var(--gl-space-4);
 			}
 
 			.popup-content .actions gl-button:not(:first-child) {
-				margin-top: 0.8rem;
+				margin-top: var(--gl-space-8);
 			}
 
 			.hint {
-				border-bottom: 1px dashed currentColor;
+				border-bottom: var(--gl-border-width) dashed currentcolor;
 			}
 		`,
 	];
@@ -158,7 +159,7 @@ export class GlFeatureBadge extends LitElement {
 
 	override render(): unknown {
 		return html`
-			<gl-popover placement=${this.placement} hoist>
+			<gl-popover placement=${this.placement}>
 				<span slot="anchor" class="badge" tabindex="0">${this.renderBadge()}</span>
 				<div slot="content" class="badge-popup" tabindex="-1">
 					${this.renderPopoverHeader()}${this.renderPopoverContent()}
@@ -194,13 +195,13 @@ export class GlFeatureBadge extends LitElement {
 			if (this.preview) {
 				return html`<div class="popup-header">
 					${text}<span class="popup-subtitle"
-						>Requires an account and may require GitLens Pro in the future</span
+						>Unlock this feature with an account and may require GitLens Pro in the future</span
 					>
 				</div>`;
 			}
 
 			return html`<div class="popup-header">
-				${text}<span class="popup-subtitle"> Requires GitLens Pro</span>
+				${text}<span class="popup-subtitle"> Unlock this feature with GitLens Pro</span>
 			</div>`;
 		}
 
@@ -211,7 +212,7 @@ export class GlFeatureBadge extends LitElement {
 		}
 
 		return html`<div class="popup-header">
-			${text}<span class="popup-subtitle"> Requires GitLens Pro for use on privately-hosted repos</span>
+			${text}<span class="popup-subtitle"> Unlock this feature for privately hosted repos with GitLens Pro</span>
 		</div>`;
 	}
 
@@ -223,7 +224,7 @@ export class GlFeatureBadge extends LitElement {
 			case SubscriptionState.Paid:
 				content = html`<p>
 					Your
-					<gl-tooltip hoist content="Show Account view">
+					<gl-tooltip content="Show Account view">
 						<a href="${createCommandLink('gitlens.showAccountView')}"
 							>${getSubscriptionProductPlanName(this.subscription?.plan.actual.id ?? 'pro')}</a
 						>
@@ -289,7 +290,7 @@ export class GlFeatureBadge extends LitElement {
 			default:
 				content = html`<p>
 						You only have access to
-						<gl-tooltip hoist content="Pro features that do not require an account"
+						<gl-tooltip content="Pro features that do not require an account"
 							><span class="hint">local</span></gl-tooltip
 						>
 						Pro features on publicly-hosted repos.

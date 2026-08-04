@@ -1,31 +1,33 @@
 import type { ConfigurationChangeEvent, TreeViewVisibilityChangeEvent } from 'vscode';
 import { Disposable, ThemeIcon, TreeItem, TreeItemCollapsibleState, Uri, window } from 'vscode';
-import type { OpenWalkthroughCommandArgs } from '../commands/walkthroughs';
-import type { LaunchpadViewConfig, ViewFilesLayout } from '../config';
-import { proBadge } from '../constants';
-import type { Container } from '../container';
-import { AuthenticationRequiredError } from '../errors';
-import { GitUri, unknownGitUri } from '../git/gitUri';
-import type { PullRequest } from '../git/models/pullRequest';
-import type { SubscriptionChangeEvent } from '../plus/gk/subscriptionService';
-import { ensurePlusFeaturesEnabled } from '../plus/gk/utils/-webview/plus.utils';
-import type { LaunchpadCommandArgs } from '../plus/launchpad/launchpad';
-import type { LaunchpadItem } from '../plus/launchpad/launchpadProvider';
-import { groupAndSortLaunchpadItems } from '../plus/launchpad/launchpadProvider';
-import type { LaunchpadGroup } from '../plus/launchpad/models/launchpad';
-import { launchpadGroupIconMap, launchpadGroupLabelMap } from '../plus/launchpad/models/launchpad';
-import { createCommand, executeCommand } from '../system/-webview/command';
-import { configuration } from '../system/-webview/configuration';
-import { CacheableChildrenViewNode } from './nodes/abstract/cacheableChildrenViewNode';
-import type { ClipboardType, ViewNode } from './nodes/abstract/viewNode';
-import { ContextValues, getViewNodeId } from './nodes/abstract/viewNode';
-import type { GroupingNode } from './nodes/groupingNode';
-import { LaunchpadViewGroupingNode } from './nodes/launchpadViewGroupingNode';
-import { getPullRequestChildren, getPullRequestTooltip } from './nodes/pullRequestNode';
-import type { GroupedViewContext } from './viewBase';
-import { disposeChildren, ViewBase } from './viewBase';
-import type { CopyNodeCommandArgs } from './viewCommands';
-import { registerViewCommand } from './viewCommands';
+import type { PullRequest } from '@gitlens/git/models/pullRequest.js';
+import { Logger } from '@gitlens/utils/logger.js';
+import type { OpenWalkthroughCommandArgs } from '../commands/walkthroughs.js';
+import type { LaunchpadViewConfig, ViewFilesLayout } from '../config.js';
+import { proBadge } from '../constants.js';
+import type { Container } from '../container.js';
+import { AuthenticationError, AuthenticationRequiredError, getPresentableErrorMessage } from '../errors.js';
+import { GitUri, unknownGitUri } from '../git/gitUri.js';
+import type { SubscriptionChangeEvent } from '../plus/gk/subscriptionService.js';
+import { ensurePlusFeaturesEnabled } from '../plus/gk/utils/-webview/plus.utils.js';
+import type { LaunchpadCommandArgs } from '../plus/launchpad/launchpad.js';
+import type { LaunchpadItem } from '../plus/launchpad/launchpadProvider.js';
+import { groupAndSortLaunchpadItems } from '../plus/launchpad/launchpadProvider.js';
+import type { LaunchpadGroup } from '../plus/launchpad/models/launchpad.js';
+import { launchpadGroupIconMap, launchpadGroupLabelMap } from '../plus/launchpad/models/launchpad.js';
+import { createCommand, executeCommand } from '../system/-webview/command.js';
+import { configuration } from '../system/-webview/configuration.js';
+import { CacheableChildrenViewNode } from './nodes/abstract/cacheableChildrenViewNode.js';
+import type { ClipboardType, ViewNode } from './nodes/abstract/viewNode.js';
+import { ContextValues, getViewNodeId } from './nodes/abstract/viewNode.js';
+import { MessageNode } from './nodes/common.js';
+import type { GroupingNode } from './nodes/groupingNode.js';
+import { LaunchpadViewGroupingNode } from './nodes/launchpadViewGroupingNode.js';
+import { getPullRequestChildren, getPullRequestTooltip } from './nodes/pullRequestNode.js';
+import type { GroupedViewContext } from './viewBase.js';
+import { disposeChildren, ViewBase } from './viewBase.js';
+import type { CopyNodeCommandArgs } from './viewCommands.js';
+import { registerViewCommand } from './viewCommands.js';
 
 export class LaunchpadItemNode extends CacheableChildrenViewNode<'launchpad-item', LaunchpadView> {
 	readonly repoPath: string | undefined;
@@ -91,9 +93,7 @@ export class LaunchpadItemNode extends CacheableChildrenViewNode<'launchpad-item
 				: TreeItemCollapsibleState.Collapsed,
 		);
 		item.contextValue = ContextValues.LaunchpadItem;
-		item.description = `\u00a0 ${lpi.repository.owner.login}/${lpi.repository.name}#${lpi.id} \u00a0 ${
-			lpi.codeSuggestionsCount > 0 ? ` $(gitlens-code-suggestion) ${lpi.codeSuggestionsCount}` : ''
-		}`;
+		item.description = `\u00a0 ${lpi.repository.owner.login}/${lpi.repository.name}#${lpi.id}`;
 		item.iconPath = lpi.author?.avatarUrl != null ? Uri.parse(lpi.author.avatarUrl) : undefined;
 		item.command = createCommand<[Omit<LaunchpadCommandArgs, 'command'>]>(
 			'gitlens.showLaunchpad',
@@ -110,7 +110,6 @@ export class LaunchpadItemNode extends CacheableChildrenViewNode<'launchpad-item
 			item.contextValue += '+pr';
 			item.tooltip = getPullRequestTooltip(lpi.underlyingPullRequest, {
 				idPrefix: `${lpi.repository.owner.login}/${lpi.repository.name}`,
-				codeSuggestionsCount: lpi.codeSuggestionsCount,
 			});
 		}
 
@@ -121,7 +120,7 @@ export class LaunchpadItemNode extends CacheableChildrenViewNode<'launchpad-item
 export class LaunchpadViewNode extends CacheableChildrenViewNode<
 	'launchpad',
 	LaunchpadView,
-	GroupingNode | LaunchpadItemNode
+	GroupingNode | LaunchpadItemNode | MessageNode
 > {
 	private disposable: Disposable;
 
@@ -151,7 +150,7 @@ export class LaunchpadViewNode extends CacheableChildrenViewNode<
 		this.children = undefined;
 	}
 
-	async getChildren(): Promise<(GroupingNode | LaunchpadItemNode)[]> {
+	async getChildren(): Promise<(GroupingNode | LaunchpadItemNode | MessageNode)[]> {
 		this.view.description = this.view.grouped
 			? `${this.view.name.toLocaleLowerCase()}\u00a0\u2022\u00a0 ${proBadge}`
 			: proBadge;
@@ -161,16 +160,23 @@ export class LaunchpadViewNode extends CacheableChildrenViewNode<
 			const access = await this.view.container.git.access('launchpad');
 			if (!access.allowed) return [];
 
-			const children: (GroupingNode | LaunchpadItemNode)[] = [];
+			const children: (GroupingNode | LaunchpadItemNode | MessageNode)[] = [];
 
 			const hasIntegrations = await this.view.container.launchpad.hasConnectedIntegration();
 			if (!hasIntegrations) return [];
 
+			let error: Error | undefined;
 			try {
 				const result = await this.view.container.launchpad.getCategorizedItems();
-				if (!result.items?.length) {
+				error = result.error;
+
+				if (!error && !result.items?.length) {
 					this.view.message = 'All done! Take a vacation.';
 					return [];
+				}
+
+				if (error != null) {
+					children.push(this.createErrorNode(error));
 				}
 
 				const uiGroups = groupAndSortLaunchpadItems(result.items);
@@ -213,6 +219,36 @@ export class LaunchpadViewNode extends CacheableChildrenViewNode<
 		return this.children;
 	}
 
+	private createErrorNode(error: Error): MessageNode {
+		if (error instanceof AggregateError) {
+			const firstAuthError = error.errors.find(e => e instanceof AuthenticationError);
+			error = firstAuthError ?? error.errors[0] ?? error;
+		}
+
+		const isAuthError = error instanceof AuthenticationError;
+		const errorMessage = getPresentableErrorMessage(error);
+
+		const tooltip = isAuthError
+			? `Authentication Required\n\n${errorMessage}\n\nReconnect your integration`
+			: error.name === 'HttpError' && 'status' in error && typeof error.status === 'number'
+				? `Unable to fully load items\n\n${error.status}: ${String(error)}`
+				: `Unable to fully load items\n\n${String(error)}`;
+
+		return new MessageNode(
+			this.view,
+			this,
+			isAuthError ? 'Authentication Required' : 'Unable to fully load items',
+			isAuthError
+				? errorMessage
+				: error.name === 'HttpError' && 'status' in error && typeof error.status === 'number'
+					? `${error.status}: ${String(error)}`
+					: String(error),
+			tooltip,
+			new ThemeIcon('warning'),
+			isAuthError ? ContextValues.LaunchpadErrorAuth : ContextValues.LaunchpadError,
+		);
+	}
+
 	getTreeItem(): TreeItem {
 		const item = new TreeItem('Launchpad', TreeItemCollapsibleState.Expanded);
 		return item;
@@ -242,13 +278,11 @@ export class LaunchpadView extends ViewBase<'launchpad', LaunchpadViewNode, Laun
 	}
 
 	protected override onVisibilityChanged(e: TreeViewVisibilityChangeEvent): void {
-		if (this._disposable == null) {
-			this._disposable = Disposable.from(
-				this.container.integrations.onDidChange(() => this.refresh(), this),
-				this.container.integrations.onDidChangeConnectionState(() => this.refresh(), this),
-				this.container.launchpad.onDidRefresh(() => this.refresh(), this),
-			);
-		}
+		this._disposable ??= Disposable.from(
+			this.container.integrations.onDidChange(() => this.refresh(), this),
+			this.container.integrations.onDidChangeConnectionState(() => this.refresh(), this),
+			this.container.launchpad.onDidRefresh(() => this.refresh(), this),
+		);
 
 		super.onVisibilityChanged(e);
 	}
@@ -303,6 +337,12 @@ export class LaunchpadView extends ViewBase<'launchpad', LaunchpadViewNode, Laun
 			),
 			registerViewCommand(this.getQualifiedCommand('setShowAvatarsOn'), () => this.setShowAvatars(true), this),
 			registerViewCommand(this.getQualifiedCommand('setShowAvatarsOff'), () => this.setShowAvatars(false), this),
+			registerViewCommand(
+				this.getQualifiedCommand('error.connectIntegrations'),
+				() => this.container.integrations.manageCloudIntegrations({ source: 'launchpad-view' }),
+				this,
+			),
+			registerViewCommand(this.getQualifiedCommand('error.openLogs'), () => Logger.showOutputChannel(), this),
 		];
 	}
 
@@ -310,6 +350,7 @@ export class LaunchpadView extends ViewBase<'launchpad', LaunchpadViewNode, Laun
 		const changed = super.filterConfigurationChanged(e);
 		if (
 			!changed &&
+			!configuration.changed(e, 'defaultCurrentUserNameStyle') &&
 			!configuration.changed(e, 'defaultDateFormat') &&
 			!configuration.changed(e, 'defaultDateLocale') &&
 			!configuration.changed(e, 'defaultDateShortFormat') &&

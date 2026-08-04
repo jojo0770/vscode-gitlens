@@ -1,23 +1,25 @@
 import type { CancellationToken, Disposable, Position, TextDocument, TextEditor } from 'vscode';
 import { Hover, languages, Range } from 'vscode';
-import type { FileAnnotationType } from '../config';
-import type { Container } from '../container';
-import { GitUri } from '../git/gitUri';
-import type { GitBlame } from '../git/models/blame';
-import type { GitCommit } from '../git/models/commit';
-import { changesMessage, detailsMessage } from '../hovers/hovers';
-import { configuration } from '../system/-webview/configuration';
-import { log } from '../system/decorators/log';
-import type { TrackedGitDocument } from '../trackers/trackedDocument';
-import type { DidChangeStatusCallback } from './annotationProvider';
-import { AnnotationProviderBase } from './annotationProvider';
-import type { ComputedHeatmap } from './annotations';
-import { getHeatmapColors } from './annotations';
+import type { GitBlame, ProgressiveGitBlame } from '@gitlens/git/models/blame.js';
+import type { GitCommit, GitCommitLine } from '@gitlens/git/models/commit.js';
+import { debug } from '@gitlens/utils/decorators/log.js';
+import type { FileAnnotationType } from '../config.js';
+import type { Container } from '../container.js';
+import { GitUri } from '../git/gitUri.js';
+import { getCommitDate } from '../git/utils/-webview/commit.utils.js';
+import { changesMessage, detailsMessage } from '../hovers/hovers.js';
+import { configuration } from '../system/-webview/configuration.js';
+import type { TrackedGitDocument } from '../trackers/trackedDocument.js';
+import type { DidChangeStatusCallback } from './annotationProvider.js';
+import { AnnotationProviderBase } from './annotationProvider.js';
+import type { ComputedHeatmap } from './annotations.js';
+import { getHeatmapColors } from './annotations.js';
 
 const maxSmallIntegerV8 = 2 ** 30 - 1; // Max number that can be stored in V8's smis (small integers)
 
 export abstract class BlameAnnotationProviderBase extends AnnotationProviderBase {
 	protected blame: Promise<GitBlame | undefined>;
+	protected progressive: Promise<ProgressiveGitBlame | undefined> | undefined;
 	protected hoverProviderDisposable: Disposable | undefined;
 
 	constructor(
@@ -29,7 +31,10 @@ export abstract class BlameAnnotationProviderBase extends AnnotationProviderBase
 	) {
 		super(container, onDidChangeStatus, annotationType, editor, trackedDocument);
 
-		this.blame = container.git.getBlame(this.trackedDocument.uri, editor.document);
+		this.progressive = container.git.getBlameProgressive(this.trackedDocument.uri, editor.document);
+		this.blame = this.progressive.then(p =>
+			p != null ? p.completed : container.git.getBlame(this.trackedDocument.uri, editor.document),
+		);
 
 		if (editor.document.isDirty) {
 			trackedDocument.setForceDirtyStateChangeOnNextDocumentChange();
@@ -45,6 +50,10 @@ export abstract class BlameAnnotationProviderBase extends AnnotationProviderBase
 	}
 
 	override async validate(): Promise<boolean> {
+		// If progressive blame is streaming, it's valid — don't block on the full result
+		const progressive = await this.progressive;
+		if (progressive != null) return true;
+
 		const blame = await this.blame;
 		return Boolean(blame?.lines.length);
 	}
@@ -59,20 +68,12 @@ export abstract class BlameAnnotationProviderBase extends AnnotationProviderBase
 		return blame;
 	}
 
-	@log({ args: false })
+	@debug({ args: false })
 	protected getComputedHeatmap(blame: GitBlame): ComputedHeatmap {
 		const dates: Date[] = [];
 
-		let commit;
-		let previousSha;
-		for (const l of blame.lines) {
-			if (previousSha === l.sha) continue;
-			previousSha = l.sha;
-
-			commit = blame.commits.get(l.sha);
-			if (commit == null) continue;
-
-			dates.push(commit.date);
+		for (const commit of blame.commits.values()) {
+			dates.push(getCommitDate(commit));
 		}
 
 		dates.sort((a, b) => a.getTime() - b.getTime());
@@ -111,7 +112,7 @@ export abstract class BlameAnnotationProviderBase extends AnnotationProviderBase
 			Array.isArray(lookupTable)
 				? lookupTable
 				: unified
-					? lookupTable.hot.concat(lookupTable.cold)
+					? [...lookupTable.hot, ...lookupTable.cold]
 					: date.getTime() < coldThresholdTimestamp
 						? lookupTable.cold
 						: lookupTable.hot;
@@ -169,14 +170,14 @@ export abstract class BlameAnnotationProviderBase extends AnnotationProviderBase
 		const blame = await this.getBlame();
 		if (blame == null) return undefined;
 
-		const line = blame.lines[position.line];
+		const blameLine = blame.lines[position.line];
 
-		const commit = blame.commits.get(line.sha);
+		const commit = blame.commits.get(blameLine.sha);
 		if (commit == null) return undefined;
 
 		const messages = (
 			await Promise.all([
-				providers.details ? this.getDetailsHoverMessage(commit, document) : undefined,
+				providers.details ? this.getDetailsHoverMessage(commit, document, blameLine) : undefined,
 				providers.changes
 					? changesMessage(
 							this.container,
@@ -184,6 +185,8 @@ export abstract class BlameAnnotationProviderBase extends AnnotationProviderBase
 							await GitUri.fromUri(document.uri),
 							position.line,
 							document,
+							'editor:hover',
+							blameLine,
 						)
 					: undefined,
 			])
@@ -195,11 +198,15 @@ export abstract class BlameAnnotationProviderBase extends AnnotationProviderBase
 		);
 	}
 
-	private async getDetailsHoverMessage(commit: GitCommit, document: TextDocument) {
+	private async getDetailsHoverMessage(commit: GitCommit, document: TextDocument, blameLine?: GitCommitLine) {
 		let editorLine = this.editor.selection.active.line;
-		const line = editorLine + 1;
-		const commitLine = commit.lines.find(l => l.line === line) ?? commit.lines[0];
-		editorLine = commitLine.originalLine - 1;
+		// Use the pre-resolved blame line when available (correctly remapped for dirty blame)
+		if (blameLine != null) {
+			editorLine = blameLine.originalLine - 1;
+		} else {
+			const line = editorLine + 1;
+			editorLine = (commit.lines.find(l => l.line === line) ?? commit.lines[0]).originalLine - 1;
+		}
 
 		const cfg = configuration.get('hovers');
 		return detailsMessage(this.container, commit, await GitUri.fromUri(document.uri), editorLine, {
@@ -208,6 +215,7 @@ export abstract class BlameAnnotationProviderBase extends AnnotationProviderBase
 			format: cfg.detailsMarkdownFormat,
 			pullRequests: cfg.pullRequests.enabled,
 			timeout: 250,
+			sourceName: 'editor:hover',
 		});
 	}
 }
@@ -218,7 +226,7 @@ function getRelativeAgeLookupTable(dates: Date[]) {
 	const half = Math.floor(dates.length / 2);
 	const median = dates.length % 2 ? dates[half].getTime() : (dates[half - 1].getTime() + dates[half].getTime()) / 2.0;
 
-	const newest = dates[dates.length - 1].getTime();
+	const newest = dates.at(-1)!.getTime();
 	let step = (newest - median) / 5;
 	for (let i = 5; i > 0; i--) {
 		lookup.push(median + step * i);

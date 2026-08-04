@@ -1,0 +1,105 @@
+import type { GitCommitStats } from '../models/commit.js';
+import type { GitContributionTiers, GitContributor, GitContributorsStats } from '../models/contributor.js';
+import type { GitUser } from '../models/user.js';
+
+export interface ContributorScoreOptions {
+	// Thresholds
+	recentThresholdInDays: number;
+	maxScoreNormalization: number;
+
+	// Time-based weights
+	recentWeight: number;
+
+	// Impact weights
+	additionsWeight: number;
+	deletionsWeight: number;
+}
+
+export const defaultContributorScoreOptions: ContributorScoreOptions = {
+	recentThresholdInDays: 30,
+	recentWeight: 1.5,
+	additionsWeight: 0.8,
+	deletionsWeight: 1.2,
+	maxScoreNormalization: 1000,
+};
+
+export function calculateContributionScore(
+	stats: GitCommitStats | undefined,
+	timestamp: number,
+	options: ContributorScoreOptions = defaultContributorScoreOptions,
+	now: number = Date.now(),
+): number {
+	if (stats == null) return 0;
+
+	const ageInDays = (now - timestamp) / (24 * 3600 * 1000);
+
+	// Time decay factor (exponential decay)
+	const recencyScore = Math.exp(-ageInDays / options.recentThresholdInDays);
+
+	// Impact score with weighted components
+	const impactScore = stats.additions * options.additionsWeight + stats.deletions * options.deletionsWeight;
+
+	return Math.min(impactScore * (1 + recencyScore * options.recentWeight), options.maxScoreNormalization);
+}
+
+export function calculateDistribution<T extends string>(
+	stats: GitContributorsStats | undefined,
+	prefix: T,
+): Record<`${typeof prefix}${GitContributionTiers}`, number> {
+	if (stats == null) return {} as unknown as Record<`${typeof prefix}${GitContributionTiers}`, number>;
+
+	const distribution: Record<`${string}${GitContributionTiers}`, number> = {
+		[`${prefix}[1]`]: 0,
+		[`${prefix}[2-5]`]: 0,
+		[`${prefix}[6-10]`]: 0,
+		[`${prefix}[11-50]`]: 0,
+		[`${prefix}[51-100]`]: 0,
+		[`${prefix}[101+]`]: 0,
+	};
+
+	for (const c of stats.contributions) {
+		if (c === 1) {
+			distribution[`${prefix}[1]`]++;
+		} else if (c <= 5) {
+			distribution[`${prefix}[2-5]`]++;
+		} else if (c <= 10) {
+			distribution[`${prefix}[6-10]`]++;
+		} else if (c <= 50) {
+			distribution[`${prefix}[11-50]`]++;
+		} else if (c <= 100) {
+			distribution[`${prefix}[51-100]`]++;
+		} else {
+			distribution[`${prefix}[101+]`]++;
+		}
+	}
+
+	return distribution;
+}
+
+export function matchContributor(c: GitContributor, user: GitUser): boolean {
+	return c.name === user.name && c.email === user.email && c.username === user.username;
+}
+
+/** Appends `Co-authored-by:` trailers for the given coauthors to a commit message, replacing
+ *  any existing trailer block. Each coauthor is the `Name <email>` form (GitContributor.coauthor). */
+export function appendCoauthorsToMessage(message: string, coauthors: Iterable<string>): string {
+	const index = message.indexOf('Co-authored-by: ');
+	if (index !== -1) {
+		message = message.substring(0, index - 1).trimEnd();
+	}
+
+	for (const coauthor of coauthors) {
+		let newlines;
+		if (message.includes('Co-authored-by: ')) {
+			newlines = '\n';
+		} else if (message.length !== 0 && message.endsWith('\n')) {
+			newlines = '\n\n';
+		} else {
+			newlines = '\n\n\n';
+		}
+
+		message += `${newlines}Co-authored-by: ${coauthor}`;
+	}
+
+	return message;
+}

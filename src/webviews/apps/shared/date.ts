@@ -1,1 +1,1 @@
-export * from '../../../system/date';
+export * from '@gitlens/utils/date.js';

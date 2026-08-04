@@ -1,23 +1,25 @@
 import type { TextEditor, Uri } from 'vscode';
-import type { Container } from '../container';
-import { executeGitCommand } from '../git/actions';
-import { revealCommit } from '../git/actions/commit';
-import { GitUri } from '../git/gitUri';
-import type { GitCommit, GitStashCommit } from '../git/models/commit';
-import type { GitLog } from '../git/models/log';
+import type { GitCommit, GitStashCommit } from '@gitlens/git/models/commit.js';
+import type { GitLog } from '@gitlens/git/models/log.js';
+import { Logger } from '@gitlens/utils/logger.js';
+import type { Source } from '../constants.telemetry.js';
+import type { Container } from '../container.js';
+import { executeGitCommand } from '../git/actions.js';
+import { revealCommit } from '../git/actions/commit.js';
+import { GitUri } from '../git/gitUri.js';
+import { getCommitGitUri } from '../git/utils/-webview/commit.utils.js';
 import {
 	showCommitNotFoundWarningMessage,
 	showFileNotUnderSourceControlWarningMessage,
 	showGenericErrorMessage,
 	showLineUncommittedWarningMessage,
-} from '../messages';
-import { command } from '../system/-webview/command';
-import { createMarkdownCommandLink } from '../system/commands';
-import { Logger } from '../system/logger';
-import { ActiveEditorCachedCommand } from './commandBase';
-import { getCommandUri } from './commandBase.utils';
-import type { CommandContext } from './commandContext';
-import { isCommandContextViewNodeHasCommit } from './commandContext.utils';
+} from '../messages.js';
+import { command } from '../system/-webview/command.js';
+import { createMarkdownCommandLink } from '../system/commands.js';
+import { ActiveEditorCachedCommand } from './commandBase.js';
+import { getCommandUri } from './commandBase.utils.js';
+import type { CommandContext } from './commandContext.js';
+import { isCommandContextViewNodeHasCommit } from './commandContext.utils.js';
 
 export interface ShowQuickCommitCommandArgs {
 	repoPath?: string;
@@ -25,14 +27,19 @@ export interface ShowQuickCommitCommandArgs {
 	commit?: GitCommit | GitStashCommit;
 	repoLog?: GitLog;
 	revealInView?: boolean;
+	source?: Source;
 }
 
 @command()
 export class ShowQuickCommitCommand extends ActiveEditorCachedCommand {
-	static createMarkdownCommandLink(sha: string, repoPath?: string): string;
+	static createMarkdownCommandLink(sha: string, repoPath?: string, source?: Source): string;
 	static createMarkdownCommandLink(args: ShowQuickCommitCommandArgs): string;
-	static createMarkdownCommandLink(argsOrSha: ShowQuickCommitCommandArgs | string, repoPath?: string): string {
-		const args = typeof argsOrSha === 'string' ? { sha: argsOrSha, repoPath: repoPath } : argsOrSha;
+	static createMarkdownCommandLink(
+		argsOrSha: ShowQuickCommitCommandArgs | string,
+		repoPath?: string,
+		source?: Source,
+	): string {
+		const args = typeof argsOrSha === 'string' ? { sha: argsOrSha, repoPath: repoPath, source: source } : argsOrSha;
 		return createMarkdownCommandLink<ShowQuickCommitCommandArgs>('gitlens.showQuickCommitDetails', args);
 	}
 
@@ -47,8 +54,7 @@ export class ShowQuickCommitCommand extends ActiveEditorCachedCommand {
 		}
 
 		if (context.type === 'viewItem') {
-			args = { ...args };
-			args.sha = context.node.uri.sha;
+			args = { ...args, sha: context.node.uri.sha };
 
 			if (isCommandContextViewNodeHasCommit(context)) {
 				args.commit = context.node.commit;
@@ -59,6 +65,8 @@ export class ShowQuickCommitCommand extends ActiveEditorCachedCommand {
 	}
 
 	async execute(editor?: TextEditor, uri?: Uri, args?: ShowQuickCommitCommandArgs): Promise<void> {
+		args = { ...args };
+
 		let gitUri;
 		let repoPath;
 		if (args?.commit == null) {
@@ -73,19 +81,12 @@ export class ShowQuickCommitCommand extends ActiveEditorCachedCommand {
 				repoPath = gitUri.repoPath!;
 			}
 		} else {
-			if (args.sha == null) {
-				args.sha = args.commit.sha;
-			}
+			args.sha ??= args.commit.sha;
 
-			gitUri = args.commit.getGitUri();
+			gitUri = getCommitGitUri(args.commit);
 			repoPath = args.commit.repoPath;
-
-			if (uri == null) {
-				uri = args.commit.file?.uri;
-			}
 		}
 
-		args = { ...args };
 		if (args.sha == null) {
 			if (editor == null) return;
 
